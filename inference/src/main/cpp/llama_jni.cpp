@@ -6,12 +6,10 @@
 #include <mutex>
 
 #include "llama.h"
-#include "common.h"
+#include "llama-grammar.h"
 #include "log.h"
 
 // ── Per-model state ─────────────────────────────────────────────────────────
-// One instance per loaded model. The model pointer doubles as the instance
-// key passed back to Kotlin and returned to native on subsequent calls.
 
 struct ModelInstance {
     llama_model   *model   = nullptr;
@@ -31,8 +29,6 @@ static ModelInstance *jlong_to_instance(jlong handle) {
 }
 
 // ── nativeLoadModel ─────────────────────────────────────────────────────────
-// Loads a GGUF model and creates a context. Returns an opaque handle (jlong)
-// that Kotlin passes back for inference/stop/unload.
 
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_pocketfinancer_inference_LlamaEngine_nativeLoadModel(
@@ -48,7 +44,7 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeLoadModel(
     llama_model_params model_params = llama_model_default_params();
     model_params.n_gpu_layers = n_gpu_layers;
 
-    llama_model *model = llama_load_model_from_file(path, model_params);
+    llama_model *model = llama_model_load_from_file(path, model_params);
     env->ReleaseStringUTFChars(jpath, path);
 
     if (!model) {
@@ -58,7 +54,7 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeLoadModel(
 
     // Context params
     llama_context_params ctx_params = llama_context_default_params();
-    ctx_params.n_ctx = n_ctx;
+    ctx_params.n_ctx   = n_ctx;
     ctx_params.n_batch = 512;
     ctx_params.n_threads = 4;
     ctx_params.n_threads_batch = 4;
@@ -66,10 +62,10 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeLoadModel(
     ctx_params.type_k = GGML_TYPE_Q8_0;
     ctx_params.type_v = GGML_TYPE_Q8_0;
 
-    llama_context *ctx = llama_new_context_with_model(model, ctx_params);
+    llama_context *ctx = llama_init_from_model(model, ctx_params);
     if (!ctx) {
         LOG_ERR("nativeLoadModel: failed to create context\n");
-        llama_free_model(model);
+        llama_model_free(model);
         return 0;
     }
 
@@ -84,18 +80,16 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeLoadModel(
 }
 
 // ── nativeCompletion ────────────────────────────────────────────────────────
-// Runs a single completion pass. Kotlin calls this twice for two-phase
-// generation (thinking pass → grammar pass). Each call is independent.
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_pocketfinancer_inference_LlamaEngine_nativeCompletion(
     JNIEnv *env, jclass /*clazz*/,
     jlong handle,
     jstring jprompt,
-    jstring jgrammar,        // null = no grammar
+    jstring jgrammar,
     jint    n_predict,
     jfloat  temperature,
-    jstring jstop) {          // stop token (e.g. "</think>"), null = none
+    jstring jstop) {
 
     auto *inst = jlong_to_instance(handle);
     if (!inst || !inst->ctx) {
@@ -119,72 +113,79 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeCompletion(
     int n_ctx = llama_n_ctx(inst->ctx);
     int n_kv_req = n_tokens + n_predict;
     if (n_kv_req > n_ctx) {
-        // Trim prompt from the left if too long
-        int keep = std::min(n_tokens, 64);  // keep last 64 tokens of prompt
+        int keep = std::min(n_tokens, 64);
         int to_delete = n_tokens - keep;
         llama_kv_cache_seq_rm(inst->ctx, 0, -1, -1);
         tokens.erase(tokens.begin(), tokens.begin() + to_delete);
         n_tokens = (int)tokens.size();
     }
 
+    // Result buffer
+    std::string result;
+
     // Prefill prompt
     llama_batch batch = llama_batch_get_one(tokens.data(), n_tokens);
     if (llama_decode(inst->ctx, batch) != 0) {
         LOG_ERR("nativeCompletion: prefill decode failed\n");
-        goto cleanup;
+        env->ReleaseStringUTFChars(jprompt, prompt);
+        if (grammar) env->ReleaseStringUTFChars(jgrammar, grammar);
+        if (stop)    env->ReleaseStringUTFChars(jstop, stop);
+        return env->NewStringUTF(result.c_str());
     }
 
-    // Grammar
-    llama_grammar *gparser = nullptr;
-    if (grammar && strlen(grammar) > 0) {
-        gparser = llama_grammar_init_impl(
-            nullptr, grammar, "root", inst->vocab, false, true);
-    }
+    {
+        // ── Sampler ──
+        llama_sampler_chain_params sparams = llama_sampler_chain_default_params();
+        sparams.no_perf = true;
 
-    // Decode
-    std::string result;
-    for (int i = 0; i < n_predict; i++) {
-        if (inst->should_stop.load()) {
-            break;
-        }
+        llama_sampler *smpl = llama_sampler_chain_init(sparams);
 
-        // Sample
-        const float *logits = llama_get_logits_ith(inst->ctx, -1);
-
-        llama_token new_token;
-        if (gparser) {
-            llama_grammar_accept_token(inst->ctx, gparser, llama_get_logits_ith(inst->ctx, -1));
-            new_token = llama_grammar_sample(gparser, inst->ctx, logits, temperature);
+        if (grammar && strlen(grammar) > 0) {
+            // Grammar-driven: grammar sampler replaces greedy + distribution
+            llama_sampler_chain_add(smpl, llama_sampler_init_grammar(
+                inst->vocab, grammar, "root"));
         } else {
-            // Greedy sampling with small temperature
-            new_token = llama_sample_token_greedy(inst->ctx, logits, temperature);
+            // Greedy (deterministic) sampling with temperature
+            llama_sampler_chain_add(smpl, llama_sampler_init_greedy());
+            if (temperature > 0.0f) {
+                llama_sampler_chain_add(smpl, llama_sampler_init_temp(temperature));
+                llama_sampler_chain_add(smpl, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
+            }
         }
 
-        if (llama_vocab_is_eog(inst->vocab, new_token)) {
-            break;
+        // ── Decode loop ──
+        for (int i = 0; i < n_predict; i++) {
+            if (inst->should_stop.load()) {
+                break;
+            }
+
+            llama_token new_token = llama_sampler_sample(smpl, inst->ctx, -1);
+
+            if (llama_vocab_is_eog(inst->vocab, new_token)) {
+                break;
+            }
+
+            char buf[256];
+            int n = llama_token_to_piece(inst->vocab, new_token, buf, sizeof(buf), 0, true);
+            if (n > 0) {
+                result.append(buf, n);
+            }
+
+            // Check stop string
+            if (stop && strlen(stop) > 0 && result.find(stop) != std::string::npos) {
+                break;
+            }
+
+            // Decode single token
+            batch = llama_batch_get_one(&new_token, 1);
+            if (llama_decode(inst->ctx, batch) != 0) {
+                break;
+            }
         }
 
-        char buf[256];
-        int n = llama_token_to_piece(inst->vocab, new_token, buf, sizeof(buf), 0, true);
-        if (n > 0) {
-            result.append(buf, n);
-        }
-
-        // Check stop string
-        if (stop && strlen(stop) > 0 && result.find(stop) != std::string::npos) {
-            break;
-        }
-
-        // Decode single token
-        batch = llama_batch_get_one(&new_token, 1);
-        if (llama_decode(inst->ctx, batch) != 0) {
-            break;
-        }
+        llama_sampler_free(smpl);
     }
 
-    if (gparser) llama_grammar_free(gparser);
-
-cleanup:
     env->ReleaseStringUTFChars(jprompt, prompt);
     if (grammar) env->ReleaseStringUTFChars(jgrammar, grammar);
     if (stop)    env->ReleaseStringUTFChars(jstop, stop);
@@ -193,7 +194,6 @@ cleanup:
 }
 
 // ── nativeStop ──────────────────────────────────────────────────────────────
-// Signals the running completion loop to exit at the next token boundary.
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_pocketfinancer_inference_LlamaEngine_nativeStop(
@@ -205,7 +205,6 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeStop(
 }
 
 // ── nativeUnloadModel ───────────────────────────────────────────────────────
-// Frees the model, context, and instance.
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_pocketfinancer_inference_LlamaEngine_nativeUnloadModel(
@@ -218,7 +217,7 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeUnloadModel(
         inst->ctx = nullptr;
     }
     if (inst->model) {
-        llama_free_model(inst->model);
+        llama_model_free(inst->model);
         inst->model = nullptr;
     }
     llama_backend_free();
@@ -226,8 +225,6 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeUnloadModel(
 }
 
 // ── nativeGetModelSize ──────────────────────────────────────────────────────
-// Returns the file size of a GGUF model without loading it (used for download
-// progress UI).
 
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_pocketfinancer_inference_LlamaEngine_nativeGetModelSize(
@@ -236,13 +233,12 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeGetModelSize(
     const char *path = env->GetStringUTFChars(jpath, nullptr);
     if (!path) return -1;
 
-    // Count parameters without creating a context (lightweight)
     llama_model_params mparams = llama_model_default_params();
-    auto *model = llama_load_model_from_file(path, mparams);
+    auto *model = llama_model_load_from_file(path, mparams);
     jlong size = -1;
     if (model) {
         size = (jlong)llama_model_size(model);
-        llama_free_model(model);
+        llama_model_free(model);
     }
     env->ReleaseStringUTFChars(jpath, path);
     return size;
