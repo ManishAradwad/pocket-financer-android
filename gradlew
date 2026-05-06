@@ -39,6 +39,7 @@ die () {
 } >&2
 
 OS_NAME=$(uname -s)
+IS_WINDOWS=false
 case "$OS_NAME" in
     CYGWIN* | MINGW* | MSYS* )
         IS_WINDOWS=true
@@ -80,7 +81,7 @@ if [ "$(uname)" = "Darwin" ] && [ "$MAX_FD" = "maximum" ]; then
     fi
 fi
 
-if $IS_WINDOWS ; then
+if [ "$IS_WINDOWS" = "true" ] ; then
     JAVACMD="$APP_HOME/gradlew.bat"
 fi
 
