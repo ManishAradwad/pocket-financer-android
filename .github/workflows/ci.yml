@@ -9,7 +9,6 @@ on:
       - main
   workflow_dispatch:
 
-# Cancel in-flight runs for the same ref when a new commit arrives.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -17,13 +16,45 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+  ANDROID_HOME: /usr/local/lib/android/sdk
+  GRADLE_OPTS: -Dorg.gradle.daemon=false -Dkotlin.incremental=false
+  NDK_VERSION: "27.3.13750724"
+
 jobs:
   # ──────────────────────────────────────────────────────────────────────
-  # Kotlin lint + detekt. Runs unconditionally for fast quality signal.
+  # Verify the Gradle wrapper is present and the project resolves.
+  # Fastest gate — runs first so broken builds fail immediately.
+  # ──────────────────────────────────────────────────────────────────────
+  verify-gradle:
+    name: Verify Gradle Wrapper
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Validate wrapper
+        run: |
+          if [ ! -f "gradlew" ]; then
+            echo "ERROR: gradlew not found — generate it with 'gradle wrapper'"
+            exit 1
+          fi
+          if [ ! -f "gradle/wrapper/gradle-wrapper.jar" ]; then
+            echo "ERROR: gradle-wrapper.jar not found"
+            exit 1
+          fi
+          chmod +x gradlew
+          echo "Gradle wrapper OK"
+
+  # ──────────────────────────────────────────────────────────────────────
+  # Kotlin lint and static analysis. Runs unconditionally.
+  # Soft-fail until ktlint is fully configured — warnings only.
   # ──────────────────────────────────────────────────────────────────────
   lint:
     name: Kotlin Lint
     runs-on: ubuntu-latest
+    continue-on-error: true  # soft-fail until ktlint is fully configured
     steps:
       - name: Check out code
         uses: actions/checkout@v4
@@ -37,12 +68,11 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Run ktlint
-        run: ./gradlew ktlintCheck --no-daemon || true
-        # Soft-fail until ktlint is configured; hard-fail with ./gradlew ktlintCheck
+      - name: Run Gradle lint checks
+        run: ./gradlew lintDebug --no-daemon --warning-mode all
 
   # ──────────────────────────────────────────────────────────────────────
-  # Unit tests. Runs unconditionally.
+  # Unit tests across all modules. Runs unconditionally.
   # ──────────────────────────────────────────────────────────────────────
   test:
     name: Unit Tests
@@ -61,17 +91,36 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
 
       - name: Run unit tests
-        run: ./gradlew test --no-daemon
+        run: ./gradlew test --no-daemon --continue
+
+      - name: Publish test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ github.run_number }}
+          path: '**/build/reports/tests/**'
+          retention-days: 3
 
   # ──────────────────────────────────────────────────────────────────────
-  # Android release build. Runs after lint + test pass. Produces a
-  # signed APK with a dummy keystore (CI exercises the signing pipeline
-  # without real credentials).
+  # Android release build (APK). Runs after lint + test pass.
+  #
+  # SDK setup: uses the pre-installed Android SDK on GitHub's ubuntu-latest
+  # runner (located at $ANDROID_SDK_ROOT). The runner includes:
+  #   - platforms;android-35 (we need 36, so we install it)
+  #   - build-tools (we install 36.1.0)
+  #   - cmdline-tools (for sdkmanager)
+  # NDK: specified via ndkVersion in build.gradle.kts — AGP auto-downloads
+  # the exact version if it is not cached.
   # ──────────────────────────────────────────────────────────────────────
   build-android:
     name: Android Release Build
     runs-on: ubuntu-latest
-    needs: [lint, test]
+    needs: [verify-gradle, lint, test]
+    if: |
+      !cancelled() &&
+      (needs.verify-gradle.result == 'success') &&
+      (needs.lint.result == 'success' || needs.lint.result == 'skipped') &&
+      (needs.test.result == 'success')
     steps:
       - name: Check out code
         uses: actions/checkout@v4
@@ -85,9 +134,29 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Install NDK
+      - name: Install Android SDK components
         run: |
-          ${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager --install "ndk;27.3.13750724"
+          # GitHub's ubuntu-latest has cmdline-tools and a base SDK.
+          # Install the specific platform and build-tools we need.
+          if [ -d "${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin" ]; then
+            SDKMANAGER="${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager"
+          elif [ -d "${ANDROID_SDK_ROOT}/cmdline-tools/tools/bin" ]; then
+            SDKMANAGER="${ANDROID_SDK_ROOT}/cmdline-tools/tools/bin/sdkmanager"
+          else
+            echo "cmdline-tools not found in expected location"
+            exit 1
+          fi
+
+          echo "Installing SDK platform 36 and build-tools 36.1.0..."
+          yes | $SDKMANAGER --install \
+            "platforms;android-36" \
+            "build-tools;36.1.0" \
+            "ndk;${NDK_VERSION}" 2>&1 | tail -5
+
+          echo "SDK components installed:"
+          ls "${ANDROID_SDK_ROOT}/platforms/" 2>/dev/null || echo "  (no platforms dir)"
+          ls "${ANDROID_SDK_ROOT}/build-tools/" 2>/dev/null || echo "  (no build-tools dir)"
+          ls "${ANDROID_SDK_ROOT}/ndk/" 2>/dev/null || echo "  (no ndk dir)"
 
       - name: Generate CI keystore
         working-directory: app
@@ -107,7 +176,7 @@ jobs:
         env:
           APP_RELEASE_STORE_PASSWORD: ci-dummy-password
           APP_RELEASE_KEY_PASSWORD: ci-dummy-password
-        run: ./gradlew assembleRelease --no-daemon
+        run: ./gradlew assembleRelease --no-daemon --stacktrace
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
@@ -115,3 +184,11 @@ jobs:
           name: pocketfinancer-release-apk-${{ github.run_number }}
           path: app/build/outputs/apk/release/app-release.apk
           retention-days: 7
+
+      - name: Upload build reports (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-reports-${{ github.run_number }}
+          path: '**/build/reports/**'
+          retention-days: 3
