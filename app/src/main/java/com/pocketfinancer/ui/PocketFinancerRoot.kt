@@ -20,6 +20,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.pocketfinancer.ui.navigation.Screen
+import com.pocketfinancer.ui.settings.SettingsScreen
 import com.pocketfinancer.ui.theme.M3_OnSecondaryContainer
 import com.pocketfinancer.ui.theme.M3_OnSurface
 import com.pocketfinancer.ui.theme.M3_OnSurfaceVariant
@@ -88,7 +89,7 @@ fun PocketFinancerRoot() {
                 composable(Screen.Home.route) { PlaceholderScreen("Home Dashboard") }
                 composable(Screen.Transactions.route) { PlaceholderScreen("Transactions") }
                 composable(Screen.Insights.route) { PlaceholderScreen("Insights") }
-                composable(Screen.Settings.route) { PlaceholderScreen("Settings") }
+                composable(Screen.Settings.route) { SettingsScreen() }
             }
         }
     }
