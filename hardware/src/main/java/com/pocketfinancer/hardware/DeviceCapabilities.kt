@@ -80,7 +80,7 @@ class DeviceCapabilities @Inject constructor(
         val gpu: GpuInfo?,
         val cpu: CpuInfo?,
         val storage: StorageInfo,
-        val isGpuAccelerationSupported: Boolean
+        val isHighPerformanceDevice: Boolean
     )
 
     companion object {
@@ -218,10 +218,11 @@ class DeviceCapabilities @Inject constructor(
      *   across ALL GPU vendors (Adreno, Mali, PowerVR) — see ggml-org/#9464.
      * - The app currently builds llama.cpp CPU-only (CMakeLists sets all GPU
      *   backends OFF) and calls loadModel() with gpuLayers=0.
+     * - Callers in SettingsViewModel therefore always pass gpuLayers=0.
      *
      * Returns false if CPU info cannot be read (emulators, headless envs).
      */
-    fun isGpuAccelerationSupported(): Boolean {
+    fun isHighPerformanceDevice(): Boolean {
         val cpu = getCpuInfo() ?: return false
         return cpu.hasI8mm && cpu.hasDotProd
     }
@@ -276,8 +277,8 @@ class DeviceCapabilities @Inject constructor(
         val storage = checkStorage()
         val gpu = try { getGpuInfo() } catch (_: Exception) { null }
         val cpu = try { getCpuInfo() } catch (_: Exception) { null }
-        val gpuAccel = isGpuAccelerationSupported()
+        val highPerf = isHighPerformanceDevice()
 
-        return DeviceInfo(ram, ram, tier, gpu, cpu, storage, gpuAccel)
+        return DeviceInfo(ram, ram, tier, gpu, cpu, storage, highPerf)
     }
 }

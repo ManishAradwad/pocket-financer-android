@@ -145,7 +145,7 @@ class SettingsViewModel @Inject constructor(
                 val device = _state.value.deviceInfo
                 if (device != null) {
                     append("RAM: ${"%.1f".format(device.ramGb)} GB (tier: ${device.ramTier})\n")
-                    append("GPU accel: ${device.isGpuAccelerationSupported}\n")
+                    append("High-perf CPU: ${device.isHighPerformanceDevice}\n")
                     append("Free storage: ${"%.1f".format(device.storage.availableGb)} GB\n")
                 }
             }
@@ -159,12 +159,10 @@ class SettingsViewModel @Inject constructor(
                 return@launch
             }
 
-            val gpuLayers = if (_state.value.deviceInfo?.isGpuAccelerationSupported == true) 99 else 0
-
             val result = llamaEngine.loadModel(
                 path = path,
                 contextSize = 1024,
-                gpuLayers = gpuLayers
+                gpuLayers = 0
             )
 
             result.fold(
