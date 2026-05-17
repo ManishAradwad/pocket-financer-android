@@ -327,6 +327,18 @@ private fun EngineCard(state: SettingsUiState, viewModel: SettingsViewModel) {
         }
 
         // Test output
+        state.testProgress?.let { progress ->
+            Text(
+                text = progress,
+                color = M3_OnSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold),
+                fontFamily = FontFamily.Monospace,
+                modifier = Modifier.padding(top = 8.dp)
+            )
+        }
+        state.thinkingOutput?.let { thinking ->
+            OutputBox(title = "Thinking (<think> block)", content = thinking.take(2000))
+        }
         state.testResult?.let { result ->
             OutputBox(title = "Raw Output", content = result)
         }

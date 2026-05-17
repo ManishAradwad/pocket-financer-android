@@ -235,6 +235,115 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeCompletion(
 
 // ── nativeApplyChatTemplate ─────────────────────────────────────────────────
 
+/**
+ * Simple lightweight JSON array of objects parser for chat messages.
+ * Input format: [{"role":"...","content":"..."},...]
+ * Returns number of messages parsed, or 0 on failure.
+ * Messages are allocated at the given pointer (must hold up to 16 messages).
+ */
+static int parse_chat_messages_json(const char *json, llama_chat_message *out, int max_msgs) {
+    int count = 0;
+    const char *p = json;
+
+    // Skip whitespace and opening bracket
+    while (*p && *p != '[') { if (*p > ' ') break; p++; }
+    if (*p != '[') return 0;
+    p++;
+
+    while (*p && count < max_msgs) {
+        // Skip whitespace and opening brace
+        while (*p && *p != '{') { if (*p == ']') return count; p++; }
+        if (*p != '{') break;
+        p++;
+
+        const char *role_val = nullptr;
+        const char *content_val = nullptr;
+        int role_len = 0, content_len = 0;
+
+        // Parse key-value pairs
+        while (*p && *p != '}') {
+            // Skip whitespace
+            while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+
+            // Find quoted key
+            if (*p != '"') { p++; continue; }
+            p++; // skip opening quote
+
+            const char *key_start = p;
+            while (*p && *p != '"') p++;
+            if (*p != '"') return count;
+            int key_len = (int)(p - key_start);
+            p++; // skip closing quote
+
+            // Skip colon
+            while (*p && *p != ':') p++;
+            if (*p == ':') p++;
+            while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+
+            // Parse string value
+            if (*p == '"') {
+                p++; // skip opening quote
+                const char *val_start = p;
+                while (*p && *p != '"') {
+                    if (*p == '\\') p++; // skip escaped char
+                    p++;
+                }
+                int val_len = (int)(p - val_start);
+                if (*p == '"') p++; // skip closing quote
+
+                if (key_len == 4 && strncmp(key_start, "role", 4) == 0) {
+                    role_val = val_start;
+                    role_len = val_len;
+                } else if (key_len == 7 && strncmp(key_start, "content", 7) == 0) {
+                    content_val = val_start;
+                    content_len = val_len;
+                }
+            }
+
+            // Skip comma
+            while (*p && *p != ',' && *p != '}') p++;
+            if (*p == ',') p++;
+        }
+        if (*p == '}') p++;
+
+        if (role_val && content_val && count < max_msgs) {
+            // Allocate and copy strings
+            char *role_copy = (char *)malloc(role_len + 1);
+            char *content_copy = (char *)malloc(content_len + 1);
+            if (role_copy && content_copy) {
+                memcpy(role_copy, role_val, role_len);
+                role_copy[role_len] = '\0';
+                // Unescape JSON escapes in content (simple \n handling)
+                int ci = 0;
+                for (int i = 0; i < content_len; i++) {
+                    if (content_val[i] == '\\' && i + 1 < content_len) {
+                        if (content_val[i + 1] == 'n') { content_copy[ci++] = '\n'; i++; }
+                        else if (content_val[i + 1] == '"') { content_copy[ci++] = '"'; i++; }
+                        else if (content_val[i + 1] == '\\') { content_copy[ci++] = '\\'; i++; }
+                        else { content_copy[ci++] = content_val[i]; }
+                    } else {
+                        content_copy[ci++] = content_val[i];
+                    }
+                }
+                content_copy[ci] = '\0';
+
+                out[count].role = role_copy;
+                out[count].content = content_copy;
+                count++;
+            } else {
+                free(role_copy);
+                free(content_copy);
+            }
+        }
+
+        // Skip comma
+        while (*p && *p != ',' && *p != ']') p++;
+        if (*p == ',') p++;
+    }
+
+    return count;
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_pocketfinancer_inference_LlamaEngine_nativeApplyChatTemplate(
     JNIEnv *env, jclass /*clazz*/,
@@ -293,7 +402,18 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeApplyChatTemplate(
     // Get the model's built-in Jinja chat template
     const char *tmpl = llama_model_chat_template(inst->model, nullptr);
 
-    // Render the template
+    // Parse JSON messages into llama_chat_message array
+    llama_chat_message msgs[16];
+    int n_msgs = parse_chat_messages_json(messages_json, msgs, 16);
+
+    env->ReleaseStringUTFChars(jmessages, messages_json);
+
+    if (n_msgs == 0) {
+        LOG_ERR("nativeApplyChatTemplate: failed to parse chat messages JSON\n");
+        return env->NewStringUTF("");
+    }
+
+    // Render the template with the new API
     int buf_size = 4096;  // sufficient for one conversation turn
     std::string result(buf_size, '\0');
     int written = llama_chat_apply_template(
@@ -304,7 +424,11 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeApplyChatTemplate(
         result.data(),
         (int)result.size());
 
-    env->ReleaseStringUTFChars(jmessages, messages_json);
+    // Free allocated message strings
+    for (int i = 0; i < n_msg; i++) {
+        free((void *)msgs[i].role);
+        free((void *)msgs[i].content);
+    }
 
     if (written < 0) {
         // Buffer too small or rendering failed

@@ -1,5 +1,6 @@
 package com.pocketfinancer.ui.settings
 
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.pocketfinancer.hardware.DeviceCapabilities
@@ -41,6 +42,8 @@ data class SettingsUiState(
 
     // ── Test Run ──
     val testRunning: Boolean = false,
+    val testProgress: String? = null,          // live status: "Phase 1: Thinking...", etc.
+    val thinkingOutput: String? = null,        // raw <think> block from Phase 1
     val testResult: String? = null,
     val testParsed: String? = null,
     val testError: String? = null
@@ -214,8 +217,10 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch {
             _state.value = _state.value.copy(
                 testRunning = true,
+                testProgress = "Phase 0: Loading grammar & building prompt...",
                 testResult = null,
                 testParsed = null,
+                thinkingOutput = null,
                 testError = null
             )
 
@@ -223,61 +228,124 @@ class SettingsViewModel @Inject constructor(
                 val grammar = llamaEngine.readAsset("sms_extraction.gbnf")
                 val rawPrompt = promptBuilder.buildExtractionPrompt(testSender, testBody)
                 val chatPrompt = promptBuilder.buildChatPrompt(rawPrompt, enableThinking = true)
+                Log.i("PocketFinancer", "Initial raw prompt length: ${rawPrompt.length} chars")
+                Log.i("PocketFinancer", "Chat prompt length: ${chatPrompt.length} chars")
 
                 val startTime = System.currentTimeMillis()
 
-                val result = withContext(Dispatchers.IO) {
-                    llamaEngine.inferForExtraction(
-                        prompt = chatPrompt,
-                        grammar = grammar,
-                        thinkingTokens = 1024,
-                        answerTokens = 256
+                // ── Phase 1: Thinking ─────────────────────────────────────
+                _state.value = _state.value.copy(
+                    testProgress = "Phase 1: Thinking (<think> block, max 1024 tokens)..."
+                )
+                Log.i("PocketFinancer", "=== Phase 1: Thinking ===")
+
+                val thinkPrompt = chatPrompt + "<think>\n"
+                val thinkResult = withContext(Dispatchers.IO) {
+                    llamaEngine.complete(
+                        prompt = thinkPrompt,
+                        params = LlamaEngine.InferenceParams(
+                            maxTokens = 1024,
+                            temperature = 0.0f,
+                            stopToken = "</think>"
+                        )
                     )
                 }
 
-                val elapsed = System.currentTimeMillis() - startTime
+                val thinkElapsed = System.currentTimeMillis() - startTime
+                Log.i("PocketFinancer", "Phase 1 completed in ${thinkElapsed}ms")
+                Log.i("PocketFinancer", "Phase 1 output (${thinkResult.length} chars): <<<${thinkResult}>>>")
 
-                when (result) {
-                    is LlamaEngine.InferenceResult.Success -> {
-                        val parsed = extractionParser.parse(result.json)
-                        val perfLine = result.perf?.let { p ->
-                            "\n\n⚡ Performance:\n" +
-                            "  Prompt eval: ${p.tPromptEvalMs}ms\n" +
-                            "  Generation:  ${p.tEvalMs}ms for ${p.nTokens} tokens\n" +
-                            "  Speed:       ${"%.1f".format(p.tokensPerSecond)} tok/s"
-                        } ?: ""
-                        _state.value = _state.value.copy(
-                            testRunning = false,
-                            testResult = "Raw JSON: ${result.json}\n\n⏱ ${elapsed}ms$perfLine",
-                            testParsed = parsed?.let {
-                                "amount=${it.amount}, type=${it.type}, counterparty=${it.counterparty ?: "-"}, account=${it.account ?: "-"}"
-                            } ?: "Parsed: null (non-financial)"
-                        )
-                    }
-                    is LlamaEngine.InferenceResult.Null -> {
-                        _state.value = _state.value.copy(
-                            testRunning = false,
-                            testResult = "Model returned null (not a financial transaction)\n⏱ ${elapsed}ms",
-                            testParsed = "N/A"
-                        )
-                    }
-                    is LlamaEngine.InferenceResult.Error -> {
-                        _state.value = _state.value.copy(
-                            testRunning = false,
-                            testError = result.message
-                        )
-                    }
-                    is LlamaEngine.InferenceResult.Stopped -> {
-                        _state.value = _state.value.copy(
-                            testRunning = false,
-                            testError = "Inference was stopped"
-                        )
-                    }
+                // Show thinking output to user immediately
+                _state.value = _state.value.copy(thinkingOutput = thinkResult)
+
+                if (thinkResult.isEmpty()) {
+                    Log.w("PocketFinancer", "Phase 1 produced empty output!")
+                    _state.value = _state.value.copy(
+                        testRunning = false,
+                        testProgress = "Phase 1 failed: empty thinking output",
+                        testError = "Phase 1 (thinking) returned empty. The model may not be responding. Check logcat."
+                    )
+                    return@launch
                 }
-            } catch (e: Exception) {
+
+                // ── Phase 2: Grammar-constrained JSON ─────────────────────
+                _state.value = _state.value.copy(
+                    testProgress = "Phase 2: Generating JSON with GBNF grammar..."
+                )
+                Log.i("PocketFinancer", "=== Phase 2: JSON generation ===")
+
+                val fullPrompt = thinkPrompt + thinkResult + "</think>\n"
+                Log.i("PocketFinancer", "Phase 2 prompt length: ${fullPrompt.length} chars")
+
+                val answer = withContext(Dispatchers.IO) {
+                    llamaEngine.complete(
+                        prompt = fullPrompt,
+                        params = LlamaEngine.InferenceParams(
+                            maxTokens = 256,
+                            temperature = 0.0f,
+                            grammar = grammar
+                        )
+                    )
+                }
+
+                val totalElapsed = System.currentTimeMillis() - startTime
+                Log.i("PocketFinancer", "Phase 2 completed in ${totalElapsed}ms (total)")
+                Log.i("PocketFinancer", "Phase 2 output (${answer.length} chars): <<<${answer}>>>")
+
+                // ── Process result ────────────────────────────────────────
+                _state.value = _state.value.copy(
+                    testProgress = "Processing result..."
+                )
+
+                val trimmed = answer.trim()
+                if (trimmed.isEmpty()) {
+                    Log.w("PocketFinancer", "Phase 2 produced empty output!")
+                    _state.value = _state.value.copy(
+                        testRunning = false,
+                        testProgress = null,
+                        testError = "Phase 2 (JSON) returned empty. Grammar may have blocked all tokens."
+                    )
+                    return@launch
+                }
+
+                if (trimmed == "null") {
+                    Log.i("PocketFinancer", "Model returned null (non-financial)")
+                    _state.value = _state.value.copy(
+                        testRunning = false,
+                        testProgress = null,
+                        testResult = "Model returned null (not a financial transaction)\n⏱ ${totalElapsed}ms",
+                        testParsed = "N/A"
+                    )
+                    return@launch
+                }
+
+                // Parse the JSON output
+                val parsed = extractionParser.parse(trimmed)
+                val perfData = llamaEngine.getPerformanceData()
+                val perfLine = perfData?.let { p ->
+                    "\n\n⚡ Performance:\n" +
+                    "  Generation: ${p.tEvalMs}ms for ${p.nTokens} tokens\n" +
+                    "  Speed: ${"%.1f".format(p.tokensPerSecond)} tok/s"
+                } ?: ""
+
+                Log.i("PocketFinancer", "Parsed result: $parsed")
+                Log.i("PocketFinancer", "Performance: ${perfData}")
+
                 _state.value = _state.value.copy(
                     testRunning = false,
-                    testError = "Test failed: ${e.message}"
+                    testProgress = null,
+                    testResult = "Raw JSON: $trimmed\n⏱ ${totalElapsed}ms$perfLine",
+                    testParsed = parsed?.let {
+                        "amount=${it.amount}, type=${it.type}, counterparty=${it.counterparty ?: "-"}, account=${it.account ?: "-"}"
+                    } ?: "Parsed: null (non-financial)"
+                )
+
+            } catch (e: Exception) {
+                Log.e("PocketFinancer", "Test failed with exception", e)
+                _state.value = _state.value.copy(
+                    testRunning = false,
+                    testProgress = null,
+                    testError = "Test failed: ${e.message}\n${e.stackTraceToString().take(500)}"
                 )
             }
         }
