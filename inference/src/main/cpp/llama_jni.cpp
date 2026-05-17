@@ -1,22 +1,28 @@
 #include <jni.h>
+#include <vector>
+#include <algorithm>
 #include <string>
 #include <cstring>
 #include <cstdlib>
 #include <atomic>
 #include <mutex>
+#include <thread>
 
 #include "llama.h"
-#include "llama-grammar.h"
 #include "log.h"
 
-// ── Per-model state ─────────────────────────────────────────────────────────
+// ── JNI lifecycle (one-time, when .so is loaded) ───────────────────────────
+// llama_backend_init/free must be called exactly once per process lifetime.
+// JNI_OnLoad/OnUnload guarantees that.
 
-struct ModelInstance {
-    llama_model   *model   = nullptr;
-    llama_context *ctx     = nullptr;
-    const llama_vocab *vocab = nullptr;
-    std::atomic<bool> should_stop{false};
-};
+JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM */*vm*/, void */*reserved*/) {
+    llama_backend_init();
+    return JNI_VERSION_1_6;
+}
+
+JNIEXPORT void JNICALL JNI_OnUnload(JavaVM */*vm*/, void */*reserved*/) {
+    llama_backend_free();
+}
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -28,6 +34,34 @@ static ModelInstance *jlong_to_instance(jlong handle) {
     return reinterpret_cast<ModelInstance *>(handle);
 }
 
+/** Optimal thread count: use available cores, capped at 4 for thermal safety. */
+static int get_optimal_thread_count() {
+    int cores = (int)std::thread::hardware_concurrency();
+    return std::max(1, std::min(cores, 4));
+}
+
+// ── Per-model state ─────────────────────────────────────────────────────────
+
+struct ModelInstance {
+    llama_model   *model   = nullptr;
+    llama_context *ctx     = nullptr;
+    const llama_vocab *vocab = nullptr;
+    std::atomic<bool> should_stop{false};
+};
+
+// ── Log callback (routes llama.cpp logs to Android logcat) ──────────────────
+
+static auto log_callback = [](ggml_log_level level, const char * text, void * /*user_data*/) {
+    int prio;
+    switch (level) {
+        case GGML_LOG_LEVEL_ERROR: prio = ANDROID_LOG_ERROR; break;
+        case GGML_LOG_LEVEL_WARN:  prio = ANDROID_LOG_WARN;  break;
+        case GGML_LOG_LEVEL_INFO:  prio = ANDROID_LOG_INFO;  break;
+        default:                   prio = ANDROID_LOG_DEBUG; break;
+    }
+    __android_log_print(prio, "llama.cpp", "%s", text);
+};
+
 // ── nativeLoadModel ─────────────────────────────────────────────────────────
 
 extern "C" JNIEXPORT jlong JNICALL
@@ -38,11 +72,13 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeLoadModel(
     const char *path = env->GetStringUTFChars(jpath, nullptr);
     if (!path) return 0;
 
-    llama_backend_init();
+    // Register log callback once (safe to call multiple times, only first takes)
+    llama_log_set(log_callback, nullptr);
 
     // Model params
     llama_model_params model_params = llama_model_default_params();
     model_params.n_gpu_layers = n_gpu_layers;
+    model_params.use_mmap     = false;  // mmap from private storage can fail silently on Android
 
     llama_model *model = llama_model_load_from_file(path, model_params);
     env->ReleaseStringUTFChars(jpath, path);
@@ -53,12 +89,14 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeLoadModel(
     }
 
     // Context params
+    int optimal_threads = get_optimal_thread_count();
     llama_context_params ctx_params = llama_context_default_params();
-    ctx_params.n_ctx   = n_ctx;
-    ctx_params.n_batch = 512;
-    ctx_params.n_threads = 4;
-    ctx_params.n_threads_batch = 4;
-    ctx_params.flash_attn = true;
+    ctx_params.n_ctx        = n_ctx;
+    ctx_params.n_batch      = 512;
+    ctx_params.n_ubatch     = 256;   // smaller physical batch = lower peak memory
+    ctx_params.n_threads    = optimal_threads;
+    ctx_params.n_threads_batch = optimal_threads;
+    ctx_params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
     ctx_params.type_k = GGML_TYPE_Q8_0;
     ctx_params.type_v = GGML_TYPE_Q8_0;
 
@@ -75,7 +113,8 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeLoadModel(
     inst->vocab = llama_model_get_vocab(model);
     inst->should_stop.store(false);
 
-    LOG_INF("nativeLoadModel: loaded model, ctx=%d, gpu_layers=%d\n", n_ctx, n_gpu_layers);
+    LOG_INF("nativeLoadModel: loaded model, ctx=%d, threads=%d, gpu_layers=%d\n",
+            n_ctx, optimal_threads, n_gpu_layers);
     return ptr_to_jlong(inst);
 }
 
@@ -109,13 +148,14 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeCompletion(
     std::vector<llama_token> tokens(n_tokens);
     llama_tokenize(inst->vocab, prompt, (int)strlen(prompt), tokens.data(), n_tokens, true, true);
 
-    // Prepare batch
+    // KV cache eviction: if prompt + prediction exceeds context, evict oldest tokens
     int n_ctx = llama_n_ctx(inst->ctx);
     int n_kv_req = n_tokens + n_predict;
     if (n_kv_req > n_ctx) {
         int keep = std::min(n_tokens, 64);
         int to_delete = n_tokens - keep;
-        llama_kv_cache_seq_rm(inst->ctx, 0, -1, -1);
+        // Correctly evict only the range we're dropping — not all sequences
+        llama_memory_seq_rm(llama_get_memory(inst->ctx), 0, 0, to_delete);
         tokens.erase(tokens.begin(), tokens.begin() + to_delete);
         n_tokens = (int)tokens.size();
     }
@@ -193,6 +233,74 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeCompletion(
     return env->NewStringUTF(result.c_str());
 }
 
+// ── nativeApplyChatTemplate ─────────────────────────────────────────────────
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_pocketfinancer_inference_LlamaEngine_nativeApplyChatTemplate(
+    JNIEnv *env, jclass /*clazz*/,
+    jlong handle, jstring jmessages, jboolean add_assistant_prefix) {
+
+    auto *inst = jlong_to_instance(handle);
+    if (!inst || !inst->model) {
+        return env->NewStringUTF("");
+    }
+
+    const char *messages_json = env->GetStringUTFChars(jmessages, nullptr);
+    if (!messages_json) return env->NewStringUTF("");
+
+    // Get the model's built-in Jinja chat template
+    const char *tmpl = llama_model_chat_template(inst->model, nullptr);
+
+    // Render the template
+    int buf_size = 4096;  // sufficient for one conversation turn
+    std::string result(buf_size, '\0');
+    int written = llama_chat_apply_template(
+        inst->vocab,
+        tmpl,
+        messages_json,
+        (bool)add_assistant_prefix,
+        result.data(),
+        (int)result.size());
+
+    env->ReleaseStringUTFChars(jmessages, messages_json);
+
+    if (written < 0) {
+        // Buffer too small or rendering failed
+        LOG_ERR("nativeApplyChatTemplate: template rendering failed (%d)\n", written);
+        return env->NewStringUTF("");
+    }
+
+    result.resize(written);
+    return env->NewStringUTF(result.c_str());
+}
+
+// ── nativeGetPerfData ───────────────────────────────────────────────────────
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_pocketfinancer_inference_LlamaEngine_nativeGetPerfData(
+    JNIEnv *env, jclass /*clazz*/, jlong handle) {
+
+    auto *inst = jlong_to_instance(handle);
+    if (!inst || !inst->ctx) {
+        return env->NewStringUTF("{}");
+    }
+
+    const auto *pd = llama_perf_context(inst->ctx);
+    if (!pd) {
+        return env->NewStringUTF("{}");
+    }
+
+    char json[512];
+    int n = snprintf(json, sizeof(json),
+        "{\"t_load_ms\":%lld,\"t_p_eval_ms\":%lld,\"t_eval_ms\":%lld,\"n_tokens\":%d}",
+        (long long)pd->t_load_ms,
+        (long long)pd->t_p_eval_ms,
+        (long long)pd->t_eval_ms,
+        pd->n_tokens);
+
+    return env->NewStringUTF(json);
+}
+
 // ── nativeStop ──────────────────────────────────────────────────────────────
 
 extern "C" JNIEXPORT void JNICALL
@@ -220,7 +328,7 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeUnloadModel(
         llama_model_free(inst->model);
         inst->model = nullptr;
     }
-    llama_backend_free();
+    // NOTE: llama_backend_free is NOT called here — it's handled in JNI_OnUnload
     delete inst;
 }
 

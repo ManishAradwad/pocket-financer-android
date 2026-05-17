@@ -178,33 +178,36 @@ private fun SlmTierRow(tier: SlmTier, isSelected: Boolean, explanation: String) 
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Section 3: Engine Status + Test
+// Section 3: Engine Status + Download + Test
 // ═══════════════════════════════════════════════════════════════════════════════
 
 @Composable
 private fun EngineCard(state: SettingsUiState, viewModel: SettingsViewModel) {
+    val ds = state.downloadState
+
     SectionCard(title = "LLAMA ENGINE") {
         // Status
-        val statusColor = if (state.modelLoaded) M3_Pos else M3_OnSurfaceVariant
-        val statusText = when {
-            state.loadingModel -> "LOADING..."
-            state.modelLoaded -> "LOADED"
-            else -> "NOT LOADED"
-        }
-
         InfoRow(
             label = "Status",
-            value = statusText,
+            value = when {
+                state.loadingModel -> "LOADING..."
+                state.modelLoaded -> "LOADED"
+                else -> "NOT LOADED"
+            },
             valueColor = if (state.modelLoaded) M3_Pos else M3_OnSurfaceVariant
         )
 
-        if (state.modelPath != null) {
-            LabelValue("Path", state.modelPath)
+        // Selected model info
+        state.selectedSlm?.let { slm ->
+            LabelValue("Selected", "${slm.name} — ${slm.description}")
+            LabelValue("File", slm.modelFile)
+            LabelValue("Size", "${"%.0f".format(slm.sizeMb.toFloat())} MB")
+            LabelValue("Path", viewModel.getModelFilePath())
         }
 
-        if (state.selectedSlm != null) {
-            LabelValue("Expected", state.selectedSlm.modelFile)
-            LabelValue("Full path", viewModel.getModelFilePath())
+        // Model path when loaded
+        if (state.modelPath != null) {
+            LabelValue("Loaded from", state.modelPath)
         }
 
         // Error
@@ -220,32 +223,96 @@ private fun EngineCard(state: SettingsUiState, viewModel: SettingsViewModel) {
 
         Spacer(modifier = Modifier.height(12.dp))
 
-        // Buttons
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(
-                onClick = { viewModel.loadSelectedModel() },
-                enabled = !state.loadingModel && !state.modelLoaded,
-                colors = ButtonDefaults.buttonColors(containerColor = M3_PrimaryContainer)
+        // ── Download Section ──
+
+        if (ds.isDownloading) {
+            // Progress bar during download
+            LinearProgressIndicator(
+                progress = { ds.progress },
+                modifier = Modifier.fillMaxWidth(),
+                color = M3_Primary,
+                trackColor = M3_SurfaceContainerLow,
+            )
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Text(
-                    if (state.loadingModel) "LOADING..." else "LOAD MODEL",
-                    color = M3_OnPrimaryContainer,
-                    style = MaterialTheme.typography.labelMedium
+                    text = "${"%.0f".format(ds.progress * 100)}% · ${"%.1f".format(ds.downloadedMb)} / ${"%.1f".format(ds.totalMb)} MB",
+                    color = M3_OnSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall
+                )
+                Text(
+                    text = if (ds.speedMbps > 0.01f) "${"%.1f".format(ds.speedMbps)} MB/s" else "",
+                    color = M3_OnSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall
                 )
             }
 
-            if (state.modelLoaded) {
-                OutlinedButton(
-                    onClick = { viewModel.unloadModel() },
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = M3_Error)
+            if (ds.etaSeconds > 0) {
+                Text(
+                    text = "ETA: ${formatEta(ds.etaSeconds)}",
+                    color = M3_OnSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            OutlinedButton(
+                onClick = { viewModel.cancelDownload() },
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = M3_Error),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("CANCEL DOWNLOAD", style = MaterialTheme.typography.labelMedium)
+            }
+        } else {
+            // Buttons row when not downloading
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                // Download button (if not loaded and not already complete)
+                if (!state.modelLoaded && !ds.isComplete) {
+                    Button(
+                        onClick = { viewModel.downloadSelectedModel() },
+                        enabled = state.selectedSlm != null,
+                        colors = ButtonDefaults.buttonColors(containerColor = M3_PrimaryContainer)
+                    ) {
+                        val label = state.selectedSlm?.let {
+                            "DOWNLOAD (${it.sizeMb}MB)"
+                        } ?: "DOWNLOAD MODEL"
+                        Text(label, color = M3_OnPrimaryContainer, style = MaterialTheme.typography.labelMedium)
+                    }
+                }
+
+                // Load button
+                Button(
+                    onClick = { viewModel.loadSelectedModel() },
+                    enabled = !state.loadingModel && !state.modelLoaded && ds.isComplete,
+                    colors = ButtonDefaults.buttonColors(containerColor = M3_PrimaryContainer)
                 ) {
-                    Text("UNLOAD", style = MaterialTheme.typography.labelMedium)
+                    Text(
+                        if (state.loadingModel) "LOADING..." else "LOAD MODEL",
+                        color = M3_OnPrimaryContainer,
+                        style = MaterialTheme.typography.labelMedium
+                    )
+                }
+
+                if (state.modelLoaded) {
+                    OutlinedButton(
+                        onClick = { viewModel.unloadModel() },
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = M3_Error)
+                    ) {
+                        Text("UNLOAD", style = MaterialTheme.typography.labelMedium)
+                    }
                 }
             }
         }
 
         Spacer(modifier = Modifier.height(8.dp))
 
+        // Run test button
         Button(
             onClick = { viewModel.runTestSms() },
             enabled = state.modelLoaded && !state.testRunning,
@@ -276,6 +343,13 @@ private fun EngineCard(state: SettingsUiState, viewModel: SettingsViewModel) {
             )
         }
     }
+}
+
+private fun formatEta(seconds: Long): String {
+    if (seconds < 60) return "${seconds}s"
+    val m = seconds / 60
+    val s = seconds % 60
+    return "${m}m ${s}s"
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

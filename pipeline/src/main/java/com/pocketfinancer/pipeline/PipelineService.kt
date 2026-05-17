@@ -17,12 +17,10 @@ import javax.inject.Singleton
  * Processes SMS messages sequentially (one at a time) to avoid concurrent
  * LLM access crashes. Each SMS goes through:
  *   1. Build prompt (system + few-shot + sender + body)
- *   2. Build chat template (Qwen3 with enable_thinking)
+ *   2. Apply chat template (Qwen3 Jinja via model, or manual fallback)
  *   3. Two-phase inference (thinking → GBNF grammar)
  *   4. Parse output (null = skip, JSON = save)
  *   5. Save transaction + find-or-create account
- *
- * Ported from the TypeScript PipelineService.ts.
  */
 @Singleton
 class PipelineService @Inject constructor(
@@ -53,7 +51,8 @@ class PipelineService @Inject constructor(
         val stage: Stage,
         val message: String,
         val progress: Int = 0,     // 0-100
-        val total: Int = 0
+        val total: Int = 0,
+        val perf: LlamaEngine.PerformanceData? = null   // timing data when available
     )
 
     enum class Stage {
@@ -113,6 +112,28 @@ class PipelineService @Inject constructor(
         }
     }
 
+    /**
+     * Apply the chat template to the raw extraction prompt.
+     *
+     * Primary path: uses the model's built-in Jinja template via
+     * LlamaEngine.applyChatTemplate(). Falls back to the manual
+     * Qwen3 template (PromptBuilder.buildChatPrompt()) if the
+     * model doesn't have a built-in template.
+     */
+    private fun applyChatTemplate(rawPrompt: String): String {
+        // Try model's Jinja template first
+        val messages = listOf(
+            LlamaEngine.ChatMessage("system", "You are a helpful financial SMS extraction assistant."),
+            LlamaEngine.ChatMessage("user", rawPrompt)
+        )
+        val rendered = llamaEngine.applyChatTemplate(messages, addAssistantPrefix = true)
+        if (rendered != null) {
+            return rendered
+        }
+        // Fallback: manual Qwen3 template
+        return promptBuilder.buildChatPrompt(rawPrompt, enableThinking = true)
+    }
+
     private suspend fun processSingle(sms: SmsReader.SmsMessage) {
         if (!llamaEngine.isModelLoaded()) {
             emit(Stage.ERROR, "Model not loaded, skipping SMS")
@@ -121,11 +142,11 @@ class PipelineService @Inject constructor(
 
         emit(Stage.EXTRACTING, "Processing SMS from ${sms.address}")
 
-        // 1. Build raw prompt
+        // 1. Build raw prompt (system + few-shot + sender + body)
         val rawPrompt = promptBuilder.buildExtractionPrompt(sms.address, sms.body)
 
-        // 2. Wrap in Qwen3 chat template with thinking enabled
-        val chatPrompt = promptBuilder.buildChatPrompt(rawPrompt, enableThinking = true)
+        // 2. Apply chat template (model's Jinja or manual fallback)
+        val chatPrompt = applyChatTemplate(rawPrompt)
 
         // 3. Run two-phase inference
         val result = llamaEngine.inferForExtraction(
@@ -149,7 +170,10 @@ class PipelineService @Inject constructor(
                 return
             }
             is LlamaEngine.InferenceResult.Success -> {
-                emit(Stage.EXTRACTED, "Extracted transaction data")
+                val perfInfo = result.perf?.let { p ->
+                    " | prompt=${p.tPromptEvalMs}ms gen=${p.tEvalMs}ms ${p.tokensPerSecond.toInt()}tok/s"
+                } ?: ""
+                emit(Stage.EXTRACTED, "Extracted transaction data$perfInfo", perf = result.perf)
                 // Continue to parsing
                 val parsed = extractionParser.parse(result.json)
                 if (parsed == null) {
@@ -187,11 +211,12 @@ class PipelineService @Inject constructor(
         }
     }
 
-    private fun emit(stage: Stage, message: String) {
+    private fun emit(stage: Stage, message: String, perf: LlamaEngine.PerformanceData? = null) {
         _pipelineState.value = PipelineStep(
             stage = stage,
             message = message,
-            total = smsQueue.size
+            total = smsQueue.size,
+            perf = perf
         )
     }
 }

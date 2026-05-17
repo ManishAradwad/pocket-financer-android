@@ -16,6 +16,10 @@ espresso = "3.6.1"
 test-runner = "1.6.2"
 test-ext-junit = "1.2.1"
 compose-ui-test = "1.7.8"
+mockk = "1.13.13"
+turbine = "1.2.0"
+coroutines-test = "1.10.1"
+robolectric = "4.14.1"
 
 [libraries]
 # Compose BOM
@@ -58,6 +62,8 @@ coroutines-core = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 test-runner = { group = "androidx.test", name = "runner", version.ref = "test-runner" }
 test-ext-junit = { group = "androidx.test.ext", name = "junit", version.ref = "test-ext-junit" }
+test-core = { group = "androidx.test", name = "core", version = "1.6.1" }
+kotlin-test-junit = { group = "org.jetbrains.kotlin", name = "kotlin-test-junit", version.ref = "kotlin" }
 espresso-core = { group = "androidx.test.espresso", name = "espresso-core", version.ref = "espresso" }
 compose-ui-test-junit4 = { group = "androidx.compose.ui", name = "ui-test-junit4" }
 room-testing = { group = "androidx.room", name = "room-testing", version.ref = "room" }
@@ -65,6 +71,13 @@ room-testing = { group = "androidx.room", name = "room-testing", version.ref = "
 # Core Android
 activity-compose = { group = "androidx.activity", name = "activity-compose", version = "1.10.1" }
 core-ktx = { group = "androidx.core", name = "core-ktx", version = "1.16.0" }
+json = { group = "org.json", name = "json", version = "20240303" }
+
+# Test libraries
+mockk = { group = "io.mockk", name = "mockk", version.ref = "mockk" }
+turbine = { group = "app.cash.turbine", name = "turbine", version.ref = "turbine" }
+coroutines-test = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-test", version.ref = "coroutines-test" }
+robolectric = { group = "org.robolectric", name = "robolectric", version.ref = "robolectric" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

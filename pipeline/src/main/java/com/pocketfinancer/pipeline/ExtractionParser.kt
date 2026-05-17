@@ -111,11 +111,14 @@ class ExtractionParser @Inject constructor() {
                 val d = raw.toDouble()
                 if (d.isFinite() && d > 0) d else null
             }
-            is String -> {
-                val cleaned = raw.replace(Regex("[^0-9.]"), "")
-                val d = cleaned.toDoubleOrNull()
-                if (d != null && d.isFinite() && d > 0) d else null
-            }
+        is String -> {
+            // Strip common currency symbols and keep only digit-like patterns
+            val cleaned = raw.replace(Regex("[^0-9.]"), "")
+            // Remove leading dots that result from stripped prefix (e.g., "Rs.500" → ".500")
+            val normalized = cleaned.trimStart('.')
+            val d = normalized.toDoubleOrNull()
+            if (d != null && d.isFinite() && d > 0) d else null
+        }
             else -> null
         }
     }

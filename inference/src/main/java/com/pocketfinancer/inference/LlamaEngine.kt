@@ -4,6 +4,8 @@ import android.content.Context
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.File
 import java.io.InputStream
 import javax.inject.Inject
@@ -17,6 +19,8 @@ import javax.inject.Singleton
  * - Two-phase generation for Qwen3 thinking models:
  *   Phase 1: think pass (no grammar, <think>...</think>)
  *   Phase 2: GBNF-constrained JSON decode
+ * - Chat template rendering via model's built-in Jinja template
+ * - Performance data capture (prompt eval time, token generation speed)
  * - Stop/cancel support
  * - GPU layer configuration
  */
@@ -24,6 +28,28 @@ import javax.inject.Singleton
 class LlamaEngine @Inject constructor(
     @ApplicationContext private val context: Context
 ) {
+    /**
+     * A single chat message for chat template rendering.
+     */
+    data class ChatMessage(
+        val role: String,    // "system", "user", "assistant"
+        val content: String
+    )
+
+    /**
+     * Performance data from the most recent inference run.
+     */
+    data class PerformanceData(
+        val tLoadMs: Long,
+        val tPromptEvalMs: Long,
+        val tEvalMs: Long,
+        val nTokens: Int
+    ) {
+        /** Total tokens per second during generation phase. */
+        val tokensPerSecond: Double
+            get() = if (tEvalMs > 0) (nTokens.toDouble() / (tEvalMs / 1000.0)) else 0.0
+    }
+
     /**
      * Inference parameters for a single completion call.
      */
@@ -38,7 +64,10 @@ class LlamaEngine @Inject constructor(
      * The result of a two-phase extraction call.
      */
     sealed class InferenceResult {
-        data class Success(val json: String) : InferenceResult()
+        data class Success(
+            val json: String,
+            val perf: PerformanceData? = null   // timing data from this inference
+        ) : InferenceResult()
         data object Null : InferenceResult()          // non-financial SMS
         data class Error(val message: String) : InferenceResult()
         data object Stopped : InferenceResult()
@@ -85,6 +114,52 @@ class LlamaEngine @Inject constructor(
     fun isModelLoaded(): Boolean = isLoaded
 
     fun getModelPath(): String? = modelPath
+
+    // ── Chat Template ──────────────────────────────────────────────────────
+
+    /**
+     * Render a list of chat messages using the model's built-in Jinja template.
+     * Returns null if the model doesn't have a template or if rendering fails.
+     */
+    fun applyChatTemplate(
+        messages: List<ChatMessage>,
+        addAssistantPrefix: Boolean = true
+    ): String? {
+        if (modelHandle == 0L) return null
+        val jsonArray = JSONArray().apply {
+            messages.forEach { msg ->
+                put(JSONObject().apply {
+                    put("role", msg.role)
+                    put("content", msg.content)
+                })
+            }
+        }
+        val result = nativeApplyChatTemplate(modelHandle, jsonArray.toString(), addAssistantPrefix)
+        return result.ifEmpty { null }
+    }
+
+    // ── Performance Data ───────────────────────────────────────────────────
+
+    /**
+     * Get performance timing data from the context since model load.
+     * Returns null if no inference has been performed yet.
+     */
+    fun getPerformanceData(): PerformanceData? {
+        if (modelHandle == 0L) return null
+        val json = nativeGetPerfData(modelHandle) ?: return null
+        return try {
+            val obj = JSONObject(json)
+            if (obj.keys().asSequence().none()) return null  // empty object
+            PerformanceData(
+                tLoadMs = obj.optLong("t_load_ms", 0),
+                tPromptEvalMs = obj.optLong("t_p_eval_ms", 0),
+                tEvalMs = obj.optLong("t_eval_ms", 0),
+                nTokens = obj.optInt("n_tokens", 0)
+            )
+        } catch (_: Exception) {
+            null
+        }
+    }
 
     // ── Two-Phase Inference ─────────────────────────────────────────────────
     //
@@ -147,12 +222,15 @@ class LlamaEngine @Inject constructor(
                 return@withContext InferenceResult.Error("JSON decode produced empty output")
             }
 
+            // Capture performance data after inference
+            val perf = getPerformanceData()
+
             // The answer should be either "null" or a JSON object
             val trimmed = answer.trim()
             return@withContext if (trimmed == "null") {
                 InferenceResult.Null
             } else {
-                InferenceResult.Success(trimmed)
+                InferenceResult.Success(trimmed, perf = perf)
             }
 
         } catch (e: Exception) {
@@ -230,7 +308,12 @@ class LlamaEngine @Inject constructor(
         const val MODEL_FILENAME = "qwen3-1.7b-Q8_0.gguf"
 
         init {
-            System.loadLibrary("pocketfinancer_llm")
+            try {
+                System.loadLibrary("pocketfinancer_llm")
+            } catch (_: UnsatisfiedLinkError) {
+                // Native library not available (e.g., unit tests). The engine
+                // will fail at loadModel() time with a descriptive error.
+            }
         }
     }
 
@@ -245,6 +328,12 @@ class LlamaEngine @Inject constructor(
         temperature: Float,
         stop: String?
     ): String
+    private external fun nativeApplyChatTemplate(
+        handle: Long,
+        messages: String,
+        addAssistantPrefix: Boolean
+    ): String
+    private external fun nativeGetPerfData(handle: Long): String?
     private external fun nativeStop(handle: Long)
     private external fun nativeUnloadModel(handle: Long)
     private external fun nativeGetModelSize(path: String): Long

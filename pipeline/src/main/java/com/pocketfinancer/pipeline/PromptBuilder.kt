@@ -12,6 +12,11 @@ import javax.inject.Singleton
  * and the ### EXAMPLES / ### YOUR TASK delimiter structure validated in the
  * SLM evaluation pipeline.
  *
+ * This class is a pure string-builder — it does not depend on the JNI bridge
+ * so it can be tested without a loaded model. The actual chat-template
+ * rendering (Qwen3 Jinja format) is applied by PipelineService using
+ * LlamaEngine.applyChatTemplate().
+ *
  * Format:
  *   SYSTEM_PROMPT
  *   \n\n### EXAMPLES (already labeled — for reference only, do NOT answer these)\n\n
@@ -38,7 +43,7 @@ class PromptBuilder @Inject constructor(
      *
      * @param sender The SMS sender address (e.g. "AX-HDFCBK")
      * @param smsBody The raw SMS body text
-     * @return Complete prompt string ready for Qwen3 chat template rendering
+     * @return Complete prompt string ready for chat template rendering
      */
     fun buildExtractionPrompt(sender: String, smsBody: String): String {
         val sb = StringBuilder()
@@ -65,17 +70,15 @@ class PromptBuilder @Inject constructor(
     }
 
     /**
-     * Build a prompt with the Qwen3 chat template applied.
+     * Manual chat template rendering (fallback when the model's Jinja template
+     * is unavailable).
      *
      * Qwen3 requires chat template rendering with enable_thinking=True for the
-     * thinking pass. The Kotlin side wraps the raw prompt in the Qwen3 template
-     * format. Since llama.cpp handles chat templates internally, we pass the
-     * prompt as a user message and let the template engine render it.
+     * thinking pass. When the model doesn't have a built-in template, we fall
+     * back to the standard Qwen3 format. The primary path is
+     * LlamaEngine.applyChatTemplate() from PipelineService.
      */
     fun buildChatPrompt(rawPrompt: String, enableThinking: Boolean = true): String {
-        // Qwen3 chat template format:
-        // <|im_start|>system\n{system}<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n
-        // When enable_thinking=True, the template prepends a thinking directive.
         val systemMsg = "You are a helpful financial SMS extraction assistant."
         return buildString {
             append("<|im_start|>system\n")

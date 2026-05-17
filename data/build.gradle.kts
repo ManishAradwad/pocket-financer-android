@@ -50,6 +50,13 @@ dependencies {
 
     // Testing
     testImplementation(libs.junit)
+    testImplementation(libs.kotlin.test.junit)
+    testImplementation(libs.mockk)
+    testImplementation(libs.coroutines.test)
+    testImplementation(libs.turbine)
+    testImplementation(libs.room.testing)
+    testImplementation(libs.robolectric)
+    testImplementation(libs.test.core)
     androidTestImplementation(libs.test.runner)
     androidTestImplementation(libs.test.ext.junit)
     androidTestImplementation(libs.room.testing)
