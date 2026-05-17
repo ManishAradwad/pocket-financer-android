@@ -6,13 +6,21 @@ on:
   pull_request:
     branches: [ main ]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@v3
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -22,6 +30,11 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+
+      - name: Install NDK and SDK platform
+        run: |
+          sdkmanager "platforms;android-36" "ndk;27.3.13750724" \
+            --sdk_root=$ANDROID_HOME
 
       - name: Cache Gradle dependencies
         uses: actions/cache@v4
@@ -36,9 +49,10 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
-      - name: Run unit tests (Kotlin + non-native modules)
-        run: ./gradlew :data:test :pipeline:test :hardware:test :sms:test :inference:test \
-          -x :inference:build -x :app:build --no-daemon
+      - name: Run unit tests
+        run: |
+          ./gradlew :data:test :pipeline:test :hardware:test :sms:test :inference:test \
+            -x :inference:build -x :app:build --no-daemon
 
       - name: Upload test reports
         if: always()
