@@ -70,6 +70,27 @@ class SlmSelectorUnitTest {
         assertEquals(SlmTier.QWEN3_1_7B_Q8_0, selectSlmForDevice(device))
     }
 
+    // ── Mali GPU devices now get premium tiers (fix for Qualcomm-only gate) ──
+
+    @Test
+    fun `selectSlmForDevice should pick Qwen3 Q8_0 with Mali GPU and i8mm`() {
+        // Galaxy S24 Exynos, Pixel 9 Pro Tensor: Mali GPU + i8mm+dotprod
+        // Before fix: excluded by Adreno-only gate. After fix: correctly selected.
+        val device = deviceWith(ramGb = 8.0f, gpuAccel = true)
+        assertEquals(SlmTier.QWEN3_1_7B_Q8_0, selectSlmForDevice(device))
+    }
+
+    // ── Device without CPU features can't access premium tiers ──
+
+    @Test
+    fun `selectSlmForDevice should NOT pick Q8_0 with 4GB but no CPU features`() {
+        // Older or budget phones: enough RAM but missing i8mm+dotprod
+        // gpuAccel=false simulates a device without the required CPU features
+        val device = deviceWith(ramGb = 4.0f, gpuAccel = false)
+        assertNotEquals(SlmTier.QWEN3_1_7B_Q8_0, selectSlmForDevice(device))
+        assertEquals(SlmTier.QWEN3_1_7B_Q4_K_M, selectSlmForDevice(device))
+    }
+
     // ── Tier 2: Qwen3-1.7B Q4_K_M with 3.5GB RAM ────────────────────
 
     @Test
@@ -79,7 +100,7 @@ class SlmSelectorUnitTest {
     }
 
     @Test
-    fun `selectSlmForDevice should pick Qwen3 Q4_K_M with 3_5GB even with GPU`() {
+    fun `selectSlmForDevice should pick Qwen3 Q4_K_M with 3_5GB even with CPU features`() {
         val device = deviceWith(ramGb = 3.5f, gpuAccel = true)
         assertEquals(SlmTier.QWEN3_1_7B_Q4_K_M, selectSlmForDevice(device))
     }
@@ -125,10 +146,10 @@ class SlmSelectorUnitTest {
     }
 
     @Test
-    fun `explainTierSelection should mention GPU requirement for Qwen3 Q8_0`() {
+    fun `explainTierSelection should mention CPU requirement for Qwen3 Q8_0`() {
         val device = deviceWith(ramGb = 4.0f, gpuAccel = false)
         val explanation = explainTierSelection(SlmTier.QWEN3_1_7B_Q8_0, device, isSelected = false)
-        assertTrue(explanation.contains("GPU"))
+        assertTrue(explanation.contains("i8mm") || explanation.contains("CPU") || explanation.contains("dotprod"))
     }
 
     @Test
