@@ -107,9 +107,9 @@ class DeviceCapabilitiesUnitTest {
         assertEquals(8.0f, ramGb, 0.1f)
     }
 
-    // ── isGpuAccelerationSupported (needs CPU + GPU info) ────────────
-    // NOTE: getGpuInfo() uses EGL/GLES20 which is not available in unit tests.
-    // This is tested via instrumented tests on device.
+    // ── isHighPerformanceDevice (needs CPU info from /proc/cpuinfo) ──
+    // NOTE: getCpuInfo() reads /proc/cpuinfo which is not available in
+    // unit tests. This is tested via instrumented tests on device.
 
     // ── StorageInfo ──────────────────────────────────────────────────
 
@@ -177,7 +177,7 @@ class DeviceCapabilitiesUnitTest {
             gpu = null,
             cpu = null,
             storage = DeviceCapabilities.StorageInfo(0, 0, 0),
-            isGpuAccelerationSupported = false
+            isHighPerformanceDevice = false
         )
         assertEquals(4.0f, info.ramGb)
         assertEquals(4.0f, info.totalRamGb)

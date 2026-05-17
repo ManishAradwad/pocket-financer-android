@@ -11,6 +11,15 @@
 #include "llama.h"
 #include "log.h"
 
+// ── Per-model state ─────────────────────────────────────────────────────────
+
+struct ModelInstance {
+    llama_model   *model   = nullptr;
+    llama_context *ctx     = nullptr;
+    const llama_vocab *vocab = nullptr;
+    std::atomic<bool> should_stop{false};
+};
+
 // ── JNI lifecycle (one-time, when .so is loaded) ───────────────────────────
 // llama_backend_init/free must be called exactly once per process lifetime.
 // JNI_OnLoad/OnUnload guarantees that.
@@ -39,15 +48,6 @@ static int get_optimal_thread_count() {
     int cores = (int)std::thread::hardware_concurrency();
     return std::max(1, std::min(cores, 4));
 }
-
-// ── Per-model state ─────────────────────────────────────────────────────────
-
-struct ModelInstance {
-    llama_model   *model   = nullptr;
-    llama_context *ctx     = nullptr;
-    const llama_vocab *vocab = nullptr;
-    std::atomic<bool> should_stop{false};
-};
 
 // ── Log callback (routes llama.cpp logs to Android logcat) ──────────────────
 

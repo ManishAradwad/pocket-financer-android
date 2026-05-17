@@ -80,7 +80,7 @@ class DeviceCapabilities @Inject constructor(
         val gpu: GpuInfo?,
         val cpu: CpuInfo?,
         val storage: StorageInfo,
-        val isGpuAccelerationSupported: Boolean
+        val isHighPerformanceDevice: Boolean
     )
 
     companion object {
@@ -207,12 +207,24 @@ class DeviceCapabilities @Inject constructor(
     }
 
     /**
-     * GPU acceleration requires Adreno GPU + i8mm + dotprod CPU features.
+     * Determine if this device can handle the larger 8-bit model tiers.
+     *
+     * Based on CPU features (i8mm + dotprod) — ARM v8.2-A/v8.6-A instructions
+     * that accelerate matrix multiplication for LLM inference. Devices with
+     * these features run CPU inference of larger models significantly faster.
+     *
+     * GPU acceleration is NOT checked here because:
+     * - llama.cpp Vulkan/OpenCL backends are 10–15× slower than CPU on Android
+     *   across ALL GPU vendors (Adreno, Mali, PowerVR) — see ggml-org/#9464.
+     * - The app currently builds llama.cpp CPU-only (CMakeLists sets all GPU
+     *   backends OFF) and calls loadModel() with gpuLayers=0.
+     * - Callers in SettingsViewModel therefore always pass gpuLayers=0.
+     *
+     * Returns false if CPU info cannot be read (emulators, headless envs).
      */
-    fun isGpuAccelerationSupported(): Boolean {
-        val gpu = getGpuInfo() ?: return false
+    fun isHighPerformanceDevice(): Boolean {
         val cpu = getCpuInfo() ?: return false
-        return gpu.hasAdreno && cpu.hasI8mm && cpu.hasDotProd
+        return cpu.hasI8mm && cpu.hasDotProd
     }
 
     /**
@@ -265,8 +277,8 @@ class DeviceCapabilities @Inject constructor(
         val storage = checkStorage()
         val gpu = try { getGpuInfo() } catch (_: Exception) { null }
         val cpu = try { getCpuInfo() } catch (_: Exception) { null }
-        val gpuAccel = gpu != null && cpu != null && gpu.hasAdreno && cpu.hasI8mm && cpu.hasDotProd
+        val highPerf = isHighPerformanceDevice()
 
-        return DeviceInfo(ram, ram, tier, gpu, cpu, storage, gpuAccel)
+        return DeviceInfo(ram, ram, tier, gpu, cpu, storage, highPerf)
     }
 }

@@ -118,29 +118,35 @@ data class SlmTier(
  * Auto-select the best SLM for the given hardware capabilities.
  *
  * Priority logic:
- * 1. Qwen3-1.7B Q8_0  — if 4GB+ RAM AND GPU acceleration (thinking mode + best quant)
+ * 1. Qwen3-1.7B Q8_0  — if 4GB+ RAM AND high-performance CPU (i8mm+dotprod)
  * 2. Qwen3-1.7B Q4_K_M — if 3.5GB+ RAM (thinking mode, smaller download)
- * 3. Gemma 4 E2B Q8_0  — if 6GB+ RAM AND GPU (highest quality, no thinking mode)
+ * 3. Gemma 4 E2B Q8_0  — if 6GB+ RAM AND high-performance CPU (highest quality)
  * 4. Gemma 4 E2B Q4_K_M — if 4GB+ RAM (alternative model family)
  * 5. Qwen3-0.6B Q8_0   — if 2.5GB+ RAM (lightweight fallback)
  * 6. null               — if < 2.5GB RAM (BLOCKED)
+ *
+ * The "high-performance CPU" flag checks for ARM i8mm and dotprod
+ * instructions. These CPU features meaningfully accelerate LLM inference
+ * on CPU. GPU acceleration is NOT used: the llama.cpp Vulkan/OpenCL
+ * backends are 10-15× slower than CPU on Android across all GPU vendors,
+ * so model tier selection is based on CPU capability instead.
  *
  * Qwen3 tiers are preferred over Gemma because Qwen3's thinking mode
  * significantly improves SMS extraction accuracy over standard decode.
  */
 fun selectSlmForDevice(device: DeviceCapabilities.DeviceInfo): SlmTier? {
     val ram = device.ramGb
-    val gpuAccel = device.isGpuAccelerationSupported
+    val highPerf = device.isHighPerformanceDevice
 
     return when {
-        // Tier 1: Best Qwen3 quality with GPU
-        ram >= 4.0f && gpuAccel -> SlmTier.QWEN3_1_7B_Q8_0
+        // Tier 1: Best Qwen3 quality with high-performance CPU
+        ram >= 4.0f && highPerf -> SlmTier.QWEN3_1_7B_Q8_0
 
         // Tier 2: Balanced Qwen3 (thinking mode, reasonable size)
         ram >= 3.5f -> SlmTier.QWEN3_1_7B_Q4_K_M
 
         // Tier 3: Gemma high quality — only if 6GB+
-        ram >= 6.0f && gpuAccel -> SlmTier.GEMMA4_E2B_Q8_0
+        ram >= 6.0f && highPerf -> SlmTier.GEMMA4_E2B_Q8_0
 
         // Tier 4: Gemma balanced
         ram >= 4.0f -> SlmTier.GEMMA4_E2B_Q4_K_M
@@ -161,20 +167,20 @@ fun explainTierSelection(
     isSelected: Boolean
 ): String {
     val ram = device.ramGb
-    val gpuAccel = device.isGpuAccelerationSupported
+    val highPerf = device.isHighPerformanceDevice
     val ramStr = "%.1f".format(ram)
 
     if (isSelected) {
         return when {
             tier == SlmTier.QWEN3_1_7B_Q8_0 ->
-                "Selected — best extraction quality (8-bit thinking mode + GPU)"
+                "Selected — best extraction quality (8-bit thinking mode, high-perf CPU)"
             tier == SlmTier.QWEN3_1_7B_Q4_K_M -> {
-                val reason = if (gpuAccel) "GPU available but RAM prefers lighter quant"
-                             else "balanced size/quality — no GPU detected"
+                val reason = if (highPerf) "CPU features (i8mm+dotprod) detected but RAM prefers lighter quant"
+                             else "balanced size/quality — no i8mm+dotprod CPU features detected"
                 "Selected — $reason"
             }
             tier == SlmTier.GEMMA4_E2B_Q8_0 ->
-                "Selected — highest overall model quality, GPU available"
+                "Selected — highest overall model quality, high-perf CPU"
             tier == SlmTier.GEMMA4_E2B_Q4_K_M ->
                 "Selected — alternative model family, Qwen3 tiers not viable"
             tier == SlmTier.QWEN3_0_6B_Q8_0 ->
@@ -190,10 +196,10 @@ fun explainTierSelection(
 
     when (tier) {
         SlmTier.QWEN3_1_7B_Q8_0 -> {
-            if (!gpuAccel) blockers.add("GPU acceleration not detected")
+            if (!highPerf) blockers.add("needs i8mm+dotprod CPU instructions (not detected)")
         }
         SlmTier.GEMMA4_E2B_Q8_0 -> {
-            if (!gpuAccel) blockers.add("GPU acceleration not detected")
+            if (!highPerf) blockers.add("needs i8mm+dotprod CPU instructions (not detected)")
         }
         else -> {}
     }
