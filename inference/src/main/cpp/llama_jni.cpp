@@ -18,6 +18,7 @@ struct ModelInstance {
     llama_context *ctx     = nullptr;
     const llama_vocab *vocab = nullptr;
     std::atomic<bool> should_stop{false};
+    int n_past = 0;
 };
 
 // ── JNI lifecycle (one-time, when .so is loaded) ───────────────────────────
@@ -129,6 +130,7 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeCompletion(
     jint    n_predict,
     jfloat  temperature,
     jstring jstop,
+    jboolean jkeep_cache,
     jobject jcallback) {
 
     auto *inst = jlong_to_instance(handle);
@@ -149,11 +151,29 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeCompletion(
     std::vector<llama_token> tokens(n_tokens);
     llama_tokenize(inst->vocab, prompt, (int)strlen(prompt), tokens.data(), n_tokens, true, true);
 
-    // Clear KV cache for sequence 0 before starting this execution
-    llama_memory_seq_rm(llama_get_memory(inst->ctx), 0, -1, -1);
+    if (tokens.empty()) {
+        env->ReleaseStringUTFChars(jprompt, prompt);
+        if (grammar) env->ReleaseStringUTFChars(jgrammar, grammar);
+        if (stop)    env->ReleaseStringUTFChars(jstop, stop);
+        return env->NewStringUTF("");
+    }
+
+    int n_ctx = llama_n_ctx(inst->ctx);
+
+    if (!jkeep_cache) {
+        // Clear KV cache for sequence 0 before starting this execution
+        llama_memory_seq_rm(llama_get_memory(inst->ctx), 0, -1, -1);
+        inst->n_past = 0;
+    } else if (inst->n_past + n_tokens > n_ctx) {
+        // Fallback if cache + new tokens exceeds context size
+        __android_log_print(ANDROID_LOG_WARN, "PocketFinancer",
+                            "nativeCompletion: Cache + prompt (%d + %d) exceeds context size (%d). Resetting cache.",
+                            inst->n_past, n_tokens, n_ctx);
+        llama_memory_seq_rm(llama_get_memory(inst->ctx), 0, -1, -1);
+        inst->n_past = 0;
+    }
 
     // KV cache eviction: if prompt exceeds context, truncate it from the start
-    int n_ctx = llama_n_ctx(inst->ctx);
     if (n_tokens > n_ctx) {
         int keep_space = std::min(n_ctx, 128);
         int keep = n_ctx - keep_space;
@@ -178,15 +198,37 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeCompletion(
         env->DeleteLocalRef(callback_class);
     }
 
-    // Prefill prompt
-    llama_batch batch = llama_batch_get_one(tokens.data(), n_tokens);
-    if (llama_decode(inst->ctx, batch) != 0) {
-        LOG_ERR("nativeCompletion: prefill decode failed\n");
+    // Prefill prompt (chunked by n_batch to prevent crashes when prompt size > n_batch)
+    int n_batch = llama_n_batch(inst->ctx);
+    bool prefill_failed = false;
+    for (int i = 0; i < n_tokens; i += n_batch) {
+        int n_eval = std::min(n_tokens - i, n_batch);
+        llama_batch batch = llama_batch_init(n_eval, 0, 1);
+        batch.n_tokens = n_eval;
+        for (int j = 0; j < n_eval; j++) {
+            batch.token[j] = tokens[i + j];
+            batch.pos[j] = inst->n_past + i + j;
+            batch.n_seq_id[j] = 1;
+            batch.seq_id[j][0] = 0;
+            batch.logits[j] = (i + j == n_tokens - 1);
+        }
+        if (llama_decode(inst->ctx, batch) != 0) {
+            LOG_ERR("nativeCompletion: prefill decode failed at chunk %d\n", i);
+            llama_batch_free(batch);
+            prefill_failed = true;
+            break;
+        }
+        llama_batch_free(batch);
+    }
+
+    if (prefill_failed) {
         env->ReleaseStringUTFChars(jprompt, prompt);
         if (grammar) env->ReleaseStringUTFChars(jgrammar, grammar);
         if (stop)    env->ReleaseStringUTFChars(jstop, stop);
         return env->NewStringUTF(result.c_str());
     }
+
+    inst->n_past += n_tokens;
 
     {
         // ── Sampler ──
@@ -216,17 +258,16 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeCompletion(
         batch_single.logits[0] = true;
 
         // ── Decode loop ──
-        int n_past = n_tokens;
         for (int i = 0; i < n_predict; i++) {
             if (inst->should_stop.load()) {
                 break;
             }
 
             // Context size limit safety check
-            if (n_past >= n_ctx) {
+            if (inst->n_past >= n_ctx) {
                 __android_log_print(ANDROID_LOG_WARN, "PocketFinancer",
                                     "nativeCompletion: context size limit reached (%d/%d), stopping generation.",
-                                    n_past, n_ctx);
+                                    inst->n_past, n_ctx);
                 break;
             }
 
@@ -256,13 +297,13 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeCompletion(
 
             // Decode single token
             batch_single.token[0] = new_token;
-            batch_single.pos[0] = n_past;
+            batch_single.pos[0] = inst->n_past;
 
             if (llama_decode(inst->ctx, batch_single) != 0) {
                 LOG_ERR("nativeCompletion: single token decode failed\n");
                 break;
             }
-            n_past++;
+            inst->n_past++;
         }
 
         llama_batch_free(batch_single);
