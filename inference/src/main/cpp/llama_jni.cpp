@@ -357,54 +357,22 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeApplyChatTemplate(
     const char *messages_json = env->GetStringUTFChars(jmessages, nullptr);
     if (!messages_json) return env->NewStringUTF("");
 
-    // Parse JSON array of messages into llama_chat_message structs.
-    // Expected format: [{"role":"user","content":"..."},...]
-    int n_msg = 0;
+    // Calculate n_msg by counting '{' in JSON (safe upper bound)
+    int n_msg_est = 0;
     for (const char *cp = messages_json; *cp; cp++) {
-        if (*cp == '{') n_msg++;
+        if (*cp == '{') n_msg_est++;
     }
 
-    std::vector<llama_chat_message> msgs(n_msg);
-    std::vector<std::string> role_storage(n_msg);
-    std::vector<std::string> content_storage(n_msg);
-
-    {
-        const char *cp = messages_json;
-        for (int i = 0; i < n_msg && *cp; i++) {
-            while (*cp && *cp != '{') cp++;
-            if (!*cp) break;
-            cp++;
-
-            const char *role_val = strstr(cp, "\"role\":\"");
-            if (role_val) {
-                role_val += 8;
-                const char *role_end = strchr(role_val, '"');
-                if (role_end) {
-                    role_storage[i] = std::string(role_val, role_end - role_val);
-                    msgs[i].role = role_storage[i].c_str();
-                    cp = role_end + 1;
-                }
-            }
-
-            const char *content_val = strstr(cp, "\"content\":\"");
-            if (content_val) {
-                content_val += 11;
-                const char *content_end = strchr(content_val, '"');
-                if (content_end) {
-                    content_storage[i] = std::string(content_val, content_end - content_val);
-                    msgs[i].content = content_storage[i].c_str();
-                    cp = content_end + 1;
-                }
-            }
-        }
+    if (n_msg_est == 0) {
+        env->ReleaseStringUTFChars(jmessages, messages_json);
+        return env->NewStringUTF("");
     }
 
-    // Get the model's built-in Jinja chat template
-    const char *tmpl = llama_model_chat_template(inst->model, nullptr);
+    // Allocate storage for messages
+    std::vector<llama_chat_message> msgs(n_msg_est);
 
     // Parse JSON messages into llama_chat_message array
-    llama_chat_message msgs[16];
-    int n_msgs = parse_chat_messages_json(messages_json, msgs, 16);
+    int n_msgs = parse_chat_messages_json(messages_json, msgs.data(), n_msg_est);
 
     env->ReleaseStringUTFChars(jmessages, messages_json);
 
@@ -413,19 +381,22 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeApplyChatTemplate(
         return env->NewStringUTF("");
     }
 
+    // Get the model's built-in Jinja chat template
+    const char *tmpl = llama_model_chat_template(inst->model, nullptr);
+
     // Render the template with the new API
-    int buf_size = 4096;  // sufficient for one conversation turn
+    int buf_size = 8192;  // increased buffer size for safety
     std::string result(buf_size, '\0');
     int written = llama_chat_apply_template(
         tmpl,
         msgs.data(),
-        (size_t)n_msg,
+        (size_t)n_msgs,
         (bool)add_assistant_prefix,
         result.data(),
         (int)result.size());
 
-    // Free allocated message strings
-    for (int i = 0; i < n_msg; i++) {
+    // Free allocated message strings (allocated by malloc inside parse_chat_messages_json)
+    for (int i = 0; i < n_msgs; i++) {
         free((void *)msgs[i].role);
         free((void *)msgs[i].content);
     }
