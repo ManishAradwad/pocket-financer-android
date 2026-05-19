@@ -164,7 +164,7 @@ class SettingsViewModel @Inject constructor(
 
             val result = llamaEngine.loadModel(
                 path = path,
-                contextSize = 1024,
+                contextSize = 3072,
                 gpuLayers = 0
             )
 
@@ -248,14 +248,18 @@ class SettingsViewModel @Inject constructor(
                             temperature = 0.0f,
                             stopToken = "</think>"
                         )
-                    )
+                    ) { token ->
+                        _state.value = _state.value.copy(
+                            thinkingOutput = (_state.value.thinkingOutput ?: "") + token
+                        )
+                    }
                 }
 
                 val thinkElapsed = System.currentTimeMillis() - startTime
                 Log.i("PocketFinancer", "Phase 1 completed in ${thinkElapsed}ms")
                 Log.i("PocketFinancer", "Phase 1 output (${thinkResult.length} chars): <<<${thinkResult}>>>")
 
-                // Show thinking output to user immediately
+                // Ensure final thinking output is exactly the returned block
                 _state.value = _state.value.copy(thinkingOutput = thinkResult)
 
                 if (thinkResult.isEmpty()) {
@@ -285,7 +289,11 @@ class SettingsViewModel @Inject constructor(
                             temperature = 0.0f,
                             grammar = grammar
                         )
-                    )
+                    ) { token ->
+                        _state.value = _state.value.copy(
+                            testResult = (_state.value.testResult ?: "") + token
+                        )
+                    }
                 }
 
                 val totalElapsed = System.currentTimeMillis() - startTime

@@ -36,6 +36,10 @@ class LlamaEngine @Inject constructor(
         val content: String
     )
 
+    fun interface TokenCallback {
+        fun onToken(token: String)
+    }
+
     /**
      * Performance data from the most recent inference run.
      */
@@ -81,9 +85,9 @@ class LlamaEngine @Inject constructor(
 
     /**
      * Load a GGUF model from the given absolute file path.
-     * Context size defaults to 1024 (the Qwen3-1.7B production config).
+     * Context size defaults to 3072 (the Qwen3-1.7B production config).
      */
-    suspend fun loadModel(path: String, contextSize: Int = 1024, gpuLayers: Int = 0): Result<Unit> =
+    suspend fun loadModel(path: String, contextSize: Int = 3072, gpuLayers: Int = 0): Result<Unit> =
         withContext(Dispatchers.IO) {
             try {
                 if (isLoaded) unloadModel()
@@ -184,7 +188,8 @@ class LlamaEngine @Inject constructor(
         prompt: String,
         grammar: String,
         thinkingTokens: Int = 1024,
-        answerTokens: Int = 256
+        answerTokens: Int = 256,
+        callback: TokenCallback? = null
     ): InferenceResult = withContext(Dispatchers.IO) {
         if (!isLoaded) {
             return@withContext InferenceResult.Error("Model not loaded")
@@ -199,7 +204,8 @@ class LlamaEngine @Inject constructor(
                 null,              // no grammar during thinking
                 thinkingTokens,
                 0.0f,             // greedy sampling
-                "</think>"         // stop token
+                "</think>",        // stop token
+                callback
             )
 
             // Check for stop signal
@@ -215,7 +221,8 @@ class LlamaEngine @Inject constructor(
                 grammar,           // GBNF grammar applied here
                 answerTokens,
                 0.0f,              // greedy sampling for deterministic output
-                null               // no stop token — grammar controls completion
+                null,              // no stop token — grammar controls completion
+                callback
             )
 
             if (answer.isEmpty()) {
@@ -244,7 +251,8 @@ class LlamaEngine @Inject constructor(
      */
     suspend fun complete(
         prompt: String,
-        params: InferenceParams = InferenceParams()
+        params: InferenceParams = InferenceParams(),
+        callback: TokenCallback? = null
     ): String = withContext(Dispatchers.IO) {
         if (!isLoaded) return@withContext ""
         nativeCompletion(
@@ -253,7 +261,8 @@ class LlamaEngine @Inject constructor(
             params.grammar,
             params.maxTokens,
             params.temperature,
-            params.stopToken
+            params.stopToken,
+            callback
         )
     }
 
@@ -326,7 +335,8 @@ class LlamaEngine @Inject constructor(
         grammar: String?,
         nPredict: Int,
         temperature: Float,
-        stop: String?
+        stop: String?,
+        callback: TokenCallback?
     ): String
     private external fun nativeApplyChatTemplate(
         handle: Long,
