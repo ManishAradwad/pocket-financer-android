@@ -147,9 +147,10 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeCompletion(
     if (!prompt) return env->NewStringUTF("");
 
     // Tokenize prompt
-    int n_tokens = -llama_tokenize(inst->vocab, prompt, (int)strlen(prompt), nullptr, 0, true, true);
+    bool add_special = !jkeep_cache;
+    int n_tokens = -llama_tokenize(inst->vocab, prompt, (int)strlen(prompt), nullptr, 0, add_special, true);
     std::vector<llama_token> tokens(n_tokens);
-    llama_tokenize(inst->vocab, prompt, (int)strlen(prompt), tokens.data(), n_tokens, true, true);
+    llama_tokenize(inst->vocab, prompt, (int)strlen(prompt), tokens.data(), n_tokens, add_special, true);
 
     if (tokens.empty()) {
         env->ReleaseStringUTFChars(jprompt, prompt);
@@ -198,6 +199,12 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeCompletion(
         env->DeleteLocalRef(callback_class);
     }
 
+    __android_log_print(ANDROID_LOG_INFO, "PocketFinancer",
+                        "nativeCompletion: jkeep_cache=%d, n_tokens=%d, inst->n_past=%d, kv_min=%d, kv_max=%d",
+                        jkeep_cache, n_tokens, inst->n_past,
+                        llama_memory_seq_pos_min(llama_get_memory(inst->ctx), 0),
+                        llama_memory_seq_pos_max(llama_get_memory(inst->ctx), 0));
+
     // Prefill prompt (chunked by n_batch to prevent crashes when prompt size > n_batch)
     int n_batch = llama_n_batch(inst->ctx);
     bool prefill_failed = false;
@@ -211,8 +218,17 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeCompletion(
             batch.n_seq_id[j] = 1;
             batch.seq_id[j][0] = 0;
             batch.logits[j] = (i + j == n_tokens - 1);
+            __android_log_print(ANDROID_LOG_INFO, "PocketFinancer",
+                                "  token[%d]=%d, pos[%d]=%d, logits[%d]=%d",
+                                j, batch.token[j], j, batch.pos[j], j, batch.logits[j]);
         }
-        if (llama_decode(inst->ctx, batch) != 0) {
+        int decode_res = llama_decode(inst->ctx, batch);
+        __android_log_print(ANDROID_LOG_INFO, "PocketFinancer",
+                            "llama_decode returned %d, kv_min=%d, kv_max=%d",
+                            decode_res,
+                            llama_memory_seq_pos_min(llama_get_memory(inst->ctx), 0),
+                            llama_memory_seq_pos_max(llama_get_memory(inst->ctx), 0));
+        if (decode_res != 0) {
             LOG_ERR("nativeCompletion: prefill decode failed at chunk %d\n", i);
             llama_batch_free(batch);
             prefill_failed = true;
@@ -238,9 +254,10 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeCompletion(
         llama_sampler *smpl = llama_sampler_chain_init(sparams);
 
         if (grammar && strlen(grammar) > 0) {
-            // Grammar-driven: grammar sampler replaces greedy + distribution
+            // Constrain logits with grammar, then sample greedily
             llama_sampler_chain_add(smpl, llama_sampler_init_grammar(
                 inst->vocab, grammar, "root"));
+            llama_sampler_chain_add(smpl, llama_sampler_init_greedy());
         } else {
             // Greedy (deterministic) sampling with temperature
             llama_sampler_chain_add(smpl, llama_sampler_init_greedy());

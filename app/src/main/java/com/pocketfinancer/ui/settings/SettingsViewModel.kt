@@ -247,7 +247,8 @@ class SettingsViewModel @Inject constructor(
                             maxTokens = 1024,
                             temperature = 0.0f,
                             stopToken = "</think>"
-                        )
+                        ),
+                        keepCache = false
                     ) { token ->
                         _state.value = _state.value.copy(
                             thinkingOutput = (_state.value.thinkingOutput ?: "") + token
@@ -279,16 +280,17 @@ class SettingsViewModel @Inject constructor(
                 Log.i("PocketFinancer", "=== Phase 2: JSON generation ===")
 
                 val fullPrompt = thinkPrompt + thinkResult + "</think>\n"
-                Log.i("PocketFinancer", "Phase 2 prompt length: ${fullPrompt.length} chars")
+                Log.i("PocketFinancer", "Phase 2 conceptual prompt length: ${fullPrompt.length} chars (KV cache reused, decoding suffix only)")
 
                 val answer = withContext(Dispatchers.IO) {
                     llamaEngine.complete(
-                        prompt = fullPrompt,
+                        prompt = "</think>\n",
                         params = LlamaEngine.InferenceParams(
                             maxTokens = 256,
                             temperature = 0.0f,
                             grammar = grammar
-                        )
+                        ),
+                        keepCache = true
                     ) { token ->
                         _state.value = _state.value.copy(
                             testResult = (_state.value.testResult ?: "") + token

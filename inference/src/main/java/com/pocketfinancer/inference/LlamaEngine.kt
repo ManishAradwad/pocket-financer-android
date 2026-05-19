@@ -205,6 +205,7 @@ class LlamaEngine @Inject constructor(
                 thinkingTokens,
                 0.0f,             // greedy sampling
                 "</think>",        // stop token
+                false,             // do NOT keep cache, clear it
                 callback
             )
 
@@ -214,14 +215,17 @@ class LlamaEngine @Inject constructor(
             }
 
             // Phase 2: Grammar-constrained JSON decode
-            val fullPrompt = thinkPrompt + thinkResult + "</think>\n"
+            // We reuse the existing KV cache that contains the prompt and the generated think block.
+            // We only need to append and decode the stop suffix "</think>\n".
+            val thinkSuffix = "</think>\n"
             val answer = nativeCompletion(
                 modelHandle,
-                fullPrompt,
+                thinkSuffix,
                 grammar,           // GBNF grammar applied here
                 answerTokens,
                 0.0f,              // greedy sampling for deterministic output
                 null,              // no stop token — grammar controls completion
+                true,              // keep cache!
                 callback
             )
 
@@ -252,6 +256,7 @@ class LlamaEngine @Inject constructor(
     suspend fun complete(
         prompt: String,
         params: InferenceParams = InferenceParams(),
+        keepCache: Boolean = false,
         callback: TokenCallback? = null
     ): String = withContext(Dispatchers.IO) {
         if (!isLoaded) return@withContext ""
@@ -262,6 +267,7 @@ class LlamaEngine @Inject constructor(
             params.maxTokens,
             params.temperature,
             params.stopToken,
+            keepCache,
             callback
         )
     }
@@ -336,6 +342,7 @@ class LlamaEngine @Inject constructor(
         nPredict: Int,
         temperature: Float,
         stop: String?,
+        keepCache: Boolean,
         callback: TokenCallback?
     ): String
     private external fun nativeApplyChatTemplate(
