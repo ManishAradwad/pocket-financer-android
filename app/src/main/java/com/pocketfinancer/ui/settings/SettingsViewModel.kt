@@ -68,10 +68,27 @@ class SettingsViewModel @Inject constructor(
         // Mirror downloader state into UI state
         viewModelScope.launch {
             modelDownloader.state.collect { ds ->
-                _state.value = _state.value.copy(downloadState = ds)
+                val finalDs = if (!ds.isDownloading && !ds.isComplete) {
+                    val slm = _state.value.selectedSlm
+                    val file = slm?.let { getModelFile(it) }
+                    if (file != null && file.exists() && file.length() > 0) {
+                        ds.copy(
+                            isComplete = true,
+                            progress = 1f,
+                            downloadedMb = file.length() / 1_048_576f,
+                            totalMb = file.length() / 1_048_576f,
+                            outputPath = file.absolutePath
+                        )
+                    } else {
+                        ds
+                    }
+                } else {
+                    ds
+                }
+                _state.value = _state.value.copy(downloadState = finalDs)
                 // Auto-load after download completes
-                if (ds.isComplete && !_state.value.modelLoaded) {
-                    ds.outputPath?.let { path -> loadModelFromPath(path) }
+                if (finalDs.isComplete && !_state.value.modelLoaded) {
+                    finalDs.outputPath?.let { path -> loadModelFromPath(path) }
                 }
             }
         }
@@ -195,10 +212,32 @@ class SettingsViewModel @Inject constructor(
     }
 
     fun refreshModelStatus() {
+        val loaded = llamaEngine.isModelLoaded()
+        val path = llamaEngine.getModelPath()
         _state.value = _state.value.copy(
-            modelLoaded = llamaEngine.isModelLoaded(),
-            modelPath = llamaEngine.getModelPath()
+            modelLoaded = loaded,
+            modelPath = path
         )
+
+        val slm = _state.value.selectedSlm
+        if (slm != null) {
+            val file = getModelFile(slm)
+            if (file.exists() && file.length() > 0) {
+                val currentDs = _state.value.downloadState
+                if (!currentDs.isDownloading && !currentDs.isComplete) {
+                    _state.value = _state.value.copy(
+                        downloadState = ModelDownloader.DownloadState(
+                            isDownloading = false,
+                            isComplete = true,
+                            progress = 1f,
+                            downloadedMb = file.length() / 1_048_576f,
+                            totalMb = file.length() / 1_048_576f,
+                            outputPath = file.absolutePath
+                        )
+                    )
+                }
+            }
+        }
     }
 
     // ── Test SMS ─────────────────────────────────────────────────────────

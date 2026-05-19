@@ -100,6 +100,7 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeLoadModel(
     ctx_params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
     ctx_params.type_k = GGML_TYPE_Q8_0;
     ctx_params.type_v = GGML_TYPE_Q8_0;
+    ctx_params.no_perf = false;
 
     llama_context *ctx = llama_init_from_model(model, ctx_params);
     if (!ctx) {
@@ -139,6 +140,10 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeCompletion(
     }
 
     inst->should_stop.store(false);
+
+    if (!jkeep_cache) {
+        llama_perf_context_reset(inst->ctx);
+    }
 
     const char *prompt  = env->GetStringUTFChars(jprompt, nullptr);
     const char *grammar = jgrammar ? env->GetStringUTFChars(jgrammar, nullptr) : nullptr;
@@ -218,16 +223,8 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeCompletion(
             batch.n_seq_id[j] = 1;
             batch.seq_id[j][0] = 0;
             batch.logits[j] = (i + j == n_tokens - 1);
-            __android_log_print(ANDROID_LOG_INFO, "PocketFinancer",
-                                "  token[%d]=%d, pos[%d]=%d, logits[%d]=%d",
-                                j, batch.token[j], j, batch.pos[j], j, batch.logits[j]);
         }
         int decode_res = llama_decode(inst->ctx, batch);
-        __android_log_print(ANDROID_LOG_INFO, "PocketFinancer",
-                            "llama_decode returned %d, kv_min=%d, kv_max=%d",
-                            decode_res,
-                            llama_memory_seq_pos_min(llama_get_memory(inst->ctx), 0),
-                            llama_memory_seq_pos_max(llama_get_memory(inst->ctx), 0));
         if (decode_res != 0) {
             LOG_ERR("nativeCompletion: prefill decode failed at chunk %d\n", i);
             llama_batch_free(batch);
