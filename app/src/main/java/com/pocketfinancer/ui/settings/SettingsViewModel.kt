@@ -11,8 +11,10 @@ import com.pocketfinancer.inference.LlamaEngine
 import com.pocketfinancer.inference.ModelDownloader
 import com.pocketfinancer.pipeline.ExtractionParser
 import com.pocketfinancer.pipeline.PromptBuilder
+import com.pocketfinancer.pipeline.SmsFilterPipeline
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -46,7 +48,8 @@ data class SettingsUiState(
     val thinkingOutput: String? = null,        // raw <think> block from Phase 1
     val testResult: String? = null,
     val testParsed: String? = null,
-    val testError: String? = null
+    val testError: String? = null,
+    val filterLogs: List<String>? = null
 )
 
 @HiltViewModel
@@ -55,7 +58,8 @@ class SettingsViewModel @Inject constructor(
     private val llamaEngine: LlamaEngine,
     private val modelDownloader: ModelDownloader,
     private val promptBuilder: PromptBuilder,
-    private val extractionParser: ExtractionParser
+    private val extractionParser: ExtractionParser,
+    private val smsFilterPipeline: SmsFilterPipeline
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(SettingsUiState())
@@ -256,14 +260,37 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch {
             _state.value = _state.value.copy(
                 testRunning = true,
-                testProgress = "Phase 0: Loading grammar & building prompt...",
+                testProgress = "Phase 0: SMS Filtering...",
                 testResult = null,
                 testParsed = null,
                 thinkingOutput = null,
-                testError = null
+                testError = null,
+                filterLogs = null
             )
 
+            // Perform SMS filtering with a short delay for UI state transition feedback
+            delay(800)
+            val filterResult = smsFilterPipeline.filterWithDetails(testSender, testBody)
+            _state.value = _state.value.copy(
+                filterLogs = filterResult.logs
+            )
+            // Let the user see the resulting logs before continuing
+            delay(1000)
+
+            if (!filterResult.isTransactional) {
+                _state.value = _state.value.copy(
+                    testRunning = false,
+                    testProgress = "Filtered Out (Non-transactional)",
+                    testResult = "Skipping LLM inference: SMS is classified as non-transactional."
+                )
+                return@launch
+            }
+
             try {
+                // ── Phase 1: Thinking ─────────────────────────────────────
+                _state.value = _state.value.copy(
+                    testProgress = "Phase 1: Thinking (<think> block, max 1024 tokens)..."
+                )
                 val grammar = llamaEngine.readAsset("sms_extraction.gbnf")
                 val rawPrompt = promptBuilder.buildExtractionPrompt(testSender, testBody)
                 val chatPrompt = promptBuilder.buildChatPrompt(rawPrompt, enableThinking = true)
@@ -271,11 +298,6 @@ class SettingsViewModel @Inject constructor(
                 Log.i("PocketFinancer", "Chat prompt length: ${chatPrompt.length} chars")
 
                 val startTime = System.currentTimeMillis()
-
-                // ── Phase 1: Thinking ─────────────────────────────────────
-                _state.value = _state.value.copy(
-                    testProgress = "Phase 1: Thinking (<think> block, max 1024 tokens)..."
-                )
                 Log.i("PocketFinancer", "=== Phase 1: Thinking ===")
 
                 val thinkPrompt = chatPrompt + "<think>\n"

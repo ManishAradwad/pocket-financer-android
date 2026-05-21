@@ -15,7 +15,9 @@ By leveraging a local **Small Language Model (SLM)** backed by `llama.cpp` via a
 ## 🌟 Key Features
 
 *   **Offline SLM Inference**: Processes SMS message semantics entirely locally using GGUF-based local LLMs.
-*   **Dual-Phase Reasoning Pipeline**:
+*   **Deterministic SMS Pre-Filtering**: A 6-stage, regex-based filter running in `< 1ms` to filter out personal numbers, marketing/OTP alerts, and non-transactional messages before running model inference, preserving device CPU and battery.
+*   **Three-Phase Reasoning Pipeline**:
+    *   *Phase 0 (Pre-Filtering)*: Checks sender, currency amounts, masked accounts, and action verbs; filters out OTPs and collect requests.
     *   *Phase 1 (Chain of Thought)*: Dynamic allocation of `<think>` tokens (1024 token budget) to analyze the alert sender context and message logic.
     *   *Phase 2 (Grammar-Constrained Parse)*: Utilizes **GBNF (GGML BNF) Grammars** to force the model to output a strict, valid JSON transaction schema (guaranteeing a 100% parser success rate).
 *   **Dynamic Hardware Auto-Tuning**: Smart hardware profiling detects device RAM capacities and CPU architectures (specifically checking for `ARMv8.2-A` instruction features like `i8mm` and `dotprod` to accelerate integer math) to select the optimal model size automatically.
@@ -31,16 +33,19 @@ By leveraging a local **Small Language Model (SLM)** backed by `llama.cpp` via a
 graph TD
     A[Incoming SMS Alert] -->|Telephony.SMS_RECEIVED| B(SmsReceiver)
     B -->|SmsMessage Flow| C[PipelineService]
-    D[Device Profile] -->|RAM & Instruction Capabilities| C
-    C -->|Assembles Prompt & Context| E[PromptBuilder]
-    E -->|Raw Text Prompt| C
-    C -->|Executes JNI Native Call| F[LlamaEngine / llama.cpp]
+    C -->|Pre-Filter Checks| FP{SmsFilterPipeline<br>6-Stage Deterministic Filter}
+    FP -->|Dropped / Non-Transactional| Discard[Discard Alert]
+    FP -->|Passed / Transactional| C2[Inference Queue]
+    D[Device Profile] -->|RAM & Instruction Capabilities| C2
+    C2 -->|Assembles Prompt & Context| E[PromptBuilder]
+    E -->|Raw Text Prompt| C2
+    C2 -->|Executes JNI Native Call| F[LlamaEngine / llama.cpp]
     F -->|Phase 1: Chain of Thought Reasoning| F
     F -->|Phase 2: GBNF Grammar JSON Enforcement| F
-    F -->|JSON / Null Output| C
-    C -->|Sanitize & Parse| G[ExtractionParser]
-    G -->|Normalized Transaction| C
-    C -->|Writes Encrypted Entry| H[(SQLCipher Room DB)]
+    F -->|JSON / Null Output| C2
+    C2 -->|Sanitize & Parse| G[ExtractionParser]
+    G -->|Normalized Transaction| C2
+    C2 -->|Writes Encrypted Entry| H[(SQLCipher Room DB)]
     I[Jetpack Compose M3 UI] -->|Observes Flow| H
 ```
 
@@ -71,16 +76,16 @@ pocket-financer-android/
 
 ---
 
-## 🧠 Two-Phase Inference Engine
+## 🧠 Three-Phase Processing Pipeline
 
-Extracting structured data from highly unstructured, localized SMS alerts (which vary drastically across dozens of Indian financial institutions) requires a reliable parsing mechanism:
+Extracting structured data from highly unstructured, localized SMS alerts (which vary drastically across dozens of Indian financial institutions) requires a reliable and power-efficient parsing mechanism:
 
-1.  **Context Construction**:
-    The system reads [system_prompt.txt](file:///d:/Personal_Projects/pocket-financer-android/inference/src/main/assets/system_prompt.txt) and parses few-shot templates from [few_shot_examples.json](file:///d:/Personal_Projects/pocket-financer-android/inference/src/main/assets/few_shot_examples.json) to prepare the context format.
+1.  **Phase 0: Deterministic SMS Pre-Filtering**:
+    Before waking the SLM execution engine, the incoming message runs through a 6-stage regex validation check ([SmsFilterPipeline.kt](file:///d:/Personal_Projects/pocket-financer-android/pipeline/src/main/java/com/pocketfinancer/pipeline/SmsFilterPipeline.kt)) to assert that the alert contains actual transaction markers (amounts, masked accounts, action verbs) and excludes verification codes/OTPs and pending payment collect requests. If any stage fails, processing terminates instantly (taking less than 1ms), avoiding unnecessary CPU-heavy model evaluations.
 2.  **Phase 1: Thinking Pass (Chain of Thought)**:
-    We append `<think>` to the prompt. The model processes the SMS semantics, thinking step-by-step to verify if the message represents a true, user-initiated financial transaction (rejecting OTPs, marketing spam, bill reminders, or wallet transfers).
-3.  **Phase 2: Constrained Output Generation**:
-    Once the thinking tag is closed with `</think>`, the JNI engine switches its token selection rules by applying a strict GBNF (Backus-Naur Form) grammar defined in [sms_extraction.gbnf](file:///d:/Personal_Projects/pocket-financer-android/inference/src/main/assets/sms_extraction.gbnf). The grammar forces the output to match this JSON schema exactly:
+    For messages that pass the pre-filter, the system builds the inference prompt (merging the system prompt and few-shot examples) and appends `<think>` to the end. The local SLM processes the SMS semantics, reasoning step-by-step to verify transaction details.
+3.  **Phase 2: Constrained JSON Generation**:
+    Once the thinking tag is closed with `</think>`, the native JNI engine applies a strict Backus-Naur Form (GBNF) grammar defined in [sms_extraction.gbnf](file:///d:/Personal_Projects/pocket-financer-android/inference/src/main/assets/sms_extraction.gbnf). This grammar constrains the vocabulary sampling to force the model to output a strict, valid JSON transaction schema (guaranteeing a 100% parser success rate):
     ```json
     {
       "amount": 1500.00,

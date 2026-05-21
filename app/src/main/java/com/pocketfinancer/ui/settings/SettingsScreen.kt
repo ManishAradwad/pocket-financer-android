@@ -336,6 +336,9 @@ private fun EngineCard(state: SettingsUiState, viewModel: SettingsViewModel) {
                 modifier = Modifier.padding(top = 8.dp)
             )
         }
+        state.filterLogs?.let { logs ->
+            OutputBox(title = "SMS Filter Pipeline Logs", content = logs.joinToString("\n"))
+        }
         state.thinkingOutput?.let { thinking ->
             OutputBox(title = "Thinking (<think> block)", content = thinking.take(2000))
         }

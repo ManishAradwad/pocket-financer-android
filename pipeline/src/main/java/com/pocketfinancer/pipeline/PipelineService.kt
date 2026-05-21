@@ -28,7 +28,8 @@ class PipelineService @Inject constructor(
     private val promptBuilder: PromptBuilder,
     private val extractionParser: ExtractionParser,
     private val transactionRepository: TransactionRepository,
-    private val accountRepository: AccountRepository
+    private val accountRepository: AccountRepository,
+    private val smsFilterPipeline: SmsFilterPipeline
 ) {
     /** Max SMS in queue before dropping. */
     private val maxQueueLen = 200
@@ -63,6 +64,9 @@ class PipelineService @Inject constructor(
      * Enqueue an SMS for processing. Drops if queue is full.
      */
     fun enqueue(sms: SmsReader.SmsMessage) {
+        if (!smsFilterPipeline.isTransactional(sms.address, sms.body)) {
+            return
+        }
         if (smsQueue.size >= maxQueueLen) {
             return
         }
@@ -75,6 +79,9 @@ class PipelineService @Inject constructor(
      */
     fun enqueueBatch(messages: List<SmsReader.SmsMessage>) {
         for (sms in messages) {
+            if (!smsFilterPipeline.isTransactional(sms.address, sms.body)) {
+                continue
+            }
             if (smsQueue.size >= maxQueueLen) break
             smsQueue.addLast(sms)
         }

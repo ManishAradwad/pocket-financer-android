@@ -74,7 +74,8 @@ Output:
             promptBuilder = promptBuilder,
             extractionParser = extractionParser,
             transactionRepository = transactionRepository,
-            accountRepository = accountRepository
+            accountRepository = accountRepository,
+            smsFilterPipeline = SmsFilterPipeline()
         )
     }
 
@@ -151,7 +152,7 @@ Output:
             coEvery { llamaEngine.inferForExtraction(any(), any(), any(), any()) } returns
                 LlamaEngine.InferenceResult.Null
             for (i in 0..200) {
-                pipeline.enqueue(SmsReader.SmsMessage(testSender, "SMS $i", i * 1000L, 1))
+                pipeline.enqueue(SmsReader.SmsMessage(testSender, "Rs $i credited to a/c XX0000", i * 1000L, 1))
             }
             pipeline.drain(timeoutMs = 5000)
             assert(pipeline.queueSize == 0)
@@ -175,7 +176,7 @@ Output:
             coEvery { llamaEngine.inferForExtraction(any(), any(), any(), any()) } returns
                 LlamaEngine.InferenceResult.Null
             val messages = (1..5).map { i ->
-                SmsReader.SmsMessage(testSender, "SMS $i", i * 1000L, 1)
+                SmsReader.SmsMessage(testSender, "Rs $i credited to a/c XX0000", i * 1000L, 1)
             }
             pipeline.enqueueBatch(messages)
             pipeline.drain(timeoutMs = 5000)
@@ -209,9 +210,9 @@ Output:
         runBlocking {
             coEvery { llamaEngine.inferForExtraction(any(), any(), any(), any()) } returns
                 LlamaEngine.InferenceResult.Null
-            pipeline.enqueue(SmsReader.SmsMessage(testSender, "SMS 1", 1000L, 1))
-            pipeline.enqueue(SmsReader.SmsMessage(testSender, "SMS 2", 2000L, 1))
-            pipeline.enqueue(SmsReader.SmsMessage(testSender, "SMS 3", 3000L, 1))
+            pipeline.enqueue(SmsReader.SmsMessage(testSender, "Rs 100 credited to a/c XX0000", 1000L, 1))
+            pipeline.enqueue(SmsReader.SmsMessage(testSender, "Rs 200 credited to a/c XX0000", 2000L, 1))
+            pipeline.enqueue(SmsReader.SmsMessage(testSender, "Rs 300 credited to a/c XX0000", 3000L, 1))
             pipeline.drain(timeoutMs = 5000)
             assertEquals(0, pipeline.queueSize)
         }
