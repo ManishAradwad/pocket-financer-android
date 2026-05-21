@@ -176,5 +176,4 @@ This project is licensed under the MIT License. See the [LICENSE](LICENSE) file 
 ## 🤝 Acknowledgments
 
 *   [llama.cpp](https://github.com/ggerganov/llama.cpp) — Core engine powering local, on-device SLM execution.
-*   [PocketPal AI](https://github.com/a-ghorbani/pocketpal-ai) — Inspiring project for React Native SMS pipelines.
-*   The SLM Evaluation Pipeline (`pF_slm_selection`) which identified optimal parameters for Qwen3 model quantizations.
+*   The SLM Evaluation Pipeline (`[pF_slm_selection](https://github.com/ManishAradwad/pF_slm_selection)`) which identified the best Small Language Models for this app.
