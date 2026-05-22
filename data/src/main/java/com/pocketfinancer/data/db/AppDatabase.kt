@@ -36,10 +36,6 @@ abstract class AppDatabase : RoomDatabase() {
         private const val DB_NAME = "pocketfinancer.db"
         private const val SQLCIPHER_KDF_ITERATIONS = 256_000
 
-        init {
-            System.loadLibrary("sqlcipher")
-        }
-
         /**
          * Generate a cryptographically random passphrase for SQLCipher.
          * In production this reads from Android Keystore. During initial dev
@@ -71,6 +67,7 @@ abstract class AppDatabase : RoomDatabase() {
         @ApplicationContext private val context: Context
     ) {
         fun create(): AppDatabase {
+            System.loadLibrary("sqlcipher")
             val passphrase = getOrCreatePassphrase(context)
             val factory = SupportOpenHelperFactory(passphrase)
 
