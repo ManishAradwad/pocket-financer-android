@@ -187,6 +187,7 @@ class LlamaEngine @Inject constructor(
     suspend fun inferForExtraction(
         prompt: String,
         grammar: String,
+        staticPrefix: String? = null,
         thinkingTokens: Int = 1024,
         answerTokens: Int = 256,
         callback: TokenCallback? = null
@@ -196,8 +197,57 @@ class LlamaEngine @Inject constructor(
         }
 
         try {
+            var thinkPrompt = prompt + "<think>\n"
+            var keepCacheFirstPhase = false
+
+            if (staticPrefix != null) {
+                val splitIndex = prompt.indexOf(staticPrefix)
+                if (splitIndex != -1) {
+                    val prefixString = prompt.substring(0, splitIndex + staticPrefix.length)
+                    val suffixString = prompt.substring(splitIndex + staticPrefix.length)
+
+                    val prefixHash = computeSha256(prefixString)
+                    val sessionFile = getSessionFile(prefixHash)
+
+                    val prefixTokens = tokenize(prefixString, addSpecial = true)
+                    if (prefixTokens != null) {
+                        var sessionLoaded = false
+                        if (sessionFile.exists()) {
+                            android.util.Log.i("pocketfinancer_llm", "Session cache file found: ${sessionFile.name}. Loading...")
+                            val loaded = loadSession(sessionFile.absolutePath, prefixTokens.size)
+                            if (loaded == prefixTokens.size) {
+                                sessionLoaded = true
+                                android.util.Log.i("pocketfinancer_llm", "Session cache loaded successfully ($loaded tokens).")
+                            } else {
+                                android.util.Log.w("pocketfinancer_llm", "Loaded tokens ($loaded) does not match expected size (${prefixTokens.size}). Regenerating...")
+                            }
+                        }
+
+                        if (!sessionLoaded) {
+                            android.util.Log.i("pocketfinancer_llm", "Generating new session cache...")
+                            // Prefill-only run
+                            nativeCompletion(
+                                modelHandle,
+                                prefixString,
+                                null,
+                                0,
+                                0.0f,
+                                null,
+                                false,
+                                null
+                            )
+                            deleteStaleSessions(prefixHash)
+                            val saved = saveSession(sessionFile.absolutePath, prefixTokens)
+                            android.util.Log.i("pocketfinancer_llm", "Session cache saved: $saved")
+                        }
+
+                        thinkPrompt = suffixString + "<think>\n"
+                        keepCacheFirstPhase = true
+                    }
+                }
+            }
+
             // Phase 1: Thinking pass — generate <think>... block
-            val thinkPrompt = prompt + "<think>\n"
             val thinkResult = nativeCompletion(
                 modelHandle,
                 thinkPrompt,
@@ -205,7 +255,7 @@ class LlamaEngine @Inject constructor(
                 thinkingTokens,
                 0.0f,             // greedy sampling
                 "</think>",        // stop token
-                false,             // do NOT keep cache, clear it
+                keepCacheFirstPhase,
                 callback
             )
 
@@ -332,6 +382,69 @@ class LlamaEngine @Inject constructor(
         }
     }
 
+    /**
+     * Tokenize text into token IDs.
+     */
+    fun tokenize(text: String, addSpecial: Boolean = true): IntArray? {
+        if (modelHandle == 0L) return null
+        return nativeTokenize(modelHandle, text, addSpecial)
+    }
+
+    /**
+     * Save the current KV cache session state and associated tokens to a file.
+     */
+    fun saveSession(path: String, tokens: IntArray): Boolean {
+        if (modelHandle == 0L) return false
+        return nativeSaveSession(modelHandle, path, tokens)
+    }
+
+    /**
+     * Load/restore the KV cache session state from a file.
+     * Returns the number of loaded tokens, or -1 on error.
+     */
+    fun loadSession(path: String, maxTokens: Int): Int {
+        if (modelHandle == 0L) return -1
+        val tokensOut = IntArray(maxTokens)
+        return nativeLoadSession(modelHandle, path, tokensOut)
+    }
+
+    /**
+     * Compute SHA-256 hash of a string.
+     */
+    fun computeSha256(input: String): String {
+        val md = java.security.MessageDigest.getInstance("SHA-256")
+        val bytes = md.digest(input.toByteArray(Charsets.UTF_8))
+        return bytes.joinToString("") { "%02x".format(it) }
+    }
+
+    /**
+     * Get the session file for a given prefix hash.
+     */
+    fun getSessionFile(hash: String): File {
+        val dir = getModelStorageDir()
+        return File(dir, "session_$hash.bin")
+    }
+
+    /**
+     * Delete any stale session files, keeping only the one with the specified hash (if any).
+     */
+    fun deleteStaleSessions(activeHash: String?) {
+        val dir = getModelStorageDir()
+        val files = dir.listFiles() ?: return
+        for (file in files) {
+            if (file.name.startsWith("session_") && file.name.endsWith(".bin")) {
+                if (activeHash == null || file.name != "session_$activeHash.bin") {
+                    try {
+                        val deleted = file.delete()
+                        android.util.Log.i("pocketfinancer_llm", "Deleted stale session file: ${file.name} (success=$deleted)")
+                    } catch (e: Exception) {
+                        android.util.Log.e("pocketfinancer_llm", "Failed to delete stale session: ${file.name}", e)
+                    }
+                }
+            }
+        }
+    }
+
     // ── JNI declarations ──────────────────────────────────────────────────
 
     private external fun nativeLoadModel(path: String, nCtx: Int, nGpuLayers: Int): Long
@@ -354,4 +467,7 @@ class LlamaEngine @Inject constructor(
     private external fun nativeStop(handle: Long)
     private external fun nativeUnloadModel(handle: Long)
     private external fun nativeGetModelSize(path: String): Long
+    private external fun nativeTokenize(handle: Long, text: String, addSpecial: Boolean): IntArray?
+    private external fun nativeSaveSession(handle: Long, path: String, tokens: IntArray): Boolean
+    private external fun nativeLoadSession(handle: Long, path: String, tokensOut: IntArray): Int
 }

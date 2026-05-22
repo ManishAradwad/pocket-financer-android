@@ -39,6 +39,23 @@ class PromptBuilder @Inject constructor(
     }
 
     /**
+     * Get the static prompt prefix (system prompt and few-shot examples).
+     */
+    fun getStaticPrefix(): String {
+        val sb = StringBuilder()
+        sb.append(systemPrompt)
+        sb.append("\n\n### EXAMPLES (already labeled — for reference only, do NOT answer these)\n\n")
+        for (i in 0 until fewShotExamples.length()) {
+            val ex = fewShotExamples.getJSONObject(i)
+            sb.append("Sender: ${ex.getString("sender")}\n")
+            sb.append("SMS: ${ex.getString("sms")}\n")
+            sb.append("Output: ${ex.getString("answer")}\n\n")
+        }
+        sb.append("### YOUR TASK (answer this one SMS only — output JSON or null, nothing else)\n\n")
+        return sb.toString()
+    }
+
+    /**
      * Build the full extraction prompt for a given SMS message.
      *
      * @param sender The SMS sender address (e.g. "AX-HDFCBK")

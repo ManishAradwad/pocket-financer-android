@@ -292,15 +292,73 @@ class SettingsViewModel @Inject constructor(
                     testProgress = "Phase 1: Thinking (<think> block, max 1024 tokens)..."
                 )
                 val grammar = llamaEngine.readAsset("sms_extraction.gbnf")
+                val staticPrefix = promptBuilder.getStaticPrefix()
                 val rawPrompt = promptBuilder.buildExtractionPrompt(testSender, testBody)
                 val chatPrompt = promptBuilder.buildChatPrompt(rawPrompt, enableThinking = true)
                 Log.i("PocketFinancer", "Initial raw prompt length: ${rawPrompt.length} chars")
                 Log.i("PocketFinancer", "Chat prompt length: ${chatPrompt.length} chars")
 
+                // Split prompt into static prefix and dynamic suffix
+                val splitIndex = chatPrompt.indexOf(staticPrefix)
+                if (splitIndex == -1) {
+                    throw IllegalStateException("Static prefix not found in chat prompt")
+                }
+                val prefixString = chatPrompt.substring(0, splitIndex + staticPrefix.length)
+                val suffixString = chatPrompt.substring(splitIndex + staticPrefix.length)
+
+                val prefixHash = llamaEngine.computeSha256(prefixString)
+                val sessionFile = llamaEngine.getSessionFile(prefixHash)
+
+                val prefixTokens = llamaEngine.tokenize(prefixString, addSpecial = true)
+                    ?: throw IllegalStateException("Failed to tokenize prefix prompt")
+
                 val startTime = System.currentTimeMillis()
+
+                // Check and load session cache
+                if (sessionFile.exists()) {
+                    Log.i("PocketFinancer", "Session cache file found: ${sessionFile.name}. Loading...")
+                    val loaded = withContext(Dispatchers.IO) {
+                        llamaEngine.loadSession(sessionFile.absolutePath, prefixTokens.size)
+                    }
+                    if (loaded != prefixTokens.size) {
+                        Log.w("PocketFinancer", "Loaded tokens ($loaded) does not match expected size (${prefixTokens.size}). Regenerating...")
+                        // Prefill-only run on prefixString to generate state
+                        withContext(Dispatchers.IO) {
+                            llamaEngine.complete(
+                                prompt = prefixString,
+                                params = LlamaEngine.InferenceParams(maxTokens = 0),
+                                keepCache = false
+                            )
+                        }
+                        // Delete stale sessions and save new session
+                        llamaEngine.deleteStaleSessions(prefixHash)
+                        withContext(Dispatchers.IO) {
+                            llamaEngine.saveSession(sessionFile.absolutePath, prefixTokens)
+                        }
+                    } else {
+                        Log.i("PocketFinancer", "Session cache loaded successfully ($loaded tokens).")
+                    }
+                } else {
+                    Log.i("PocketFinancer", "Session cache file not found. Generating new session...")
+                    // Prefill-only run on prefixString to generate state
+                    withContext(Dispatchers.IO) {
+                        llamaEngine.complete(
+                            prompt = prefixString,
+                            params = LlamaEngine.InferenceParams(maxTokens = 0),
+                            keepCache = false
+                        )
+                    }
+                    // Delete stale sessions and save new session
+                    llamaEngine.deleteStaleSessions(prefixHash)
+                    val saved = withContext(Dispatchers.IO) {
+                        llamaEngine.saveSession(sessionFile.absolutePath, prefixTokens)
+                    }
+                    Log.i("PocketFinancer", "Session cache saved: $saved")
+                }
+
                 Log.i("PocketFinancer", "=== Phase 1: Thinking ===")
 
-                val thinkPrompt = chatPrompt + "<think>\n"
+                val thinkPrompt = suffixString + "<think>\n"
                 val thinkResult = withContext(Dispatchers.IO) {
                     llamaEngine.complete(
                         prompt = thinkPrompt,
@@ -309,7 +367,7 @@ class SettingsViewModel @Inject constructor(
                             temperature = 0.0f,
                             stopToken = "</think>"
                         ),
-                        keepCache = false
+                        keepCache = true
                     ) { token ->
                         _state.value = _state.value.copy(
                             thinkingOutput = (_state.value.thinkingOutput ?: "") + token

@@ -159,6 +159,7 @@ class PipelineService @Inject constructor(
         val result = llamaEngine.inferForExtraction(
             prompt = chatPrompt,
             grammar = grammar,
+            staticPrefix = promptBuilder.getStaticPrefix(),
             thinkingTokens = 1024,
             answerTokens = 256
         )

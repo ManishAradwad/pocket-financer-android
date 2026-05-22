@@ -583,3 +583,112 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeGetModelSize(
     env->ReleaseStringUTFChars(jpath, path);
     return size;
 }
+
+// ── nativeTokenize ─────────────────────────────────────────────────────────
+
+extern "C" JNIEXPORT jintArray JNICALL
+Java_com_pocketfinancer_inference_LlamaEngine_nativeTokenize(
+    JNIEnv *env, jclass /*clazz*/, jlong handle, jstring jtext, jboolean add_special) {
+
+    auto *inst = jlong_to_instance(handle);
+    if (!inst || !inst->vocab) return nullptr;
+
+    const char *text = env->GetStringUTFChars(jtext, nullptr);
+    if (!text) return nullptr;
+
+    int n_tokens = -llama_tokenize(inst->vocab, text, (int)strlen(text), nullptr, 0, add_special, true);
+    if (n_tokens < 0) {
+        env->ReleaseStringUTFChars(jtext, text);
+        return nullptr;
+    }
+
+    std::vector<llama_token> tokens(n_tokens);
+    llama_tokenize(inst->vocab, text, (int)strlen(text), tokens.data(), n_tokens, add_special, true);
+
+    jintArray result = env->NewIntArray(n_tokens);
+    jint *result_ptr = env->GetIntArrayElements(result, nullptr);
+    for (int i = 0; i < n_tokens; ++i) {
+        result_ptr[i] = static_cast<jint>(tokens[i]);
+    }
+    env->ReleaseIntArrayElements(result, result_ptr, 0);
+
+    env->ReleaseStringUTFChars(jtext, text);
+    return result;
+}
+
+// ── nativeSaveSession ───────────────────────────────────────────────────────
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_pocketfinancer_inference_LlamaEngine_nativeSaveSession(
+    JNIEnv *env, jclass /*clazz*/, jlong handle, jstring jpath, jintArray jtokens) {
+
+    auto *inst = jlong_to_instance(handle);
+    if (!inst || !inst->ctx) return JNI_FALSE;
+
+    const char *path = env->GetStringUTFChars(jpath, nullptr);
+    if (!path) return JNI_FALSE;
+
+    jsize n_tokens = env->GetArrayLength(jtokens);
+    jint *tokens_ptr = env->GetIntArrayElements(jtokens, nullptr);
+
+    std::vector<llama_token> tokens(n_tokens);
+    for (jsize i = 0; i < n_tokens; ++i) {
+        tokens[i] = static_cast<llama_token>(tokens_ptr[i]);
+    }
+    env->ReleaseIntArrayElements(jtokens, tokens_ptr, JNI_ABORT);
+
+    bool ok = llama_state_save_file(inst->ctx, path, tokens.data(), tokens.size());
+
+    __android_log_print(ANDROID_LOG_INFO, "pocketfinancer_llm",
+                        "nativeSaveSession: saved session to %s (status=%d, tokens=%d)", path, ok, n_tokens);
+
+    env->ReleaseStringUTFChars(jpath, path);
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+// ── nativeLoadSession ───────────────────────────────────────────────────────
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_pocketfinancer_inference_LlamaEngine_nativeLoadSession(
+    JNIEnv *env, jclass /*clazz*/, jlong handle, jstring jpath, jintArray jtokens_out) {
+
+    auto *inst = jlong_to_instance(handle);
+    if (!inst || !inst->ctx) return -1;
+
+    const char *path = env->GetStringUTFChars(jpath, nullptr);
+    if (!path) return -1;
+
+    jsize max_tokens = env->GetArrayLength(jtokens_out);
+    std::vector<llama_token> tokens(max_tokens);
+    size_t n_tokens_loaded = 0;
+
+    // Clear KV cache for sequence 0 before loading session to prevent interleaving corruption
+    llama_memory_seq_rm(llama_get_memory(inst->ctx), 0, -1, -1);
+    inst->n_past = 0;
+
+    bool ok = llama_state_load_file(inst->ctx, path, tokens.data(), tokens.size(), &n_tokens_loaded);
+    if (!ok) {
+        __android_log_print(ANDROID_LOG_ERROR, "pocketfinancer_llm",
+                            "nativeLoadSession: failed to load session from %s", path);
+        env->ReleaseStringUTFChars(jpath, path);
+        return -1;
+    }
+
+    // Copy tokens back to dynamic buffer
+    jint *tokens_ptr = env->GetIntArrayElements(jtokens_out, nullptr);
+    for (size_t i = 0; i < n_tokens_loaded && i < static_cast<size_t>(max_tokens); ++i) {
+        tokens_ptr[i] = static_cast<jint>(tokens[i]);
+    }
+    env->ReleaseIntArrayElements(jtokens_out, tokens_ptr, 0);
+
+    // Update context pointer position
+    inst->n_past = static_cast<int>(n_tokens_loaded);
+
+    __android_log_print(ANDROID_LOG_INFO, "pocketfinancer_llm",
+                        "nativeLoadSession: loaded session from %s (tokens=%zu, n_past=%d)",
+                        path, n_tokens_loaded, inst->n_past);
+
+    env->ReleaseStringUTFChars(jpath, path);
+    return static_cast<jint>(n_tokens_loaded);
+}
+

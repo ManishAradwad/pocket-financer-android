@@ -21,6 +21,7 @@ By leveraging a local **Small Language Model (SLM)** backed by `llama.cpp` via a
     *   *Phase 1 (Chain of Thought)*: Dynamic allocation of `<think>` tokens (1024 token budget) to analyze the alert sender context and message logic.
     *   *Phase 2 (Grammar-Constrained Parse)*: Utilizes **GBNF (GGML BNF) Grammars** to force the model to output a strict, valid JSON transaction schema (guaranteeing a 100% parser success rate).
 *   **Dynamic Hardware Auto-Tuning**: Smart hardware profiling detects device RAM capacities and CPU architectures (specifically checking for `ARMv8.2-A` instruction features like `i8mm` and `dotprod` to accelerate integer math) to select the optimal model size automatically.
+*   **Disk-Based KV Cache Caching**: Saves and loads the static prefix KV cache state to/from disk using SHA-256 hashes. This cuts prefill time from ~140 seconds down to `< 100ms` on subsequent runs while automatically cleaning up old stale session files.
 *   **Cryptographically Secured Database**: Persists transaction and account information in a Room database encrypted with **SQLCipher (AES-256)**, securing sensitive ledger data from third-party app leaks or root-level vulnerabilities.
 *   **Real-time & Batch Synchronization**: Employs an Android `BroadcastReceiver` flow to catch transaction alerts as they land, combined with an inbox ContentProvider scraper to catch up on historical transactions during launch.
 *   **Modern Jetpack Compose UI**: Designed around Material 3 dark-themed specs to present clean dashboards, insight graphs, transaction histories, and device diagnostics.
@@ -95,6 +96,16 @@ Extracting structured data from highly unstructured, localized SMS alerts (which
     }
     ```
     If the message is determined to be non-financial, the grammar enforces outputting a simple literal `"null"`.
+
+---
+
+## ⚡ Performance Optimizations & Caching
+
+To make local inference responsive and preserve battery life, Pocket Financer implements disk-based KV Cache caching and automatic cleanup:
+*   **Static Prefix Caching**: The static prompt prefix (~1,800 tokens of system prompt + few-shot examples) is prefilled once, and the native JNI engine serializes the resulting KV cache to disk as `session_<sha256>.bin` inside the secure app storage.
+*   **Instant Load**: On subsequent inference runs, the pre-saved session is loaded from disk in under `100ms`, completely bypassing the heavy prefill phase.
+*   **Automatic Cache Invalidation**: The session file name matches the SHA-256 hash of the static prefix. Any modifications to `system_prompt.txt` or `few_shot_examples.json` will automatically trigger a new prefill run on the next execution.
+*   **Stale Cache Deletion**: To prevent disk clutter, whenever a new session file is generated, the engine automatically deletes all older stale `session_*.bin` cache files from device storage.
 
 ---
 
@@ -176,4 +187,4 @@ This project is licensed under the MIT License. See the [LICENSE](LICENSE) file 
 ## 🤝 Acknowledgments
 
 *   [llama.cpp](https://github.com/ggerganov/llama.cpp) — Core engine powering local, on-device SLM execution.
-*   The SLM Evaluation Pipeline (`[pF_slm_selection](https://github.com/ManishAradwad/pF_slm_selection)`) which identified the best Small Language Models for this app.
+*   The SLM Evaluation Pipeline ([`pF_slm_selection`](https://github.com/ManishAradwad/pF_slm_selection)) which identified the best Small Language Models for this app.
