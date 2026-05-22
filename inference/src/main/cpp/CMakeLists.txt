@@ -45,3 +45,5 @@ target_link_libraries(pocketfinancer_llm
     ggml-base
     log
 )
+
+target_link_options(pocketfinancer_llm PRIVATE "-Wl,-z,max-page-size=16384")

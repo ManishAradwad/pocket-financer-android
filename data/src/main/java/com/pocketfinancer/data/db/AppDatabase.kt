@@ -9,7 +9,7 @@ import com.pocketfinancer.data.db.dao.TransactionDao
 import com.pocketfinancer.data.db.entity.AccountEntity
 import com.pocketfinancer.data.db.entity.TransactionEntity
 import dagger.hilt.android.qualifiers.ApplicationContext
-import net.sqlcipher.database.SupportFactory
+import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -35,6 +35,10 @@ abstract class AppDatabase : RoomDatabase() {
     companion object {
         private const val DB_NAME = "pocketfinancer.db"
         private const val SQLCIPHER_KDF_ITERATIONS = 256_000
+
+        init {
+            System.loadLibrary("sqlcipher")
+        }
 
         /**
          * Generate a cryptographically random passphrase for SQLCipher.
@@ -68,7 +72,7 @@ abstract class AppDatabase : RoomDatabase() {
     ) {
         fun create(): AppDatabase {
             val passphrase = getOrCreatePassphrase(context)
-            val factory = SupportFactory(passphrase)
+            val factory = SupportOpenHelperFactory(passphrase)
 
             return Room.databaseBuilder(context, AppDatabase::class.java, DB_NAME)
                 .openHelperFactory(factory)

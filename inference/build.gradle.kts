@@ -28,7 +28,8 @@ android {
                     "-DGGML_OPENCL=OFF",
                     "-DGGML_METAL=OFF",
                     "-DGGML_BLAS=OFF",
-                    "-DGGML_RPC=OFF"
+                    "-DGGML_RPC=OFF",
+                    "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON"
                 )
                 cppFlags += listOf("-std=c++17", "-O3", "-DNDEBUG")
             }
