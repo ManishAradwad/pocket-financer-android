@@ -40,7 +40,10 @@ graph TD
     D[Device Profile] -->|RAM & Instruction Capabilities| C2
     C2 -->|Assembles Prompt & Context| E[PromptBuilder]
     E -->|Raw Text Prompt| C2
-    C2 -->|Executes JNI Native Call| F[LlamaEngine / llama.cpp]
+    C2 -->|Checks Cache File| CHK{Session File Exists?}
+    CHK -->|Yes: Load Cache < 100ms| F[LlamaEngine / llama.cpp]
+    CHK -->|No: Prefill Prefix| DEL[Delete Stale Sessions]
+    DEL -->|Save New Session| F
     F -->|Phase 1: Chain of Thought Reasoning| F
     F -->|Phase 2: GBNF Grammar JSON Enforcement| F
     F -->|JSON / Null Output| C2
