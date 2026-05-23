@@ -138,7 +138,7 @@ class PipelineService @Inject constructor(
             return rendered
         }
         // Fallback: manual Qwen3 template
-        return promptBuilder.buildChatPrompt(rawPrompt, enableThinking = true)
+        return promptBuilder.buildChatPrompt(rawPrompt, enableThinking = llamaEngine.hasThinkingMode)
     }
 
     private suspend fun processSingle(sms: SmsReader.SmsMessage) {

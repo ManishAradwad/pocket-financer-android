@@ -32,38 +32,38 @@ class DeviceCapabilitiesUnitTest {
     // ── ramTierFor (pure logic, no deps) ─────────────────────────────
 
     @Test
-    fun `ramTierFor should return BLOCKED below 3_5GB`() {
+    fun `ramTierFor should return BLOCKED below 2_5GB`() {
         val caps = DeviceCapabilities(mockContext)
+        assertEquals(DeviceCapabilities.RamTier.BLOCKED, caps.ramTierFor(1.0f))
         assertEquals(DeviceCapabilities.RamTier.BLOCKED, caps.ramTierFor(2.0f))
-        assertEquals(DeviceCapabilities.RamTier.BLOCKED, caps.ramTierFor(3.0f))
-        assertEquals(DeviceCapabilities.RamTier.BLOCKED, caps.ramTierFor(3.49f))
+        assertEquals(DeviceCapabilities.RamTier.BLOCKED, caps.ramTierFor(2.49f))
     }
 
     @Test
-    fun `ramTierFor should return WARNING between 3_5 and 4_0`() {
+    fun `ramTierFor should return WARNING between 2_5 and 3_5`() {
         val caps = DeviceCapabilities(mockContext)
-        assertEquals(DeviceCapabilities.RamTier.WARNING, caps.ramTierFor(3.5f))
-        assertEquals(DeviceCapabilities.RamTier.WARNING, caps.ramTierFor(3.8f))
-        assertEquals(DeviceCapabilities.RamTier.WARNING, caps.ramTierFor(3.99f))
+        assertEquals(DeviceCapabilities.RamTier.WARNING, caps.ramTierFor(2.5f))
+        assertEquals(DeviceCapabilities.RamTier.WARNING, caps.ramTierFor(3.0f))
+        assertEquals(DeviceCapabilities.RamTier.WARNING, caps.ramTierFor(3.49f))
     }
 
     @Test
-    fun `ramTierFor should return OK at or above 4_0`() {
+    fun `ramTierFor should return OK at or above 3_5`() {
         val caps = DeviceCapabilities(mockContext)
+        assertEquals(DeviceCapabilities.RamTier.OK, caps.ramTierFor(3.5f))
         assertEquals(DeviceCapabilities.RamTier.OK, caps.ramTierFor(4.0f))
-        assertEquals(DeviceCapabilities.RamTier.OK, caps.ramTierFor(6.0f))
-        assertEquals(DeviceCapabilities.RamTier.OK, caps.ramTierFor(12.0f))
+        assertEquals(DeviceCapabilities.RamTier.OK, caps.ramTierFor(8.0f))
     }
 
     @Test
     fun `ramTierFor should handle exactly at boundary`() {
         val caps = DeviceCapabilities(mockContext)
-        // Just below 3.5 = BLOCKED
-        assertEquals(DeviceCapabilities.RamTier.BLOCKED, caps.ramTierFor(3.4999f))
-        // Exactly 3.5 = WARNING
-        assertEquals(DeviceCapabilities.RamTier.WARNING, caps.ramTierFor(3.5f))
-        // Exactly 4.0 = OK
-        assertEquals(DeviceCapabilities.RamTier.OK, caps.ramTierFor(4.0f))
+        // Just below 2.5 = BLOCKED
+        assertEquals(DeviceCapabilities.RamTier.BLOCKED, caps.ramTierFor(2.4999f))
+        // Exactly 2.5 = WARNING
+        assertEquals(DeviceCapabilities.RamTier.WARNING, caps.ramTierFor(2.5f))
+        // Exactly 3.5 = OK
+        assertEquals(DeviceCapabilities.RamTier.OK, caps.ramTierFor(3.5f))
     }
 
     // ── checkRamGb (mocked ActivityManager) ──────────────────────────
@@ -186,7 +186,7 @@ class DeviceCapabilitiesUnitTest {
     @Test
     fun `constants should match expected values`() {
         assertEquals(1_900_000_000L, DeviceCapabilities.MODEL_SIZE_BYTES)
-        assertEquals(3.5f, DeviceCapabilities.RAM_BLOCK_GB)
-        assertEquals(4.0f, DeviceCapabilities.RAM_WARN_GB)
+        assertEquals(2.5f, DeviceCapabilities.RAM_BLOCK_GB)
+        assertEquals(3.5f, DeviceCapabilities.RAM_WARN_GB)
     }
 }

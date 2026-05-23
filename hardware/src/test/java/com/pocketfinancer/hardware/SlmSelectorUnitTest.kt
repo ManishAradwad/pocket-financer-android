@@ -41,8 +41,8 @@ class SlmSelectorUnitTest {
             ramGb = ramGb,
             totalRamGb = ramGb,
             ramTier = when {
-                ramGb >= 4.0f -> DeviceCapabilities.RamTier.OK
-                ramGb >= 3.5f -> DeviceCapabilities.RamTier.WARNING
+                ramGb >= 3.5f -> DeviceCapabilities.RamTier.OK
+                ramGb >= 2.5f -> DeviceCapabilities.RamTier.WARNING
                 else -> DeviceCapabilities.RamTier.BLOCKED
             },
             gpu = gpu,
@@ -52,33 +52,33 @@ class SlmSelectorUnitTest {
         )
     }
 
-    // ── Qwen3 preferred over Gemma4 ──────────────────────────────────
+    // ── Gemma preferred over Qwen3 ──────────────────────────────────
 
     @Test
-    fun `selectSlmForDevice should prefer Qwen3 over Gemma with same RAM`() {
-        val device = deviceWith(ramGb = 4.0f, highPerf = true)
+    fun `selectSlmForDevice should prefer Gemma over Qwen3 with high RAM`() {
+        val device = deviceWith(ramGb = 8.0f, highPerf = true)
         val result = selectSlmForDevice(device)
         assertNotNull(result)
-        assertEquals(SlmTier.QWEN3_1_7B_Q8_0, result)
+        assertEquals(SlmTier.GEMMA4_E2B_Q8_0, result)
     }
 
-    // ── Tier 1: Qwen3-1.7B Q8_0 with 4GB+ and high-perf CPU ────────
+    // ── Tier 1: Gemma 4 E2B Q8_0 with 8GB+ and high-perf CPU ────────
 
     @Test
-    fun `selectSlmForDevice should pick Qwen3 Q8_0 with 4GB and high-perf CPU`() {
-        val device = deviceWith(ramGb = 4.0f, highPerf = true)
-        assertEquals(SlmTier.QWEN3_1_7B_Q8_0, selectSlmForDevice(device))
+    fun `selectSlmForDevice should pick Gemma Q8_0 with 8GB and high-perf CPU`() {
+        val device = deviceWith(ramGb = 8.0f, highPerf = true)
+        assertEquals(SlmTier.GEMMA4_E2B_Q8_0, selectSlmForDevice(device))
     }
 
     // ── Mali GPU devices now get premium tiers (fix for Qualcomm-only gate) ──
 
     @Test
-    fun `selectSlmForDevice should pick Qwen3 Q8_0 with Mali GPU and i8mm`() {
+    fun `selectSlmForDevice should pick Gemma Q8_0 with Mali GPU and i8mm`() {
         // Galaxy S24 Exynos, Pixel 9 Pro Tensor: Mali GPU + i8mm+dotprod
         // Before fix: excluded by Adreno-only gate. After fix: correctly selected
         // based on CPU features (i8mm+dotprod) regardless of GPU vendor.
         val device = deviceWith(ramGb = 8.0f, highPerf = true)
-        assertEquals(SlmTier.QWEN3_1_7B_Q8_0, selectSlmForDevice(device))
+        assertEquals(SlmTier.GEMMA4_E2B_Q8_0, selectSlmForDevice(device))
     }
 
     // ── Device without CPU features can't access premium tiers ──
@@ -92,18 +92,18 @@ class SlmSelectorUnitTest {
         assertEquals(SlmTier.QWEN3_1_7B_Q4_K_M, selectSlmForDevice(device))
     }
 
-    // ── Tier 2: Qwen3-1.7B Q4_K_M with 3.5GB RAM ────────────────────
+    // ── Tier 2: Gemma 4 E2B Q4_K_M with 6GB RAM ────────────────────
 
     @Test
-    fun `selectSlmForDevice should pick Qwen3 Q4_K_M with 3_5GB`() {
-        val device = deviceWith(ramGb = 3.5f, highPerf = false)
-        assertEquals(SlmTier.QWEN3_1_7B_Q4_K_M, selectSlmForDevice(device))
+    fun `selectSlmForDevice should pick Gemma Q4_K_M with 6GB`() {
+        val device = deviceWith(ramGb = 6.0f, highPerf = false)
+        assertEquals(SlmTier.GEMMA4_E2B_Q4_K_M, selectSlmForDevice(device))
     }
 
     @Test
-    fun `selectSlmForDevice should pick Qwen3 Q4_K_M with 3_5GB even with CPU features`() {
-        val device = deviceWith(ramGb = 3.5f, highPerf = true)
-        assertEquals(SlmTier.QWEN3_1_7B_Q4_K_M, selectSlmForDevice(device))
+    fun `selectSlmForDevice should pick Gemma Q4_K_M with 6GB even with CPU features`() {
+        val device = deviceWith(ramGb = 6.0f, highPerf = true)
+        assertEquals(SlmTier.GEMMA4_E2B_Q4_K_M, selectSlmForDevice(device))
     }
 
     // ── Tier 5: Fallback to Qwen3-0.6B with 2.5GB ────────────────────
@@ -156,7 +156,7 @@ class SlmSelectorUnitTest {
     @Test
     fun `explainTierSelection should say higher-priority for available but not selected`() {
         val device = deviceWith(ramGb = 6.0f, highPerf = true)
-        val explanation = explainTierSelection(SlmTier.GEMMA4_E2B_Q8_0, device, isSelected = false)
+        val explanation = explainTierSelection(SlmTier.QWEN3_1_7B_Q8_0, device, isSelected = false)
         assertTrue(explanation.contains("higher-priority") || explanation.contains("Available"))
     }
 
@@ -166,10 +166,10 @@ class SlmSelectorUnitTest {
     fun `ALL_TIERS should be ordered by priority`() {
         val tiers = SlmTier.ALL_TIERS
         assertEquals(5, tiers.size)
-        assertEquals(SlmTier.QWEN3_1_7B_Q8_0, tiers[0])
-        assertEquals(SlmTier.QWEN3_1_7B_Q4_K_M, tiers[1])
-        assertEquals(SlmTier.GEMMA4_E2B_Q8_0, tiers[2])
-        assertEquals(SlmTier.GEMMA4_E2B_Q4_K_M, tiers[3])
+        assertEquals(SlmTier.GEMMA4_E2B_Q8_0, tiers[0])
+        assertEquals(SlmTier.GEMMA4_E2B_Q4_K_M, tiers[1])
+        assertEquals(SlmTier.QWEN3_1_7B_Q8_0, tiers[2])
+        assertEquals(SlmTier.QWEN3_1_7B_Q4_K_M, tiers[3])
         assertEquals(SlmTier.QWEN3_0_6B_Q8_0, tiers[4])
     }
 

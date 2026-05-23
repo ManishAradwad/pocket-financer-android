@@ -183,10 +183,13 @@ class SettingsViewModel @Inject constructor(
                 return@launch
             }
 
+            val slm = _state.value.selectedSlm
+            val hasThinking = slm?.hasThinkingMode ?: true
             val result = llamaEngine.loadModel(
                 path = path,
                 contextSize = 3072,
-                gpuLayers = 0
+                gpuLayers = 0,
+                hasThinkingMode = hasThinking
             )
 
             result.fold(
@@ -287,14 +290,11 @@ class SettingsViewModel @Inject constructor(
             }
 
             try {
-                // ── Phase 1: Thinking ─────────────────────────────────────
-                _state.value = _state.value.copy(
-                    testProgress = "Phase 1: Thinking (<think> block, max 1024 tokens)..."
-                )
+                val hasThinking = llamaEngine.hasThinkingMode
                 val grammar = llamaEngine.readAsset("sms_extraction.gbnf")
                 val staticPrefix = promptBuilder.getStaticPrefix()
                 val rawPrompt = promptBuilder.buildExtractionPrompt(testSender, testBody)
-                val chatPrompt = promptBuilder.buildChatPrompt(rawPrompt, enableThinking = true)
+                val chatPrompt = promptBuilder.buildChatPrompt(rawPrompt, enableThinking = hasThinking)
                 Log.i("PocketFinancer", "Initial raw prompt length: ${rawPrompt.length} chars")
                 Log.i("PocketFinancer", "Chat prompt length: ${chatPrompt.length} chars")
 
@@ -356,70 +356,98 @@ class SettingsViewModel @Inject constructor(
                     Log.i("PocketFinancer", "Session cache saved: $saved")
                 }
 
-                Log.i("PocketFinancer", "=== Phase 1: Thinking ===")
-
-                val thinkPrompt = suffixString + "<think>\n"
-                val thinkResult = withContext(Dispatchers.IO) {
-                    llamaEngine.complete(
-                        prompt = thinkPrompt,
-                        params = LlamaEngine.InferenceParams(
-                            maxTokens = 1024,
-                            temperature = 0.0f,
-                            stopToken = "</think>"
-                        ),
-                        keepCache = true
-                    ) { token ->
-                        _state.value = _state.value.copy(
-                            thinkingOutput = (_state.value.thinkingOutput ?: "") + token
-                        )
-                    }
-                }
-
-                val thinkElapsed = System.currentTimeMillis() - startTime
-                Log.i("PocketFinancer", "Phase 1 completed in ${thinkElapsed}ms")
-                Log.i("PocketFinancer", "Phase 1 output (${thinkResult.length} chars): <<<${thinkResult}>>>")
-
-                // Ensure final thinking output is exactly the returned block
-                _state.value = _state.value.copy(thinkingOutput = thinkResult)
-
-                if (thinkResult.isEmpty()) {
-                    Log.w("PocketFinancer", "Phase 1 produced empty output!")
+                val answer: String
+                if (!hasThinking) {
+                    // ── Single-pass Grammar-constrained JSON ──────────────────
                     _state.value = _state.value.copy(
-                        testRunning = false,
-                        testProgress = "Phase 1 failed: empty thinking output",
-                        testError = "Phase 1 (thinking) returned empty. The model may not be responding. Check logcat."
+                        testProgress = "Generating JSON directly with GBNF grammar..."
                     )
-                    return@launch
-                }
+                    Log.i("PocketFinancer", "=== Direct JSON generation (single-pass) ===")
+                    answer = withContext(Dispatchers.IO) {
+                        llamaEngine.complete(
+                            prompt = suffixString,
+                            params = LlamaEngine.InferenceParams(
+                                maxTokens = 256,
+                                temperature = 0.0f,
+                                grammar = grammar
+                            ),
+                            keepCache = true
+                        ) { token ->
+                            _state.value = _state.value.copy(
+                                testResult = (_state.value.testResult ?: "") + token
+                            )
+                        }
+                    }
+                } else {
+                    // ── Phase 1: Thinking ─────────────────────────────────────
+                    _state.value = _state.value.copy(
+                        testProgress = "Phase 1: Thinking (<think> block, max 1024 tokens)..."
+                    )
+                    Log.i("PocketFinancer", "=== Phase 1: Thinking ===")
 
-                // ── Phase 2: Grammar-constrained JSON ─────────────────────
-                _state.value = _state.value.copy(
-                    testProgress = "Phase 2: Generating JSON with GBNF grammar..."
-                )
-                Log.i("PocketFinancer", "=== Phase 2: JSON generation ===")
+                    val thinkPrompt = suffixString + "<think>\n"
+                    val thinkResult = withContext(Dispatchers.IO) {
+                        llamaEngine.complete(
+                            prompt = thinkPrompt,
+                            params = LlamaEngine.InferenceParams(
+                                maxTokens = 1024,
+                                temperature = 0.0f,
+                                stopToken = "</think>"
+                            ),
+                            keepCache = true
+                        ) { token ->
+                            _state.value = _state.value.copy(
+                                thinkingOutput = (_state.value.thinkingOutput ?: "") + token
+                            )
+                        }
+                    }
 
-                val fullPrompt = thinkPrompt + thinkResult + "</think>\n"
-                Log.i("PocketFinancer", "Phase 2 conceptual prompt length: ${fullPrompt.length} chars (KV cache reused, decoding suffix only)")
+                    val thinkElapsed = System.currentTimeMillis() - startTime
+                    Log.i("PocketFinancer", "Phase 1 completed in ${thinkElapsed}ms")
+                    Log.i("PocketFinancer", "Phase 1 output (${thinkResult.length} chars): <<<${thinkResult}>>>")
 
-                val answer = withContext(Dispatchers.IO) {
-                    llamaEngine.complete(
-                        prompt = "</think>\n",
-                        params = LlamaEngine.InferenceParams(
-                            maxTokens = 256,
-                            temperature = 0.0f,
-                            grammar = grammar
-                        ),
-                        keepCache = true
-                    ) { token ->
+                    // Ensure final thinking output is exactly the returned block
+                    _state.value = _state.value.copy(thinkingOutput = thinkResult)
+
+                    if (thinkResult.isEmpty()) {
+                        Log.w("PocketFinancer", "Phase 1 produced empty output!")
                         _state.value = _state.value.copy(
-                            testResult = (_state.value.testResult ?: "") + token
+                            testRunning = false,
+                            testProgress = "Phase 1 failed: empty thinking output",
+                            testError = "Phase 1 (thinking) returned empty. The model may not be responding. Check logcat."
                         )
+                        return@launch
+                    }
+
+                    // ── Phase 2: Grammar-constrained JSON ─────────────────────
+                    _state.value = _state.value.copy(
+                        testProgress = "Phase 2: Generating JSON with GBNF grammar..."
+                    )
+                    Log.i("PocketFinancer", "=== Phase 2: JSON generation ===")
+
+                    val fullPrompt = thinkPrompt + thinkResult + "</think>\n"
+                    Log.i("PocketFinancer", "Phase 2 conceptual prompt length: ${fullPrompt.length} chars (KV cache reused, decoding suffix only)")
+
+                    answer = withContext(Dispatchers.IO) {
+                        llamaEngine.complete(
+                            prompt = "</think>\n",
+                            params = LlamaEngine.InferenceParams(
+                                maxTokens = 256,
+                                temperature = 0.0f,
+                                grammar = grammar
+                            ),
+                            keepCache = true
+                        ) { token ->
+                            _state.value = _state.value.copy(
+                                testResult = (_state.value.testResult ?: "") + token
+                            )
+                        }
                     }
                 }
 
                 val totalElapsed = System.currentTimeMillis() - startTime
-                Log.i("PocketFinancer", "Phase 2 completed in ${totalElapsed}ms (total)")
-                Log.i("PocketFinancer", "Phase 2 output (${answer.length} chars): <<<${answer}>>>")
+                Log.i("PocketFinancer", "Inference completed in ${totalElapsed}ms (total)")
+                Log.i("PocketFinancer", "Model output (${answer.length} chars): <<<${answer}>>>")
 
                 // ── Process result ────────────────────────────────────────
                 _state.value = _state.value.copy(

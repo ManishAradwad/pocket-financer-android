@@ -60,27 +60,27 @@ data class SlmTier(
         // Gemma 4 E2B — alternative, no thinking mode but newer arch
         // ═══════════════════════════════════════════════════════════════
 
-        /** Gemma 4 E2B Q8_0: ~5170 MB. 6GB+ RAM, GPU recommended. */
+        /** Gemma 4 E2B Q8_0: ~5170 MB. 8GB+ RAM, GPU recommended. */
         val GEMMA4_E2B_Q8_0 = SlmTier(
             id = "gemma4-e2b-q8_0",
             name = "Gemma 4 E2B Q8_0",
             modelFile = "gemma-4-E2B-it-Q8_0.gguf",
             description = "~5.0 GB · 8-bit quant · Highest overall quality",
             sizeMb = 5170,
-            minRamGb = 6.0f,
+            minRamGb = 8.0f,
             downloadUrl = "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q8_0.gguf",
             family = "gemma4",
             hasThinkingMode = false
         )
 
-        /** Gemma 4 E2B Q4_K_M: ~3180 MB. 4GB+ RAM. */
+        /** Gemma 4 E2B Q4_K_M: ~3180 MB. 6GB+ RAM. */
         val GEMMA4_E2B_Q4_K_M = SlmTier(
             id = "gemma4-e2b-q4_k_m",
             name = "Gemma 4 E2B Q4_K_M",
             modelFile = "gemma-4-E2B-it-Q4_K_M.gguf",
             description = "~3.1 GB · 4-bit quant · Alternative model family",
             sizeMb = 3180,
-            minRamGb = 4.0f,
+            minRamGb = 6.0f,
             downloadUrl = "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_K_M.gguf",
             family = "gemma4",
             hasThinkingMode = false
@@ -105,10 +105,10 @@ data class SlmTier(
 
         /** All tiers in priority order (best extraction first). */
         val ALL_TIERS = listOf(
-            QWEN3_1_7B_Q8_0,
-            QWEN3_1_7B_Q4_K_M,
             GEMMA4_E2B_Q8_0,
             GEMMA4_E2B_Q4_K_M,
+            QWEN3_1_7B_Q8_0,
+            QWEN3_1_7B_Q4_K_M,
             QWEN3_0_6B_Q8_0
         )
     }
@@ -118,11 +118,11 @@ data class SlmTier(
  * Auto-select the best SLM for the given hardware capabilities.
  *
  * Priority logic:
- * 1. Qwen3-1.7B Q8_0  — if 4GB+ RAM AND high-performance CPU (i8mm+dotprod)
- * 2. Qwen3-1.7B Q4_K_M — if 3.5GB+ RAM (thinking mode, smaller download)
- * 3. Gemma 4 E2B Q8_0  — if 6GB+ RAM AND high-performance CPU (highest quality)
- * 4. Gemma 4 E2B Q4_K_M — if 4GB+ RAM (alternative model family)
- * 5. Qwen3-0.6B Q8_0   — if 2.5GB+ RAM (lightweight fallback)
+ * 1. Gemma 4 E2B Q8_0  — if 8GB+ RAM AND high-performance CPU (highest quality)
+ * 2. Gemma 4 E2B Q4_K_M — if 6GB+ RAM (balanced, non-thinking, alternative)
+ * 3. Qwen3-1.7B Q8_0    — if 4GB+ RAM AND high-performance CPU (8-bit thinking model)
+ * 4. Qwen3-1.7B Q4_K_M  — if 3.5GB+ RAM (balanced 4-bit thinking model)
+ * 5. Qwen3-0.6B Q8_0    — if 2.5GB+ RAM (lightweight fallback)
  * 6. null               — if < 2.5GB RAM (BLOCKED)
  *
  * The "high-performance CPU" flag checks for ARM i8mm and dotprod
@@ -131,27 +131,28 @@ data class SlmTier(
  * backends are 10-15× slower than CPU on Android across all GPU vendors,
  * so model tier selection is based on CPU capability instead.
  *
- * Qwen3 tiers are preferred over Gemma because Qwen3's thinking mode
- * significantly improves SMS extraction accuracy over standard decode.
+ * Gemma models are preferred on high-end/mid-high devices because they perform
+ * exceptionally well on our evaluation dataset. Qwen3 models are used for mid-range,
+ * and Qwen3-0.6B is the fallback for budget devices.
  */
 fun selectSlmForDevice(device: DeviceCapabilities.DeviceInfo): SlmTier? {
     val ram = device.ramGb
     val highPerf = device.isHighPerformanceDevice
 
     return when {
-        // Tier 1: Best Qwen3 quality with high-performance CPU
+        // Tier 1: Gemma 4 E2B Q8_0 (8GB+ RAM & high-perf CPU)
+        ram >= 8.0f && highPerf -> SlmTier.GEMMA4_E2B_Q8_0
+
+        // Tier 2: Gemma 4 E2B Q4_K_M (6GB+ RAM)
+        ram >= 6.0f -> SlmTier.GEMMA4_E2B_Q4_K_M
+
+        // Tier 3: Qwen3-1.7B Q8_0 (4GB+ RAM & high-perf CPU)
         ram >= 4.0f && highPerf -> SlmTier.QWEN3_1_7B_Q8_0
 
-        // Tier 2: Balanced Qwen3 (thinking mode, reasonable size)
+        // Tier 4: Qwen3-1.7B Q4_K_M (3.5GB+ RAM)
         ram >= 3.5f -> SlmTier.QWEN3_1_7B_Q4_K_M
 
-        // Tier 3: Gemma high quality — only if 6GB+
-        ram >= 6.0f && highPerf -> SlmTier.GEMMA4_E2B_Q8_0
-
-        // Tier 4: Gemma balanced
-        ram >= 4.0f -> SlmTier.GEMMA4_E2B_Q4_K_M
-
-        // Tier 5: Lightweight fallback
+        // Tier 5: Qwen3-0.6B Q8_0 (2.5GB+ RAM)
         ram >= 2.5f -> SlmTier.QWEN3_0_6B_Q8_0
 
         else -> null
@@ -172,17 +173,17 @@ fun explainTierSelection(
 
     if (isSelected) {
         return when {
-            tier == SlmTier.QWEN3_1_7B_Q8_0 ->
-                "Selected — best extraction quality (8-bit thinking mode, high-perf CPU)"
-            tier == SlmTier.QWEN3_1_7B_Q4_K_M -> {
+            tier == SlmTier.GEMMA4_E2B_Q8_0 ->
+                "Selected — highest overall model quality (8-bit quant, high-perf CPU)"
+            tier == SlmTier.GEMMA4_E2B_Q4_K_M -> {
                 val reason = if (highPerf) "CPU features (i8mm+dotprod) detected but RAM prefers lighter quant"
                              else "balanced size/quality — no i8mm+dotprod CPU features detected"
                 "Selected — $reason"
             }
-            tier == SlmTier.GEMMA4_E2B_Q8_0 ->
-                "Selected — highest overall model quality, high-perf CPU"
-            tier == SlmTier.GEMMA4_E2B_Q4_K_M ->
-                "Selected — alternative model family, Qwen3 tiers not viable"
+            tier == SlmTier.QWEN3_1_7B_Q8_0 ->
+                "Selected — balanced quality (8-bit thinking mode, high-perf CPU)"
+            tier == SlmTier.QWEN3_1_7B_Q4_K_M ->
+                "Selected — balanced size/quality (4-bit thinking mode)"
             tier == SlmTier.QWEN3_0_6B_Q8_0 ->
                 "Selected — lightweight fallback for low-RAM devices"
             else -> "Selected — auto-picked based on hardware"
@@ -195,10 +196,10 @@ fun explainTierSelection(
     }
 
     when (tier) {
-        SlmTier.QWEN3_1_7B_Q8_0 -> {
+        SlmTier.GEMMA4_E2B_Q8_0 -> {
             if (!highPerf) blockers.add("needs i8mm+dotprod CPU instructions (not detected)")
         }
-        SlmTier.GEMMA4_E2B_Q8_0 -> {
+        SlmTier.QWEN3_1_7B_Q8_0 -> {
             if (!highPerf) blockers.add("needs i8mm+dotprod CPU instructions (not detected)")
         }
         else -> {}

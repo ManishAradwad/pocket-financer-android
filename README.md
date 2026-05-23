@@ -118,11 +118,11 @@ To run local inference smoothly without triggering Android's low-memory killer (
 
 | Model ID | Model Family | Quantization | Size | Min. RAM | CPU Requirement | Status / Target |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **`Qwen3-1.7B Q8_0`** | Qwen 3 (1.7B) | 8-bit | ~1.95 GB | **4.0 GB** | ARMv8.2-A with `i8mm` + `dotprod` | **Best Quality** (Default for mid/high devices) |
-| **`Qwen3-1.7B Q4_K_M`** | Qwen 3 (1.7B) | 4-bit (Medium) | ~1.10 GB | **3.5 GB** | Standard ARMv8 | **Balanced** (Optimal for mid-range) |
-| **`Gemma 4 E2B Q8_0`** | Gemma 4 (E2B) | 8-bit | ~5.00 GB | **6.0 GB** | ARMv8.2-A with `i8mm` + `dotprod` | **Highest alternative quality** |
-| **`Gemma 4 E2B Q4_K_M`**| Gemma 4 (E2B) | 4-bit (Medium) | ~3.10 GB | **4.0 GB** | Standard ARMv8 | **Balanced alternative** |
-| **`Qwen3-0.6B Q8_0`** | Qwen 3 (0.6B) | 8-bit | ~0.70 GB | **2.5 GB** | Standard ARMv8 | **Lightweight Fallback** |
+| **`Gemma 4 E2B Q8_0`** | Gemma 4 (E2B) | 8-bit | ~5.00 GB | **8.0 GB** | ARMv8.2-A with `i8mm` + `dotprod` | **Highest Quality** (Default for high-end devices) |
+| **`Gemma 4 E2B Q4_K_M`**| Gemma 4 (E2B) | 4-bit (Medium) | ~3.10 GB | **6.0 GB** | Standard ARMv8 | **Balanced** (Optimal for mid-to-high devices) |
+| **`Qwen3-1.7B Q8_0`** | Qwen 3 (1.7B) | 8-bit | ~1.95 GB | **4.0 GB** | ARMv8.2-A with `i8mm` + `dotprod` | **High Quality Thinking** (Default for mid-range CPU) |
+| **`Qwen3-1.7B Q4_K_M`** | Qwen 3 (1.7B) | 4-bit (Medium) | ~1.10 GB | **3.5 GB** | Standard ARMv8 | **Balanced Thinking** (Optimal for mid-range) |
+| **`Qwen3-0.6B Q8_0`** | Qwen 3 (0.6B) | 8-bit | ~0.70 GB | **2.5 GB** | Standard ARMv8 | **Lightweight Fallback** (For budget devices) |
 | **Blocked** | — | — | — | **< 2.5 GB**| — | *Incompatible (Device cannot execute local SLMs)* |
 
 *Note: GPU acceleration is disabled on Android for model selection. CPU instruction execution (using Neon assembly and specialized hardware dot product features) is substantially faster and more power-efficient than mobile GPU JNI roundtrips in llama.cpp.*

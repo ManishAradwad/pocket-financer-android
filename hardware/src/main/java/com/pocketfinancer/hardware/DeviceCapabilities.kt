@@ -88,10 +88,10 @@ class DeviceCapabilities @Inject constructor(
         const val MODEL_SIZE_BYTES: Long = 1_900_000_000L
 
         /** Below this RAM (GB), the app is blocked entirely. */
-        const val RAM_BLOCK_GB: Float = 3.5f
+        const val RAM_BLOCK_GB: Float = 2.5f
 
         /** Below this RAM (GB) but above BLOCK, show a warning banner. */
-        const val RAM_WARN_GB: Float = 4.0f
+        const val RAM_WARN_GB: Float = 3.5f
 
         private const val TAG = "DeviceCapabilities"
     }

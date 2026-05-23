@@ -80,6 +80,8 @@ class LlamaEngine @Inject constructor(
     private var modelHandle: Long = 0
     private var isLoaded: Boolean = false
     private var modelPath: String? = null
+    var hasThinkingMode: Boolean = true
+        private set
 
     // ── Lifecycle ──────────────────────────────────────────────────────────
 
@@ -87,7 +89,12 @@ class LlamaEngine @Inject constructor(
      * Load a GGUF model from the given absolute file path.
      * Context size defaults to 3072 (the Qwen3-1.7B production config).
      */
-    suspend fun loadModel(path: String, contextSize: Int = 3072, gpuLayers: Int = 0): Result<Unit> =
+    suspend fun loadModel(
+        path: String,
+        contextSize: Int = 3072,
+        gpuLayers: Int = 0,
+        hasThinkingMode: Boolean = true
+    ): Result<Unit> =
         withContext(Dispatchers.IO) {
             try {
                 if (isLoaded) unloadModel()
@@ -97,6 +104,7 @@ class LlamaEngine @Inject constructor(
                 }
                 isLoaded = true
                 modelPath = path
+                this@LlamaEngine.hasThinkingMode = hasThinkingMode
                 Result.success(Unit)
             } catch (e: Exception) {
                 Result.failure(e)
@@ -113,6 +121,7 @@ class LlamaEngine @Inject constructor(
         }
         isLoaded = false
         modelPath = null
+        hasThinkingMode = true
     }
 
     fun isModelLoaded(): Boolean = isLoaded
@@ -197,6 +206,84 @@ class LlamaEngine @Inject constructor(
         }
 
         try {
+            if (!hasThinkingMode) {
+                // Direct single-pass grammar-constrained JSON generation (Gemma, etc.)
+                var executionPrompt = prompt
+                var keepCache = false
+
+                if (staticPrefix != null) {
+                    val splitIndex = prompt.indexOf(staticPrefix)
+                    if (splitIndex != -1) {
+                        val prefixString = prompt.substring(0, splitIndex + staticPrefix.length)
+                        val suffixString = prompt.substring(splitIndex + staticPrefix.length)
+
+                        val prefixHash = computeSha256(prefixString)
+                        val sessionFile = getSessionFile(prefixHash)
+
+                        val prefixTokens = tokenize(prefixString, addSpecial = true)
+                        if (prefixTokens != null) {
+                            var sessionLoaded = false
+                            if (sessionFile.exists()) {
+                                android.util.Log.i("pocketfinancer_llm", "Session cache file found: ${sessionFile.name}. Loading...")
+                                val loaded = loadSession(sessionFile.absolutePath, prefixTokens.size)
+                                if (loaded == prefixTokens.size) {
+                                    sessionLoaded = true
+                                    android.util.Log.i("pocketfinancer_llm", "Session cache loaded successfully ($loaded tokens).")
+                                } else {
+                                    android.util.Log.w("pocketfinancer_llm", "Loaded tokens ($loaded) does not match expected size (${prefixTokens.size}). Regenerating...")
+                                }
+                            }
+
+                            if (!sessionLoaded) {
+                                android.util.Log.i("pocketfinancer_llm", "Generating new session cache...")
+                                // Prefill-only run
+                                nativeCompletion(
+                                    modelHandle,
+                                    prefixString,
+                                    null,
+                                    0,
+                                    0.0f,
+                                    null,
+                                    false,
+                                    null
+                                )
+                                deleteStaleSessions(prefixHash)
+                                val saved = saveSession(sessionFile.absolutePath, prefixTokens)
+                                android.util.Log.i("pocketfinancer_llm", "Session cache saved: $saved")
+                            }
+
+                            executionPrompt = suffixString
+                            keepCache = true
+                        }
+                    }
+                }
+
+                // Run direct JSON generation with grammar applied
+                val answer = nativeCompletion(
+                    modelHandle,
+                    executionPrompt,
+                    grammar,
+                    answerTokens,
+                    0.0f,
+                    null,
+                    keepCache,
+                    callback
+                )
+
+                if (answer.isEmpty()) {
+                    return@withContext InferenceResult.Error("JSON decode produced empty output")
+                }
+
+                val perf = getPerformanceData()
+                val trimmed = answer.trim()
+                return@withContext if (trimmed == "null") {
+                    InferenceResult.Null
+                } else {
+                    InferenceResult.Success(trimmed, perf = perf)
+                }
+            }
+
+            // Two-phase thinking inference (Qwen3, etc.)
             var thinkPrompt = prompt + "<think>\n"
             var keepCacheFirstPhase = false
 
