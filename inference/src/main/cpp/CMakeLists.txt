@@ -28,6 +28,15 @@ set(GGML_BLAS   OFF CACHE BOOL "")
 set(GGML_RPC    OFF CACHE BOOL "")
 set(LLAMA_CURL  OFF CACHE BOOL "")
 
+# Only enable KleidiAI on ARM64 ABI
+if (ANDROID_ABI STREQUAL "arm64-v8a")
+    message(STATUS "Enabling Arm KleidiAI for arm64-v8a target")
+    set(GGML_CPU_KLEIDIAI ON CACHE BOOL "" FORCE)
+else()
+    message(STATUS "Disabling Arm KleidiAI for non-arm64-v8a target: ${ANDROID_ABI}")
+    set(GGML_CPU_KLEIDIAI OFF CACHE BOOL "" FORCE)
+endif()
+
 FetchContent_MakeAvailable(llama_cpp)
 
 # ── JNI bridge ───────────────────────────────────────────────────────────────

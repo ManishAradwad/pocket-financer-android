@@ -68,7 +68,7 @@ static auto log_callback = [](ggml_log_level level, const char * text, void * /*
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_pocketfinancer_inference_LlamaEngine_nativeLoadModel(
     JNIEnv *env, jclass /*clazz*/,
-    jstring jpath, jint n_ctx, jint n_gpu_layers) {
+    jstring jpath, jint n_ctx, jint n_gpu_layers, jint n_threads) {
 
     const char *path = env->GetStringUTFChars(jpath, nullptr);
     if (!path) return 0;
@@ -90,7 +90,7 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeLoadModel(
     }
 
     // Context params
-    int optimal_threads = get_optimal_thread_count();
+    int optimal_threads = (n_threads > 0) ? (int)n_threads : get_optimal_thread_count();
     llama_context_params ctx_params = llama_context_default_params();
     ctx_params.n_ctx        = n_ctx;
     ctx_params.n_batch      = 512;
@@ -98,8 +98,8 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeLoadModel(
     ctx_params.n_threads    = optimal_threads;
     ctx_params.n_threads_batch = optimal_threads;
     ctx_params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
-    ctx_params.type_k = GGML_TYPE_Q8_0;
-    ctx_params.type_v = GGML_TYPE_Q8_0;
+    ctx_params.type_k = GGML_TYPE_F16;
+    ctx_params.type_v = GGML_TYPE_F16;
     ctx_params.no_perf = false;
 
     llama_context *ctx = llama_init_from_model(model, ctx_params);

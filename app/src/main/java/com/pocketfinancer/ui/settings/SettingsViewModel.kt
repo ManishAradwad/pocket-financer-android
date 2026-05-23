@@ -49,7 +49,8 @@ data class SettingsUiState(
     val testResult: String? = null,
     val testParsed: String? = null,
     val testError: String? = null,
-    val filterLogs: List<String>? = null
+    val filterLogs: List<String>? = null,
+    val sessionCacheLogs: List<String>? = null
 )
 
 @HiltViewModel
@@ -185,10 +186,12 @@ class SettingsViewModel @Inject constructor(
 
             val slm = _state.value.selectedSlm
             val hasThinking = slm?.hasThinkingMode ?: true
+            val numThreads = if (_state.value.deviceInfo?.isHighPerformanceDevice == true) 4 else 2
             val result = llamaEngine.loadModel(
                 path = path,
                 contextSize = 3072,
                 gpuLayers = 0,
+                numThreads = numThreads,
                 hasThinkingMode = hasThinking
             )
 
@@ -268,7 +271,8 @@ class SettingsViewModel @Inject constructor(
                 testParsed = null,
                 thinkingOutput = null,
                 testError = null,
-                filterLogs = null
+                filterLogs = null,
+                sessionCacheLogs = null
             )
 
             // Perform SMS filtering with a short delay for UI state transition feedback
@@ -313,15 +317,19 @@ class SettingsViewModel @Inject constructor(
                     ?: throw IllegalStateException("Failed to tokenize prefix prompt")
 
                 val startTime = System.currentTimeMillis()
+                val cacheLogs = mutableListOf<String>()
+                cacheLogs.add("Prefix Size: ${prefixTokens.size} tokens")
+                cacheLogs.add("Prefix Hash: ${prefixHash.take(12)}...")
 
                 // Check and load session cache
                 if (sessionFile.exists()) {
-                    Log.i("PocketFinancer", "Session cache file found: ${sessionFile.name}. Loading...")
+                    cacheLogs.add("Session cache file found: ${sessionFile.name}")
                     val loaded = withContext(Dispatchers.IO) {
                         llamaEngine.loadSession(sessionFile.absolutePath, prefixTokens.size)
                     }
                     if (loaded != prefixTokens.size) {
-                        Log.w("PocketFinancer", "Loaded tokens ($loaded) does not match expected size (${prefixTokens.size}). Regenerating...")
+                        cacheLogs.add("Warning: Loaded tokens ($loaded) does not match expected size (${prefixTokens.size})")
+                        cacheLogs.add("Session cache is outdated/invalid. Regenerating cache...")
                         // Prefill-only run on prefixString to generate state
                         withContext(Dispatchers.IO) {
                             llamaEngine.complete(
@@ -332,14 +340,17 @@ class SettingsViewModel @Inject constructor(
                         }
                         // Delete stale sessions and save new session
                         llamaEngine.deleteStaleSessions(prefixHash)
-                        withContext(Dispatchers.IO) {
+                        val saved = withContext(Dispatchers.IO) {
                             llamaEngine.saveSession(sessionFile.absolutePath, prefixTokens)
                         }
+                        cacheLogs.add("New session cache generated & saved successfully (status=$saved).")
                     } else {
-                        Log.i("PocketFinancer", "Session cache loaded successfully ($loaded tokens).")
+                        cacheLogs.add("Session cache loaded successfully ($loaded tokens matched).")
+                        cacheLogs.add("Reusing existing KV Cache (Skipped heavy prefill phase!).")
                     }
                 } else {
-                    Log.i("PocketFinancer", "Session cache file not found. Generating new session...")
+                    cacheLogs.add("Session cache file not found (Fresh install or configuration changed).")
+                    cacheLogs.add("Generating new session cache via prefix prefill...")
                     // Prefill-only run on prefixString to generate state
                     withContext(Dispatchers.IO) {
                         llamaEngine.complete(
@@ -353,8 +364,9 @@ class SettingsViewModel @Inject constructor(
                     val saved = withContext(Dispatchers.IO) {
                         llamaEngine.saveSession(sessionFile.absolutePath, prefixTokens)
                     }
-                    Log.i("PocketFinancer", "Session cache saved: $saved")
+                    cacheLogs.add("New session cache generated & saved successfully (status=$saved).")
                 }
+                _state.value = _state.value.copy(sessionCacheLogs = cacheLogs)
 
                 val answer: String
                 if (!hasThinking) {

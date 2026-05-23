@@ -1,6 +1,7 @@
 # Pocket Financer — Android
 
 [![Build Status](https://img.shields.io/github/actions/workflow/status/ManishAradwad/pocket-financer-android/ci.yml?branch=main&style=flat-square&logo=github)](https://github.com/ManishAradwad/pocket-financer-android/actions)
+[![Download APK](https://img.shields.io/github/v/release/ManishAradwad/pocket-financer-android?style=flat-square&label=Download%20APK&logo=android&color=green)](https://github.com/ManishAradwad/pocket-financer-android/releases/latest)
 [![Platform](https://img.shields.io/badge/Platform-Android_8.0%2B_%28API_26%2B%29-3DDC84?style=flat-square&logo=android&logoColor=white)](https://developer.android.com/)
 [![Language](https://img.shields.io/badge/Language-Kotlin_100%25-7F52FF?style=flat-square&logo=kotlin&logoColor=white)](https://kotlinlang.org/)
 [![Database](https://img.shields.io/badge/Database-SQLCipher_Room_AES--256-005C8A?style=flat-square&logo=sqlite&logoColor=white)](https://www.zetetic.net/sqlcipher/)
@@ -104,7 +105,10 @@ Extracting structured data from highly unstructured, localized SMS alerts (which
 
 ## ⚡ Performance Optimizations & Caching
 
-To make local inference responsive and preserve battery life, Pocket Financer implements disk-based KV Cache caching and automatic cleanup:
+To make local inference responsive and preserve battery life, Pocket Financer implements high-performance CPU optimizations, disk-based KV Cache caching, and automatic cleanup:
+*   **Arm KleidiAI Acceleration**: Integrates Arm's official KleidiAI micro-kernels dynamically for `arm64-v8a` targets. This leverages hardware-specific `dotprod` (Dot Product), `i8mm` (Int8 Matrix Multiplication), and `sme` (Scalable Matrix Extension) instructions on supported ARMv8 and ARMv9 CPUs to dramatically accelerate quantized matrix multiplication.
+*   **Unquantized F16 KV Cache**: Uses native `F16` Key-Value (KV) cache precision instead of `Q8_0`. This eliminates real-time CPU dequantization CPU overhead in the token decoding loop, allows hardware-accelerated float16 vectorization, and permits CPU Flash Attention to run at peak throughput.
+*   **Dynamic Thread Tuning**: Intelligently configures inference thread count based on hardware capabilities (4 threads on high-performance SOCs, 2 threads on mid-to-low SOCs) to prevent thread oversubscription and scheduling bottlenecks on efficiency ("LITTLE") cores.
 *   **Static Prefix Caching**: The static prompt prefix (~1,800 tokens of system prompt + few-shot examples) is prefilled once, and the native JNI engine serializes the resulting KV cache to disk as `session_<sha256>.bin` inside the secure app storage.
 *   **Instant Load**: On subsequent inference runs, the pre-saved session is loaded from disk in under `100ms`, completely bypassing the heavy prefill phase.
 *   **Automatic Cache Invalidation**: The session file name matches the SHA-256 hash of the static prefix. Any modifications to `system_prompt.txt` or `few_shot_examples.json` will automatically trigger a new prefill run on the next execution.
