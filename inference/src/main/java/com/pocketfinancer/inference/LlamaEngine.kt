@@ -94,12 +94,13 @@ class LlamaEngine @Inject constructor(
         contextSize: Int = 3072,
         gpuLayers: Int = 0,
         numThreads: Int = 0,
+        hasFp16: Boolean = false,
         hasThinkingMode: Boolean = true
     ): Result<Unit> =
         withContext(Dispatchers.IO) {
             try {
                 if (isLoaded) unloadModel()
-                modelHandle = nativeLoadModel(path, contextSize, gpuLayers, numThreads)
+                modelHandle = nativeLoadModel(path, contextSize, gpuLayers, numThreads, hasFp16)
                 if (modelHandle == 0L) {
                     return@withContext Result.failure(Exception("Failed to load model: $path"))
                 }
@@ -535,7 +536,7 @@ class LlamaEngine @Inject constructor(
 
     // ── JNI declarations ──────────────────────────────────────────────────
 
-    private external fun nativeLoadModel(path: String, nCtx: Int, nGpuLayers: Int, nThreads: Int): Long
+    private external fun nativeLoadModel(path: String, nCtx: Int, nGpuLayers: Int, nThreads: Int, hasFp16: Boolean): Long
     private external fun nativeCompletion(
         handle: Long,
         prompt: String,

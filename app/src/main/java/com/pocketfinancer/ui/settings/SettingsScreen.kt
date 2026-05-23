@@ -34,8 +34,8 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
         // ── Section 1: Device Hardware ───────────────────────────────────
         HardwareCard(state.deviceInfo, state.hardwareError, viewModel)
 
-        // ── Section 2: SLM Selection ─────────────────────────────────────
-        SlmSelectionCard(state.selectedSlm, state.allTiers, state.tierExplanations)
+        // ── Section 2: Active Model ──────────────────────────────────────
+        ActiveModelCard(state.selectedSlm, state.selectedSlm?.let { state.tierExplanations[it.id] })
 
         // ── Section 3: Engine Status + Test ──────────────────────────────
         EngineCard(state, viewModel)
@@ -109,16 +109,15 @@ private fun HardwareCard(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Section 2: SLM Selection
+// Section 2: Active Model
 // ═══════════════════════════════════════════════════════════════════════════════
 
 @Composable
-private fun SlmSelectionCard(
+private fun ActiveModelCard(
     selectedSlm: SlmTier?,
-    allTiers: List<SlmTier>,
-    tierExplanations: Map<String, String>
+    explanation: String?
 ) {
-    SectionCard(title = "SLM SELECTION") {
+    SectionCard(title = "ACTIVE MODEL") {
         if (selectedSlm == null) {
             Text(
                 "⚠ No SLM is viable for this device (RAM below minimum)",
@@ -128,52 +127,27 @@ private fun SlmSelectionCard(
             return@SectionCard
         }
 
-        allTiers.forEach { tier ->
-            val isSelected = tier == selectedSlm
-            SlmTierRow(tier, isSelected, tierExplanations[tier.id] ?: "")
-            if (tier != allTiers.last()) {
-                Spacer(modifier = Modifier.height(12.dp))
-            }
-        }
-    }
-}
-
-@Composable
-private fun SlmTierRow(tier: SlmTier, isSelected: Boolean, explanation: String) {
-    Column {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            // Selection indicator
-            Box(
-                modifier = Modifier
-                    .size(10.dp)
-                    .background(
-                        if (isSelected) M3_Primary else M3_OutlineVariant,
-                        shape = MaterialTheme.shapes.small
-                    )
+        Column {
+            Text(
+                text = selectedSlm.name,
+                color = M3_Primary,
+                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold)
             )
-
-            Spacer(modifier = Modifier.width(10.dp))
-
-            Column(modifier = Modifier.weight(1f)) {
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = selectedSlm.description,
+                color = M3_OnSurface,
+                style = MaterialTheme.typography.bodyMedium
+            )
+            explanation?.let {
+                Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    text = tier.name + if (isSelected) "  ← SELECTED" else "",
-                    color = if (isSelected) M3_Primary else M3_OnSurface,
-                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold)
-                )
-                Text(
-                    text = tier.description,
-                    color = M3_OnSurfaceVariant,
-                    style = MaterialTheme.typography.bodySmall
+                    text = it,
+                    color = M3_Pos,
+                    style = MaterialTheme.typography.labelSmall
                 )
             }
         }
-
-        Text(
-            text = explanation,
-            color = if (isSelected) M3_Pos else M3_OnSurfaceVariant,
-            style = MaterialTheme.typography.labelSmall,
-            modifier = Modifier.padding(start = 20.dp, top = 2.dp)
-        )
     }
 }
 

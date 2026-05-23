@@ -186,12 +186,13 @@ class SettingsViewModel @Inject constructor(
 
             val slm = _state.value.selectedSlm
             val hasThinking = slm?.hasThinkingMode ?: true
-            val numThreads = if (_state.value.deviceInfo?.isHighPerformanceDevice == true) 4 else 2
+            val hasFp16 = _state.value.deviceInfo?.cpu?.hasFp16 ?: false
             val result = llamaEngine.loadModel(
                 path = path,
                 contextSize = 3072,
                 gpuLayers = 0,
-                numThreads = numThreads,
+                numThreads = 0, // 0 = let C++ default (std::min(cores, 4)) decide
+                hasFp16 = hasFp16,
                 hasThinkingMode = hasThinking
             )
 
@@ -310,6 +311,10 @@ class SettingsViewModel @Inject constructor(
                 val prefixString = chatPrompt.substring(0, splitIndex + staticPrefix.length)
                 val suffixString = chatPrompt.substring(splitIndex + staticPrefix.length)
 
+                _state.value = _state.value.copy(
+                    testProgress = "Checking/preparing KV Cache session..."
+                )
+
                 val prefixHash = llamaEngine.computeSha256(prefixString)
                 val sessionFile = llamaEngine.getSessionFile(prefixHash)
 
@@ -324,12 +329,20 @@ class SettingsViewModel @Inject constructor(
                 // Check and load session cache
                 if (sessionFile.exists()) {
                     cacheLogs.add("Session cache file found: ${sessionFile.name}")
+                    _state.value = _state.value.copy(
+                        sessionCacheLogs = cacheLogs.toList(),
+                        testProgress = "Loading session cache from disk..."
+                    )
                     val loaded = withContext(Dispatchers.IO) {
                         llamaEngine.loadSession(sessionFile.absolutePath, prefixTokens.size)
                     }
                     if (loaded != prefixTokens.size) {
                         cacheLogs.add("Warning: Loaded tokens ($loaded) does not match expected size (${prefixTokens.size})")
                         cacheLogs.add("Session cache is outdated/invalid. Regenerating cache...")
+                        _state.value = _state.value.copy(
+                            sessionCacheLogs = cacheLogs.toList(),
+                            testProgress = "Generating KV Cache session (prefill, please wait)..."
+                        )
                         // Prefill-only run on prefixString to generate state
                         withContext(Dispatchers.IO) {
                             llamaEngine.complete(
@@ -351,6 +364,10 @@ class SettingsViewModel @Inject constructor(
                 } else {
                     cacheLogs.add("Session cache file not found (Fresh install or configuration changed).")
                     cacheLogs.add("Generating new session cache via prefix prefill...")
+                    _state.value = _state.value.copy(
+                        sessionCacheLogs = cacheLogs.toList(),
+                        testProgress = "Generating KV Cache session (prefill, please wait)..."
+                    )
                     // Prefill-only run on prefixString to generate state
                     withContext(Dispatchers.IO) {
                         llamaEngine.complete(
@@ -366,7 +383,7 @@ class SettingsViewModel @Inject constructor(
                     }
                     cacheLogs.add("New session cache generated & saved successfully (status=$saved).")
                 }
-                _state.value = _state.value.copy(sessionCacheLogs = cacheLogs)
+                _state.value = _state.value.copy(sessionCacheLogs = cacheLogs.toList())
 
                 val answer: String
                 if (!hasThinking) {
