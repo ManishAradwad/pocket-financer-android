@@ -4,6 +4,11 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.provider.Telephony
+import android.util.Log
+import dagger.hilt.EntryPoint
+import dagger.hilt.InstallIn
+import dagger.hilt.android.EntryPointAccessors
+import dagger.hilt.components.SingletonComponent
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.receiveAsFlow
@@ -16,6 +21,12 @@ import kotlinx.coroutines.flow.receiveAsFlow
  * Channel-based Flow emission.
  */
 class SmsReceiver : BroadcastReceiver() {
+
+    @EntryPoint
+    @InstallIn(SingletonComponent::class)
+    interface SmsReceiverEntryPoint {
+        fun smsWorkScheduler(): SmsWorkScheduler
+    }
 
     companion object {
         /** Shared channel so SmsRepository can listen to incoming SMS. */
@@ -34,8 +45,26 @@ class SmsReceiver : BroadcastReceiver() {
                     date = sms.timestampMillis,
                     type = 1  // Inbox
                 )
+                // 1. Emits SMS via channel (for UI)
                 smsChannel.trySend(msg)
+
+                // 2. Schedule background processing via WorkManager (using scheduler entrypoint)
+                try {
+                    val appContext = context.applicationContext
+                    val entryPoint = EntryPointAccessors.fromApplication(
+                        appContext,
+                        SmsReceiverEntryPoint::class.java
+                    )
+                    entryPoint.smsWorkScheduler().scheduleSmsParsing(
+                        address = msg.address,
+                        body = msg.body,
+                        date = msg.date
+                    )
+                } catch (e: Exception) {
+                    Log.e("SmsReceiver", "Failed to schedule background SMS parsing", e)
+                }
             }
         }
     }
 }
+

@@ -65,3 +65,12 @@ class SmsRepository @Inject constructor(
         return SmsReceiver.incomingSmsFlow()
     }
 }
+
+/**
+ * Interface to schedule processing of a transaction SMS.
+ * Decoupled from the worker implementation to avoid circular module dependencies.
+ */
+interface SmsWorkScheduler {
+    fun scheduleSmsParsing(address: String, body: String, date: Long)
+}
+

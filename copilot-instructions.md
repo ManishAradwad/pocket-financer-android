@@ -77,7 +77,7 @@ Use the following commands from a Windows PowerShell terminal to build, debug, a
 Compile code and run local JUnit tests (which mock and assert DB repositories, filters, prompts, and selection logic):
 ```powershell
 # Run unit tests on all core modules (excludes heavy native builds)
-./gradlew :data:test :pipeline:test :hardware:test :sms:test :inference:test -x :inference:build -x :app:build
+.\gradlew.bat :data:test :pipeline:test :hardware:test :sms:test :inference:test -x :inference:build -x :app:build
 
 # Build the Debug APK
 & "C:\Program Files\Android\Android Studio\jbr\bin\java.exe" -cp gradle/wrapper/gradle-wrapper.jar org.gradle.wrapper.GradleWrapperMain :app:assembleDebug

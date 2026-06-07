@@ -141,7 +141,7 @@ class PipelineService @Inject constructor(
         return promptBuilder.buildChatPrompt(rawPrompt, enableThinking = llamaEngine.hasThinkingMode)
     }
 
-    private suspend fun processSingle(sms: SmsReader.SmsMessage) {
+    internal suspend fun processSingle(sms: SmsReader.SmsMessage) {
         if (!llamaEngine.isModelLoaded()) {
             emit(Stage.ERROR, "Model not loaded, skipping SMS")
             return

@@ -26,6 +26,7 @@ android {
 
 dependencies {
     implementation(libs.core.ktx)
+    implementation(libs.androidx.work.runtime)
     implementation(libs.coroutines.android)
     implementation(libs.coroutines.core)
 
@@ -33,6 +34,7 @@ dependencies {
     implementation(project(":inference"))
     implementation(project(":data"))
     implementation(project(":sms"))
+    implementation(project(":hardware"))
 
     // Hilt
     implementation(libs.hilt.android)
