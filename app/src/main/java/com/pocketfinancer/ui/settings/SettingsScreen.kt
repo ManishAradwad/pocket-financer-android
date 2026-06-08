@@ -316,6 +316,9 @@ private fun EngineCard(state: SettingsUiState, viewModel: SettingsViewModel) {
         state.sessionCacheLogs?.let { logs ->
             OutputBox(title = "KV Cache Session Logs", content = logs.joinToString("\n"))
         }
+        state.slmPrompt?.let { prompt ->
+            OutputBox(title = "Complete SLM Input Prompt", content = prompt)
+        }
         state.thinkingOutput?.let { thinking ->
             OutputBox(title = "Thinking (<think> block)", content = thinking.take(2000))
         }

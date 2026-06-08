@@ -52,7 +52,8 @@ data class SettingsUiState(
     val testParsed: String? = null,
     val testError: String? = null,
     val filterLogs: List<String>? = null,
-    val sessionCacheLogs: List<String>? = null
+    val sessionCacheLogs: List<String>? = null,
+    val slmPrompt: String? = null
 )
 
 @HiltViewModel
@@ -277,7 +278,8 @@ class SettingsViewModel @Inject constructor(
                 thinkingOutput = null,
                 testError = null,
                 filterLogs = null,
-                sessionCacheLogs = null
+                sessionCacheLogs = null,
+                slmPrompt = null
             )
 
             // Perform SMS filtering with a short delay for UI state transition feedback
@@ -316,7 +318,8 @@ class SettingsViewModel @Inject constructor(
                 val suffixString = chatPrompt.substring(splitIndex + staticPrefix.length)
 
                 _state.value = _state.value.copy(
-                    testProgress = "Checking/preparing KV Cache session..."
+                    testProgress = "Checking/preparing KV Cache session...",
+                    slmPrompt = chatPrompt
                 )
 
                 val prefixHash = llamaEngine.computeSha256(prefixString)

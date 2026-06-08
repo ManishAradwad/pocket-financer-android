@@ -1,0 +1,634 @@
+package com.pocketfinancer.ui.transactions
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowDownward
+import androidx.compose.material.icons.filled.ArrowUpward
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.FilterList
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.hilt.navigation.compose.hiltViewModel
+import com.pocketfinancer.data.model.Transaction
+import com.pocketfinancer.data.model.TransactionType
+import com.pocketfinancer.ui.theme.*
+import java.text.SimpleDateFormat
+import java.util.*
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun TransactionsScreen(
+    viewModel: TransactionsViewModel = hiltViewModel()
+) {
+    val state by viewModel.uiState.collectAsState()
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(M3_Surface)
+    ) {
+        Column(
+            modifier = Modifier.fillMaxSize()
+        ) {
+            // ── Header ──
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Transactions",
+                    color = M3_OnSurface,
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    IconButton(
+                        onClick = { /* Search functionality - coming soon */ },
+                        modifier = Modifier
+                            .size(40.dp)
+                            .background(M3_SurfaceContainer, CircleShape)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Search,
+                            contentDescription = "Search",
+                            tint = M3_OnSurface,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                    IconButton(
+                        onClick = { /* Filter list - coming soon */ },
+                        modifier = Modifier
+                            .size(40.dp)
+                            .background(M3_SurfaceContainer, CircleShape)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.FilterList,
+                            contentDescription = "Filters",
+                            tint = M3_OnSurface,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                }
+            }
+
+            // ── Segmented Control ──
+            val segments = listOf("All", "Debits", "Credits")
+            SingleChoiceSegmentedButtonRow(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+            ) {
+                segments.forEachIndexed { index, label ->
+                    val selected = state.activeSegment == label
+                    SegmentedButton(
+                        selected = selected,
+                        onClick = { viewModel.updateSegment(label) },
+                        shape = SegmentedButtonDefaults.itemShape(index = index, count = segments.size),
+                        colors = SegmentedButtonDefaults.colors(
+                            activeContainerColor = M3_SecondaryContainer,
+                            activeContentColor = M3_OnSecondaryContainer,
+                            inactiveContainerColor = M3_SurfaceContainerLowest,
+                            inactiveContentColor = M3_OnSurfaceVariant
+                        )
+                    ) {
+                        Text(
+                            text = label,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
+            }
+
+            // ── Month Summary Metric Row ──
+            val debitsSum = state.transactions
+                .filter { it.type == TransactionType.DEBIT }
+                .sumOf { it.amount }
+            
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 12.dp)
+                    .background(M3_SurfaceContainerLowest, RoundedCornerShape(12.dp))
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Current View Outbound",
+                    color = M3_OnSurfaceVariant,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium
+                )
+                Text(
+                    text = "OUT  ₹${String.format("%,.2f", debitsSum)}",
+                    color = M3_OnSurface,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace
+                )
+            }
+
+            // ── Group transactions by date ──
+            val groupedTransactions = remember(state.transactions) {
+                state.transactions.groupBy { formatDateKey(it.date) }
+            }
+
+            if (state.transactions.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .weight(1f),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "No transactions found",
+                        color = M3_OnSurfaceVariant,
+                        fontSize = 14.sp
+                    )
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .weight(1f)
+                ) {
+                    groupedTransactions.forEach { (dateKey, txList) ->
+                        // Header showing date and total debit/credit for the day
+                        val dayDebits = txList.filter { it.type == TransactionType.DEBIT }.sumOf { it.amount }
+                        val dayCredits = txList.filter { it.type == TransactionType.CREDIT }.sumOf { it.amount }
+
+                        item {
+                            DayHeaderRow(
+                                dateText = formatDayHeader(txList.first().date),
+                                debitTotal = dayDebits,
+                                creditTotal = dayCredits
+                            )
+                        }
+
+                        itemsIndexed(txList) { index, transaction ->
+                            TransactionItem(
+                                transaction = transaction,
+                                showDivider = index < txList.size - 1,
+                                onClick = { viewModel.selectTransaction(transaction) }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Transaction Details Bottom Sheet ──
+        if (state.selectedTransaction != null) {
+            val tx = state.selectedTransaction!!
+            val avatarColors = getAvatarColors(tx.merchant)
+
+            ModalBottomSheet(
+                onDismissRequest = { viewModel.selectTransaction(null) },
+                sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+                containerColor = M3_SurfaceContainerLow,
+                contentColor = M3_OnSurface,
+                dragHandle = {
+                    Box(
+                        modifier = Modifier
+                            .padding(vertical = 12.dp)
+                            .width(48.dp)
+                            .height(6.dp)
+                            .background(M3_OutlineVariant.copy(alpha = 0.6f), RoundedCornerShape(3.dp))
+                    )
+                }
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp)
+                        .padding(bottom = 32.dp)
+                ) {
+                    // Title/Avatar Row
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(16.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .background(avatarColors.first, CircleShape),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = getInitials(tx.merchant),
+                                    color = avatarColors.second,
+                                    fontSize = 18.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                            Column {
+                                Text(
+                                    text = tx.merchant,
+                                    color = M3_OnSurface,
+                                    fontSize = 18.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = "${formatFullDate(tx.date)} · ${formatTime(tx.date)}",
+                                    color = M3_OnSurfaceVariant,
+                                    fontSize = 12.sp
+                                )
+                            }
+                        }
+                        Text(
+                            text = (if (tx.type == TransactionType.CREDIT) "+" else "−") + "₹${String.format("%,.2f", tx.amount)}",
+                            color = if (tx.type == TransactionType.CREDIT) M3_Pos else M3_OnSurface,
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    // Badges Row
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        // Type Badge
+                        Row(
+                            modifier = Modifier
+                                .background(M3_SecondaryContainer, RoundedCornerShape(8.dp))
+                                .padding(horizontal = 12.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Icon(
+                                imageVector = if (tx.type == TransactionType.CREDIT) Icons.Default.ArrowUpward else Icons.Default.ArrowDownward,
+                                contentDescription = null,
+                                tint = M3_OnSecondaryContainer,
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Text(
+                                text = if (tx.type == TransactionType.CREDIT) "Credit" else "Debit",
+                                color = M3_OnSecondaryContainer,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+
+                        // Account Badge
+                        Row(
+                            modifier = Modifier
+                                .background(M3_SurfaceContainer, RoundedCornerShape(8.dp))
+                                .padding(horizontal = 12.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text(
+                                text = tx.accountLabel ?: "Unknown Account",
+                                color = M3_OnSurface,
+                                fontSize = 12.sp,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+                    HorizontalDivider(color = M3_OutlineVariant.copy(alpha = 0.3f))
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    // SLM OUTPUT Codeblock Section
+                    Text(
+                        text = "SLM OUTPUT",
+                        color = M3_OnSurfaceVariant,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 1.sp,
+                        fontFamily = FontFamily.Monospace
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(M3_SurfaceContainerLowest, RoundedCornerShape(12.dp))
+                            .padding(12.dp)
+                    ) {
+                        val slmProps = listOf(
+                            "amount" to tx.amount.toString(),
+                            "type" to "\"${tx.type.name.lowercase()}\"",
+                            "counterparty" to "\"${tx.merchant}\"",
+                            "date" to "\"${formatDate(tx.date)}\"",
+                            "account" to "\"${tx.accountLabel ?: ""}\""
+                        )
+                        slmProps.forEach { (key, value) ->
+                            Row(
+                                modifier = Modifier.padding(vertical = 2.dp)
+                            ) {
+                                Text(
+                                    text = key,
+                                    color = M3_OnSurfaceVariant,
+                                    fontSize = 12.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    modifier = Modifier.width(100.dp)
+                                )
+                                Text(
+                                    text = ":",
+                                    color = M3_OnSurfaceVariant,
+                                    fontSize = 12.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    modifier = Modifier.padding(horizontal = 4.dp)
+                                )
+                                Text(
+                                    text = value,
+                                    color = if (value.startsWith("\"")) Color(0xFF98C379) else Color(0xFF61AFEF),
+                                    fontSize = 12.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    // SOURCE SMS Section
+                    Text(
+                        text = "SOURCE SMS",
+                        color = M3_OnSurfaceVariant,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 1.sp,
+                        fontFamily = FontFamily.Monospace
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(M3_SurfaceContainerLowest, RoundedCornerShape(12.dp))
+                            .clip(RoundedCornerShape(12.dp))
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(M3_SurfaceContainerLow)
+                                .padding(horizontal = 12.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "from  ",
+                                color = M3_OnSurfaceVariant,
+                                fontSize = 10.sp
+                            )
+                            Text(
+                                text = tx.sender,
+                                color = M3_OnPrimaryContainer,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                fontFamily = FontFamily.Monospace,
+                                modifier = Modifier
+                                    .background(M3_PrimaryContainer, RoundedCornerShape(4.dp))
+                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
+                        Text(
+                            text = tx.rawMessage,
+                            color = M3_OnSurfaceVariant,
+                            fontSize = 12.sp,
+                            fontFamily = FontFamily.Monospace,
+                            lineHeight = 18.sp,
+                            modifier = Modifier.padding(12.dp)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun DayHeaderRow(
+    dateText: String,
+    debitTotal: Double,
+    creditTotal: Double
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(M3_Surface.copy(alpha = 0.95f))
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = dateText.uppercase(),
+            color = M3_OnSurfaceVariant,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 1.sp
+        )
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            if (debitTotal > 0.0) {
+                Text(
+                    text = "↓ ₹${String.format("%,.0f", debitTotal)}",
+                    color = M3_OnErrorContainer,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier
+                        .background(M3_ErrorContainer, RoundedCornerShape(4.dp))
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                )
+            }
+            if (creditTotal > 0.0) {
+                Text(
+                    text = "↑ ₹${String.format("%,.0f", creditTotal)}",
+                    color = M3_OnPosContainer,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier
+                        .background(M3_PosContainer, RoundedCornerShape(4.dp))
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun TransactionItem(
+    transaction: Transaction,
+    showDivider: Boolean,
+    onClick: () -> Unit
+) {
+    val avatarColors = getAvatarColors(transaction.merchant)
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier.weight(1f)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(40.dp)
+                        .background(avatarColors.first, CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = getInitials(transaction.merchant),
+                        color = avatarColors.second,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                Column(
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text(
+                        text = transaction.merchant,
+                        color = M3_OnSurface,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = transaction.accountLabel ?: "Unknown Card",
+                        color = M3_OnSurfaceVariant,
+                        fontSize = 9.sp,
+                        fontFamily = FontFamily.Monospace,
+                        modifier = Modifier
+                            .background(M3_SurfaceContainerHigh, RoundedCornerShape(4.dp))
+                            .padding(horizontal = 6.dp, vertical = 1.dp)
+                    )
+                }
+            }
+            Column(
+                horizontalAlignment = Alignment.End,
+                modifier = Modifier.padding(start = 8.dp)
+            ) {
+                Text(
+                    text = (if (transaction.type == TransactionType.CREDIT) "+" else "−") + "₹${String.format("%,.2f", transaction.amount)}",
+                    color = if (transaction.type == TransactionType.CREDIT) M3_Pos else M3_OnSurface,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium,
+                    fontFamily = FontFamily.Monospace
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = formatTime(transaction.date),
+                    color = M3_OnSurfaceVariant,
+                    fontSize = 10.sp
+                )
+            }
+        }
+        if (showDivider) {
+            HorizontalDivider(
+                modifier = Modifier.padding(horizontal = 16.dp),
+                color = M3_OutlineVariant.copy(alpha = 0.2f)
+            )
+        }
+    }
+}
+
+// ── Helpers ──
+
+private fun formatDateKey(timestampMs: Long): String {
+    val date = Date(timestampMs)
+    val fmt = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
+    return fmt.format(date)
+}
+
+private fun formatDayHeader(timestampMs: Long): String {
+    val date = Date(timestampMs)
+    val now = Date()
+    val fmtDate = SimpleDateFormat("dd-MM-yyyy", Locale.getDefault())
+    val headerFmt = SimpleDateFormat("EEE, d MMM", Locale.getDefault())
+
+    val isToday = fmtDate.format(date) == fmtDate.format(now)
+    val formatted = headerFmt.format(date)
+    return if (isToday) "Today · $formatted" else formatted
+}
+
+private fun formatTime(timestampMs: Long): String {
+    val date = Date(timestampMs)
+    val fmt = SimpleDateFormat("HH:mm", Locale.getDefault())
+    return fmt.format(date)
+}
+
+private fun formatDate(timestampMs: Long): String {
+    val date = Date(timestampMs)
+    val fmt = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
+    return fmt.format(date)
+}
+
+private fun formatFullDate(timestampMs: Long): String {
+    val date = Date(timestampMs)
+    val fmt = SimpleDateFormat("d MMM yyyy", Locale.getDefault())
+    return fmt.format(date)
+}
+
+private fun getInitials(name: String): String {
+    if (name.isEmpty()) return "?"
+    if (name.contains("@")) return name[0].uppercase()
+    val parts = name.trim().split("\\s+".toRegex())
+    return if (parts.size > 1) {
+        (parts[0][0].toString() + parts[1][0].toString()).uppercase()
+    } else {
+        name.take(2).uppercase()
+    }
+}
+
+private fun getAvatarColors(name: String): Pair<Color, Color> {
+    val hash = name.hashCode()
+    val index = Math.abs(hash) % 5
+    return when (index) {
+        0 -> Color(0xFF332211) to Color(0xFFFFDCC1) // amber-like
+        1 -> Color(0xFF0F3A22) to Color(0xFFC7F3C8) // green-like
+        2 -> Color(0xFF0B2D54) to Color(0xFFD3E4FF) // blue-like
+        3 -> Color(0xFF2E0F45) to Color(0xFFF2DAFF) // purple-like
+        else -> Color(0xFF4A0A17) to Color(0xFFFFDAD9) // rose-like
+    }
+}

@@ -25,6 +25,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.LaunchedEffect
 import com.pocketfinancer.ui.navigation.Screen
 import com.pocketfinancer.ui.settings.SettingsScreen
+import com.pocketfinancer.ui.transactions.TransactionsScreen
 import com.pocketfinancer.ui.theme.M3_OnSecondaryContainer
 import com.pocketfinancer.ui.theme.M3_OnSurface
 import com.pocketfinancer.ui.theme.M3_OnSurfaceVariant
@@ -104,7 +105,7 @@ fun PocketFinancerRoot() {
                 modifier = Modifier.padding(innerPadding)
             ) {
                 composable(Screen.Home.route) { PlaceholderScreen("Home Dashboard") }
-                composable(Screen.Transactions.route) { PlaceholderScreen("Transactions") }
+                composable(Screen.Transactions.route) { TransactionsScreen() }
                 composable(Screen.Insights.route) { PlaceholderScreen("Insights") }
                 composable(Screen.Settings.route) { SettingsScreen() }
             }
