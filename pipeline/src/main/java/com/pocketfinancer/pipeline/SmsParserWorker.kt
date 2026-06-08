@@ -22,6 +22,9 @@ import dagger.hilt.components.SingletonComponent
 import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
+import android.widget.Toast
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
  * Background worker to process a transaction SMS.
@@ -108,8 +111,23 @@ class SmsParserWorker(
 
             // 3. Process SMS transaction
             Log.i("SmsParserWorker", "Executing pipeline service for extraction...")
-            pipelineService.processSingle(sms)
-            Log.i("SmsParserWorker", "Background processing completed successfully.")
+            val parsedResult = pipelineService.processSingle(sms)
+            if (parsedResult != null) {
+                Log.i("SmsParserWorker", "Background processing completed successfully. Saved transaction of ₹${parsedResult.amount}.")
+                try {
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(
+                            applicationContext,
+                            "Background: Saved transaction of ₹${parsedResult.amount} from ${parsedResult.counterparty ?: address}",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                } catch (e: Exception) {
+                    Log.e("SmsParserWorker", "Failed to show background Toast", e)
+                }
+            } else {
+                Log.w("SmsParserWorker", "Pipeline execution finished but returned null (no transaction saved).")
+            }
 
         } catch (e: Exception) {
             Log.e("SmsParserWorker", "Exception in background SMS parsing worker", e)

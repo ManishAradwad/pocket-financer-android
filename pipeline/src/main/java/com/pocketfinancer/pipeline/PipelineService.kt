@@ -141,10 +141,10 @@ class PipelineService @Inject constructor(
         return promptBuilder.buildChatPrompt(rawPrompt, enableThinking = llamaEngine.hasThinkingMode)
     }
 
-    internal suspend fun processSingle(sms: SmsReader.SmsMessage) {
+    internal suspend fun processSingle(sms: SmsReader.SmsMessage): ExtractionParser.ExtractedTransaction? {
         if (!llamaEngine.isModelLoaded()) {
             emit(Stage.ERROR, "Model not loaded, skipping SMS")
-            return
+            return null
         }
 
         emit(Stage.EXTRACTING, "Processing SMS from ${sms.address}")
@@ -164,18 +164,18 @@ class PipelineService @Inject constructor(
             answerTokens = 256
         )
 
-        when (result) {
+        return when (result) {
             is LlamaEngine.InferenceResult.Null -> {
                 emit(Stage.SKIPPED, "Not a financial transaction")
-                return
+                null
             }
             is LlamaEngine.InferenceResult.Error -> {
                 emit(Stage.ERROR, result.message)
-                return
+                null
             }
             is LlamaEngine.InferenceResult.Stopped -> {
                 emit(Stage.ERROR, "Inference stopped")
-                return
+                null
             }
             is LlamaEngine.InferenceResult.Success -> {
                 val perfInfo = result.perf?.let { p ->
@@ -186,7 +186,7 @@ class PipelineService @Inject constructor(
                 val parsed = extractionParser.parse(result.json)
                 if (parsed == null) {
                     emit(Stage.SKIPPED, "Nonnull filter rejected extraction")
-                    return
+                    return null
                 }
 
                 // 4. Resolve account
@@ -215,6 +215,7 @@ class PipelineService @Inject constructor(
                 )
 
                 emit(Stage.SAVED, "Transaction saved: ₹${parsed.amount} ${parsed.type.name}")
+                parsed
             }
         }
     }

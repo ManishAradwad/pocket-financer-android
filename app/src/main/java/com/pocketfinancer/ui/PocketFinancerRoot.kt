@@ -19,6 +19,10 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import android.Manifest
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.LaunchedEffect
 import com.pocketfinancer.ui.navigation.Screen
 import com.pocketfinancer.ui.settings.SettingsScreen
 import com.pocketfinancer.ui.theme.M3_OnSecondaryContainer
@@ -31,6 +35,19 @@ import com.pocketfinancer.ui.theme.PocketFinancerTheme
 @Composable
 fun PocketFinancerRoot() {
     PocketFinancerTheme {
+        val permissionLauncher = rememberLauncherForActivityResult(
+            contract = ActivityResultContracts.RequestMultiplePermissions()
+        ) { _ -> }
+
+        LaunchedEffect(Unit) {
+            permissionLauncher.launch(
+                arrayOf(
+                    Manifest.permission.RECEIVE_SMS,
+                    Manifest.permission.READ_SMS
+                )
+            )
+        }
+
         val navController = rememberNavController()
 
         Scaffold(

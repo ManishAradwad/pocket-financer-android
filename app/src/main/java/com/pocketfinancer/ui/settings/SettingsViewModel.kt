@@ -12,6 +12,8 @@ import com.pocketfinancer.inference.ModelDownloader
 import com.pocketfinancer.pipeline.ExtractionParser
 import com.pocketfinancer.pipeline.PromptBuilder
 import com.pocketfinancer.pipeline.SmsFilterPipeline
+import com.pocketfinancer.data.repository.TransactionRepository
+import com.pocketfinancer.data.repository.AccountRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -60,7 +62,9 @@ class SettingsViewModel @Inject constructor(
     private val modelDownloader: ModelDownloader,
     private val promptBuilder: PromptBuilder,
     private val extractionParser: ExtractionParser,
-    private val smsFilterPipeline: SmsFilterPipeline
+    private val smsFilterPipeline: SmsFilterPipeline,
+    private val transactionRepository: TransactionRepository,
+    private val accountRepository: AccountRepository
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(SettingsUiState())
@@ -516,6 +520,31 @@ class SettingsViewModel @Inject constructor(
 
                 Log.i("PocketFinancer", "Parsed result: $parsed")
                 Log.i("PocketFinancer", "Performance: ${perfData}")
+
+                // Save mock transaction to database on successful test run
+                parsed?.let { p ->
+                    val accountName = p.account
+                    val account = if (accountName != null) {
+                        accountRepository.getOrCreate(accountName, "Unknown Bank", "auto-extracted")
+                    } else {
+                        accountRepository.ensureDefault()
+                    }
+                    val txType = when (p.type) {
+                        ExtractionParser.TransactionType.CREDIT -> com.pocketfinancer.data.model.TransactionType.CREDIT
+                        ExtractionParser.TransactionType.DEBIT -> com.pocketfinancer.data.model.TransactionType.DEBIT
+                    }
+                    transactionRepository.insert(
+                        TransactionRepository.NewTransaction(
+                            amount = p.amount,
+                            merchant = p.counterparty ?: "Unknown Merchant",
+                            date = System.currentTimeMillis(),
+                            type = txType,
+                            accountId = account.id,
+                            rawMessage = testBody,
+                            sender = testSender
+                        )
+                    )
+                }
 
                 _state.value = _state.value.copy(
                     testRunning = false,
