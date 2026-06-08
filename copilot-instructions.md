@@ -125,7 +125,7 @@ Check model storage paths and read device warning or crash logs:
 ## 📈 Roadmap & Next Tasks (Where to start)
 
 1. **Dashboard, Transaction Register, and Device Profiling Screens (Current Step)**:
-   - Build out the primary tabs (`Home`, `Transactions`, `Insights`) inside [`ui/PocketFinancerRoot.kt`](file:///d:/Personal_Projects/pocket-financer-android/app/src/main/java/com/pocketfinancer/ui/PocketFinancerRoot.kt) which are currently using the `PlaceholderScreen`.
+   - Build out the primary tabs (`Home`, `Insights`) inside [`ui/PocketFinancerRoot.kt`](file:///d:/Personal_Projects/pocket-financer-android/app/src/main/java/com/pocketfinancer/ui/PocketFinancerRoot.kt) (the `Transactions` tab is now fully implemented with date-grouped lists, daily subtotals, credit/debit filters, and an SLM details bottom sheet).
    - Ensure you use Material 3 dark components that fit the defined color tokens.
 2. **Background Worker integration (Next Step)**:
    - Integrate an Android WorkManager flow that triggers in the background when SMS is received to parse messages offline without requiring the app to be open.

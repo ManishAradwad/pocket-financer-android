@@ -180,7 +180,7 @@ cd pocket-financer-android
 
 - [x] **Phase 1-4**: Core Native JNI bindings, llama.cpp compilation, & Model Downloader pipeline.
 - [x] **Phase 5**: Pipeline service orchestration, validation rules, & SQLCipher secure database persistence.
-- [/] **Phase 6**: UI screen development. Dashboard graphs, transactional registers, and device profiling UI screens are currently being migrated from design concepts to Compose elements.
+- [/] **Phase 6**: UI screen development. Dashboard registers (`Transactions` tab with full date-grouped cards, debit/credit filters, and SLM metadata bottom sheets) and Settings debug metrics are active. Dashboard summary (`Home` tab) and analytics graphs (`Insights` tab) are under development.
 - [ ] **Phase 7**: Background Worker integration for sleeping SMS parses.
 
 ---
