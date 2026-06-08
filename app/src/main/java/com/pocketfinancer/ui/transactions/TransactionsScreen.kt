@@ -17,8 +17,13 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.border
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.material.icons.rounded.*
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -187,12 +192,34 @@ fun TransactionsScreen(
                             )
                         }
 
-                        itemsIndexed(txList) { index, transaction ->
-                            TransactionItem(
-                                transaction = transaction,
-                                showDivider = index < txList.size - 1,
-                                onClick = { viewModel.selectTransaction(transaction) }
-                            )
+                        item {
+                            Card(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 6.dp),
+                                shape = RoundedCornerShape(16.dp),
+                                colors = CardDefaults.cardColors(
+                                    containerColor = M3_SurfaceContainerLow
+                                ),
+                                border = BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.3f))
+                            ) {
+                                Column {
+                                    txList.forEachIndexed { index, transaction ->
+                                        val itemShape = when {
+                                            txList.size == 1 -> RoundedCornerShape(16.dp)
+                                            index == 0 -> RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp)
+                                            index == txList.size - 1 -> RoundedCornerShape(bottomStart = 16.dp, bottomEnd = 16.dp)
+                                            else -> androidx.compose.ui.graphics.RectangleShape
+                                        }
+                                        TransactionItem(
+                                            transaction = transaction,
+                                            shape = itemShape,
+                                            showDivider = index < txList.size - 1,
+                                            onClick = { viewModel.selectTransaction(transaction) }
+                                        )
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -202,7 +229,10 @@ fun TransactionsScreen(
         // ── Transaction Details Bottom Sheet ──
         if (state.selectedTransaction != null) {
             val tx = state.selectedTransaction!!
-            val avatarColors = getAvatarColors(tx.merchant)
+
+            val gradient = getAvatarGradient(tx.merchant)
+            val textColor = getAvatarTextColor(tx.merchant)
+            val icon = getMerchantIcon(tx.merchant)
 
             ModalBottomSheet(
                 onDismissRequest = { viewModel.selectTransaction(null) },
@@ -225,97 +255,118 @@ fun TransactionsScreen(
                         .padding(horizontal = 20.dp)
                         .padding(bottom = 32.dp)
                 ) {
-                    // Title/Avatar Row
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
+                    // Centered Receipt Header
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 16.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(16.dp)
+                        Box(
+                            modifier = Modifier
+                                .size(64.dp)
+                                .background(gradient, RoundedCornerShape(18.dp)),
+                            contentAlignment = Alignment.Center
                         ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(48.dp)
-                                    .background(avatarColors.first, CircleShape),
-                                contentAlignment = Alignment.Center
-                            ) {
+                            if (icon != null) {
+                                Icon(
+                                    imageVector = icon,
+                                    contentDescription = null,
+                                    tint = textColor,
+                                    modifier = Modifier.size(32.dp)
+                                )
+                            } else {
                                 Text(
                                     text = getInitials(tx.merchant),
-                                    color = avatarColors.second,
-                                    fontSize = 18.sp,
+                                    color = textColor,
+                                    fontSize = 22.sp,
                                     fontWeight = FontWeight.Bold
                                 )
                             }
-                            Column {
-                                Text(
-                                    text = tx.merchant,
-                                    color = M3_OnSurface,
-                                    fontSize = 18.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                Text(
-                                    text = "${formatFullDate(tx.date)} · ${formatTime(tx.date)}",
-                                    color = M3_OnSurfaceVariant,
-                                    fontSize = 12.sp
-                                )
-                            }
                         }
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(
+                            text = tx.merchant,
+                            color = M3_OnSurface,
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                            modifier = Modifier.padding(horizontal = 16.dp)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "${formatFullDate(tx.date)} · ${formatTime(tx.date)}",
+                            color = M3_OnSurfaceVariant,
+                            fontSize = 13.sp
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
                         Text(
                             text = (if (tx.type == TransactionType.CREDIT) "+" else "−") + "₹${String.format("%,.2f", tx.amount)}",
                             color = if (tx.type == TransactionType.CREDIT) M3_Pos else M3_OnSurface,
-                            fontSize = 20.sp,
+                            fontSize = 32.sp,
                             fontWeight = FontWeight.Bold,
                             fontFamily = FontFamily.Monospace
                         )
                     }
 
-                    Spacer(modifier = Modifier.height(16.dp))
-
-                    // Badges Row
+                    // Centered Badges Row
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 8.dp),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        // Type Badge
                         Row(
-                            modifier = Modifier
-                                .background(M3_SecondaryContainer, RoundedCornerShape(8.dp))
-                                .padding(horizontal = 12.dp, vertical = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Icon(
-                                imageVector = if (tx.type == TransactionType.CREDIT) Icons.Default.ArrowUpward else Icons.Default.ArrowDownward,
-                                contentDescription = null,
-                                tint = M3_OnSecondaryContainer,
-                                modifier = Modifier.size(14.dp)
-                            )
-                            Text(
-                                text = if (tx.type == TransactionType.CREDIT) "Credit" else "Debit",
-                                color = M3_OnSecondaryContainer,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
+                            // Type Badge
+                            val badgeBg = if (tx.type == TransactionType.CREDIT) M3_PosContainer else M3_SecondaryContainer
+                            val badgeText = if (tx.type == TransactionType.CREDIT) M3_OnPosContainer else M3_OnSecondaryContainer
+                            Row(
+                                modifier = Modifier
+                                    .background(badgeBg, RoundedCornerShape(8.dp))
+                                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Icon(
+                                    imageVector = if (tx.type == TransactionType.CREDIT) Icons.Default.ArrowUpward else Icons.Default.ArrowDownward,
+                                    contentDescription = null,
+                                    tint = badgeText,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                Text(
+                                    text = if (tx.type == TransactionType.CREDIT) "Credit" else "Debit",
+                                    color = badgeText,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
 
-                        // Account Badge
-                        Row(
-                            modifier = Modifier
-                                .background(M3_SurfaceContainer, RoundedCornerShape(8.dp))
-                                .padding(horizontal = 12.dp, vertical = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            Text(
-                                text = tx.accountLabel ?: "Unknown Account",
-                                color = M3_OnSurface,
-                                fontSize = 12.sp,
-                                fontFamily = FontFamily.Monospace
-                            )
+                            // Account Badge
+                            Row(
+                                modifier = Modifier
+                                    .background(M3_SurfaceContainer, RoundedCornerShape(8.dp))
+                                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.CreditCard,
+                                    contentDescription = null,
+                                    tint = M3_OnSurfaceVariant,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                Text(
+                                    text = tx.accountLabel ?: "Unknown Account",
+                                    color = M3_OnSurface,
+                                    fontSize = 12.sp,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                            }
                         }
                     }
 
@@ -324,19 +375,31 @@ fun TransactionsScreen(
                     Spacer(modifier = Modifier.height(16.dp))
 
                     // SLM OUTPUT Codeblock Section
-                    Text(
-                        text = "SLM OUTPUT",
-                        color = M3_OnSurfaceVariant,
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 1.sp,
-                        fontFamily = FontFamily.Monospace
-                    )
-                    Spacer(modifier = Modifier.height(6.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Terminal,
+                            contentDescription = null,
+                            tint = M3_OnSurfaceVariant,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text(
+                            text = "SLM OUTPUT",
+                            color = M3_OnSurfaceVariant,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 1.sp,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
                             .background(M3_SurfaceContainerLowest, RoundedCornerShape(12.dp))
+                            .border(BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.3f)), RoundedCornerShape(12.dp))
                             .padding(12.dp)
                     ) {
                         val slmProps = listOf(
@@ -379,19 +442,31 @@ fun TransactionsScreen(
                     Spacer(modifier = Modifier.height(16.dp))
 
                     // SOURCE SMS Section
-                    Text(
-                        text = "SOURCE SMS",
-                        color = M3_OnSurfaceVariant,
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 1.sp,
-                        fontFamily = FontFamily.Monospace
-                    )
-                    Spacer(modifier = Modifier.height(6.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Sms,
+                            contentDescription = null,
+                            tint = M3_OnSurfaceVariant,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text(
+                            text = "SOURCE SMS",
+                            color = M3_OnSurfaceVariant,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 1.sp,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
                             .background(M3_SurfaceContainerLowest, RoundedCornerShape(12.dp))
+                            .border(BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.3f)), RoundedCornerShape(12.dp))
                             .clip(RoundedCornerShape(12.dp))
                     ) {
                         Row(
@@ -487,14 +562,18 @@ fun DayHeaderRow(
 @Composable
 fun TransactionItem(
     transaction: Transaction,
+    shape: androidx.compose.ui.graphics.Shape,
     showDivider: Boolean,
     onClick: () -> Unit
 ) {
-    val avatarColors = getAvatarColors(transaction.merchant)
+    val gradient = getAvatarGradient(transaction.merchant)
+    val textColor = getAvatarTextColor(transaction.merchant)
+    val icon = getMerchantIcon(transaction.merchant)
 
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            .clip(shape)
             .clickable(onClick = onClick)
     ) {
         Row(
@@ -512,15 +591,24 @@ fun TransactionItem(
                 Box(
                     modifier = Modifier
                         .size(40.dp)
-                        .background(avatarColors.first, CircleShape),
+                        .background(gradient, RoundedCornerShape(12.dp)),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text(
-                        text = getInitials(transaction.merchant),
-                        color = avatarColors.second,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold
-                    )
+                    if (icon != null) {
+                        Icon(
+                            imageVector = icon,
+                            contentDescription = null,
+                            tint = textColor,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    } else {
+                        Text(
+                            text = getInitials(transaction.merchant),
+                            color = textColor,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
                 }
                 Column(
                     modifier = Modifier.weight(1f)
@@ -553,7 +641,7 @@ fun TransactionItem(
                     text = (if (transaction.type == TransactionType.CREDIT) "+" else "−") + "₹${String.format("%,.2f", transaction.amount)}",
                     color = if (transaction.type == TransactionType.CREDIT) M3_Pos else M3_OnSurface,
                     fontSize = 14.sp,
-                    fontWeight = FontWeight.Medium,
+                    fontWeight = FontWeight.SemiBold,
                     fontFamily = FontFamily.Monospace
                 )
                 Spacer(modifier = Modifier.height(2.dp))
@@ -625,10 +713,52 @@ private fun getAvatarColors(name: String): Pair<Color, Color> {
     val hash = name.hashCode()
     val index = Math.abs(hash) % 5
     return when (index) {
-        0 -> Color(0xFF332211) to Color(0xFFFFDCC1) // amber-like
-        1 -> Color(0xFF0F3A22) to Color(0xFFC7F3C8) // green-like
-        2 -> Color(0xFF0B2D54) to Color(0xFFD3E4FF) // blue-like
-        3 -> Color(0xFF2E0F45) to Color(0xFFF2DAFF) // purple-like
-        else -> Color(0xFF4A0A17) to Color(0xFFFFDAD9) // rose-like
+        0 -> Color(0xFF452B0E) to Color(0xFFFFDCC1) // amber-like
+        1 -> Color(0xFF12472B) to Color(0xFFC7F3C8) // green-like
+        2 -> Color(0xFF0E3E75) to Color(0xFFD3E4FF) // blue-like
+        3 -> Color(0xFF421863) to Color(0xFFF2DAFF) // purple-like
+        else -> Color(0xFF611221) to Color(0xFFFFDAD9) // rose-like
+    }
+}
+
+private fun getAvatarGradient(name: String): Brush {
+    val hash = name.hashCode()
+    val index = Math.abs(hash) % 5
+    return when (index) {
+        0 -> Brush.linearGradient(listOf(Color(0xFF452B0E), Color(0xFF2C1B08)))
+        1 -> Brush.linearGradient(listOf(Color(0xFF12472B), Color(0xFF0A2919)))
+        2 -> Brush.linearGradient(listOf(Color(0xFF0E3E75), Color(0xFF072445)))
+        3 -> Brush.linearGradient(listOf(Color(0xFF421863), Color(0xFF260D3A)))
+        else -> Brush.linearGradient(listOf(Color(0xFF611221), Color(0xFF380812)))
+    }
+}
+
+private fun getAvatarTextColor(name: String): Color {
+    val hash = name.hashCode()
+    val index = Math.abs(hash) % 5
+    return when (index) {
+        0 -> Color(0xFFFFDCC1)
+        1 -> Color(0xFFC7F3C8)
+        2 -> Color(0xFFD3E4FF)
+        3 -> Color(0xFFF2DAFF)
+        else -> Color(0xFFFFDAD9)
+    }
+}
+
+@Composable
+private fun getMerchantIcon(name: String): ImageVector? {
+    val lower = name.lowercase()
+    return when {
+        lower.contains("zomato") || lower.contains("swiggy") || lower.contains("food") || lower.contains("restaurant") || lower.contains("dine") || lower.contains("cafe") -> Icons.Rounded.Restaurant
+        lower.contains("uber") || lower.contains("ola") || lower.contains("cab") || lower.contains("ride") || lower.contains("auto") || lower.contains("transport") -> Icons.Rounded.DirectionsCar
+        lower.contains("amazon") || lower.contains("flipkart") || lower.contains("tatacliq") || lower.contains("myntra") || lower.contains("mall") || lower.contains("shop") || lower.contains("store") || lower.contains("grocer") -> Icons.Rounded.ShoppingBag
+        lower.contains("netflix") || lower.contains("spotify") || lower.contains("hotstar") || lower.contains("prime") || lower.contains("music") || lower.contains("youtube") || lower.contains("media") || lower.contains("movie") || lower.contains("show") -> Icons.Rounded.PlayArrow
+        lower.contains("gym") || lower.contains("fit") || lower.contains("sport") || lower.contains("workout") -> Icons.Rounded.FitnessCenter
+        lower.contains("flight") || lower.contains("travel") || lower.contains("hotel") || lower.contains("trip") || lower.contains("makemytrip") || lower.contains("irctc") || lower.contains("rail") -> Icons.Rounded.Flight
+        lower.contains("hospital") || lower.contains("pharmacy") || lower.contains("med") || lower.contains("health") || lower.contains("clinic") || lower.contains("doctor") -> Icons.Rounded.MedicalServices
+        lower.contains("electric") || lower.contains("water") || lower.contains("gas") || lower.contains("bill") || lower.contains("recharge") || lower.contains("telecom") || lower.contains("jio") || lower.contains("airtel") || lower.contains("vi ") -> Icons.Rounded.Receipt
+        lower.contains("bank") || lower.contains("paytm") || lower.contains("gpay") || lower.contains("phonepe") || lower.contains("upi") || lower.contains("hdfc") || lower.contains("sbi") || lower.contains("icici") || lower.contains("axis") || lower.contains("transfer") -> Icons.Rounded.AccountBalance
+        lower.contains("card") || lower.contains("visa") || lower.contains("mastercard") || lower.contains("amex") || lower.contains("rupay") || lower.contains("credit") -> Icons.Rounded.CreditCard
+        else -> null
     }
 }
