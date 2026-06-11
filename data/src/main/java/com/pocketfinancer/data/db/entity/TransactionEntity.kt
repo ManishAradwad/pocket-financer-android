@@ -22,6 +22,7 @@ data class TransactionEntity(
     val accountId: String,              // foreign key to accounts table
     val rawMessage: String,             // original SMS body (encrypted at rest)
     val sender: String,                 // SMS sender address (e.g. "AX-HDFCBK")
+    val isEdited: Boolean = false,
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis()
 )

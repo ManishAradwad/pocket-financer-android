@@ -42,6 +42,26 @@ class TransactionRepository @Inject constructor(
         return entity.toDomain()
     }
 
+    suspend fun updateTransaction(
+        id: String,
+        amount: Double,
+        merchant: String,
+        type: TransactionType,
+        accountId: String
+    ): Transaction? {
+        val existing = transactionDao.getById(id) ?: return null
+        val updatedEntity = existing.copy(
+            amount = amount,
+            merchant = merchant,
+            type = type.name.lowercase(),
+            accountId = accountId,
+            isEdited = true,
+            updatedAt = System.currentTimeMillis()
+        )
+        transactionDao.insert(updatedEntity)
+        return updatedEntity.toDomain()
+    }
+
     suspend fun sumDebitsSince(sinceMs: Long): Double =
         transactionDao.sumByTypeSince("debit", sinceMs) ?: 0.0
 
@@ -61,7 +81,8 @@ class TransactionRepository @Inject constructor(
             accountId = accountId,
             accountLabel = account?.name,
             rawMessage = rawMessage,
-            sender = sender
+            sender = sender,
+            isEdited = isEdited
         )
     }
 

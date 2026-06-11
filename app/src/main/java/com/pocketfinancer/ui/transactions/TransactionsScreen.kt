@@ -13,6 +13,7 @@ import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -234,6 +235,14 @@ fun TransactionsScreen(
             val textColor = getAvatarTextColor(tx.merchant)
             val icon = getMerchantIcon(tx.merchant)
 
+            var isEditing by remember(tx.id) { mutableStateOf(false) }
+
+            var editAmount by remember(tx.id) { mutableStateOf(tx.amount.toString()) }
+            var editMerchant by remember(tx.id) { mutableStateOf(tx.merchant) }
+            var editAccountName by remember(tx.id) { mutableStateOf(tx.accountLabel ?: "") }
+            var editType by remember(tx.id) { mutableStateOf(tx.type) }
+            var typeDropdownExpanded by remember { mutableStateOf(false) }
+
             ModalBottomSheet(
                 onDismissRequest = { viewModel.selectTransaction(null) },
                 sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
@@ -255,191 +264,413 @@ fun TransactionsScreen(
                         .padding(horizontal = 20.dp)
                         .padding(bottom = 32.dp)
                 ) {
-                    // Centered Receipt Header
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 16.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        Box(
+                    if (!isEditing) {
+                        // Centered Receipt Header
+                        Column(
                             modifier = Modifier
-                                .size(64.dp)
-                                .background(gradient, RoundedCornerShape(18.dp)),
-                            contentAlignment = Alignment.Center
+                                .fillMaxWidth()
+                                .padding(vertical = 16.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
                         ) {
-                            if (icon != null) {
-                                Icon(
-                                    imageVector = icon,
-                                    contentDescription = null,
-                                    tint = textColor,
-                                    modifier = Modifier.size(32.dp)
-                                )
-                            } else {
-                                Text(
-                                    text = getInitials(tx.merchant),
-                                    color = textColor,
-                                    fontSize = 22.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
+                            Box(
+                                modifier = Modifier
+                                    .size(64.dp)
+                                    .background(gradient, RoundedCornerShape(18.dp)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                if (icon != null) {
+                                    Icon(
+                                        imageVector = icon,
+                                        contentDescription = null,
+                                        tint = textColor,
+                                        modifier = Modifier.size(32.dp)
+                                    )
+                                } else {
+                                    Text(
+                                        text = getInitials(tx.merchant),
+                                        color = textColor,
+                                        fontSize = 22.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
                             }
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Text(
+                                text = tx.merchant,
+                                color = M3_OnSurface,
+                                fontSize = 20.sp,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                modifier = Modifier.padding(horizontal = 16.dp)
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "${formatFullDate(tx.date)} · ${formatTime(tx.date)}",
+                                color = M3_OnSurfaceVariant,
+                                fontSize = 13.sp
+                            )
+                            if (tx.isEdited) {
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Row(
+                                    modifier = Modifier
+                                        .background(M3_PrimaryContainer.copy(alpha = 0.4f), RoundedCornerShape(6.dp))
+                                        .padding(horizontal = 8.dp, vertical = 2.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Check,
+                                        contentDescription = null,
+                                        tint = M3_OnPrimaryContainer,
+                                        modifier = Modifier.size(12.dp)
+                                    )
+                                    Text(
+                                        text = "Corrected by User",
+                                        color = M3_OnPrimaryContainer,
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Text(
+                                text = (if (tx.type == TransactionType.CREDIT) "+" else "−") + "₹${String.format("%,.2f", tx.amount)}",
+                                color = if (tx.type == TransactionType.CREDIT) M3_Pos else M3_OnSurface,
+                                fontSize = 32.sp,
+                                fontWeight = FontWeight.Bold,
+                                fontFamily = FontFamily.Monospace
+                            )
                         }
-                        Spacer(modifier = Modifier.height(12.dp))
-                        Text(
-                            text = tx.merchant,
-                            color = M3_OnSurface,
-                            fontSize = 20.sp,
-                            fontWeight = FontWeight.Bold,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
-                            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                            modifier = Modifier.padding(horizontal = 16.dp)
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = "${formatFullDate(tx.date)} · ${formatTime(tx.date)}",
-                            color = M3_OnSurfaceVariant,
-                            fontSize = 13.sp
-                        )
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Text(
-                            text = (if (tx.type == TransactionType.CREDIT) "+" else "−") + "₹${String.format("%,.2f", tx.amount)}",
-                            color = if (tx.type == TransactionType.CREDIT) M3_Pos else M3_OnSurface,
-                            fontSize = 32.sp,
-                            fontWeight = FontWeight.Bold,
-                            fontFamily = FontFamily.Monospace
-                        )
-                    }
 
-                    // Centered Badges Row
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 8.dp),
-                        horizontalArrangement = Arrangement.Center,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
+                        // Centered Badges Row
                         Row(
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 8.dp),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            // Type Badge
-                            val badgeBg = if (tx.type == TransactionType.CREDIT) M3_PosContainer else M3_SecondaryContainer
-                            val badgeText = if (tx.type == TransactionType.CREDIT) M3_OnPosContainer else M3_OnSecondaryContainer
                             Row(
-                                modifier = Modifier
-                                    .background(badgeBg, RoundedCornerShape(8.dp))
-                                    .padding(horizontal = 12.dp, vertical = 6.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                Icon(
-                                    imageVector = if (tx.type == TransactionType.CREDIT) Icons.Default.ArrowUpward else Icons.Default.ArrowDownward,
-                                    contentDescription = null,
-                                    tint = badgeText,
-                                    modifier = Modifier.size(14.dp)
-                                )
-                                Text(
-                                    text = if (tx.type == TransactionType.CREDIT) "Credit" else "Debit",
-                                    color = badgeText,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
+                                // Type Badge
+                                val badgeBg = if (tx.type == TransactionType.CREDIT) M3_PosContainer else M3_SecondaryContainer
+                                val badgeText = if (tx.type == TransactionType.CREDIT) M3_OnPosContainer else M3_OnSecondaryContainer
+                                Row(
+                                    modifier = Modifier
+                                        .background(badgeBg, RoundedCornerShape(8.dp))
+                                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = if (tx.type == TransactionType.CREDIT) Icons.Default.ArrowUpward else Icons.Default.ArrowDownward,
+                                        contentDescription = null,
+                                        tint = badgeText,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                    Text(
+                                        text = if (tx.type == TransactionType.CREDIT) "Credit" else "Debit",
+                                        color = badgeText,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
 
-                            // Account Badge
-                            Row(
+                                // Account Badge
+                                Row(
+                                    modifier = Modifier
+                                        .background(M3_SurfaceContainer, RoundedCornerShape(8.dp))
+                                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.CreditCard,
+                                        contentDescription = null,
+                                        tint = M3_OnSurfaceVariant,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                    Text(
+                                        text = tx.accountLabel ?: "Unknown Account",
+                                        color = M3_OnSurface,
+                                        fontSize = 12.sp,
+                                        fontFamily = FontFamily.Monospace
+                                    )
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(16.dp))
+                        HorizontalDivider(color = M3_OutlineVariant.copy(alpha = 0.3f))
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        // SLM OUTPUT Codeblock Section
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Terminal,
+                                contentDescription = null,
+                                tint = M3_OnSurfaceVariant,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Text(
+                                text = "SLM OUTPUT",
+                                color = M3_OnSurfaceVariant,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                letterSpacing = 1.sp,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(M3_SurfaceContainerLowest, RoundedCornerShape(12.dp))
+                                .border(BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.3f)), RoundedCornerShape(12.dp))
+                                .padding(12.dp)
+                        ) {
+                            val slmProps = listOf(
+                                "amount" to tx.amount.toString(),
+                                "type" to "\"${tx.type.name.lowercase()}\"",
+                                "counterparty" to "\"${tx.merchant}\"",
+                                "date" to "\"${formatDate(tx.date)}\"",
+                                "account" to "\"${tx.accountLabel ?: ""}\""
+                            )
+                            slmProps.forEach { (key, value) ->
+                                Row(
+                                    modifier = Modifier.padding(vertical = 2.dp)
+                                ) {
+                                    Text(
+                                        text = key,
+                                        color = M3_OnSurfaceVariant,
+                                        fontSize = 12.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                        modifier = Modifier.width(100.dp)
+                                    )
+                                    Text(
+                                        text = ":",
+                                        color = M3_OnSurfaceVariant,
+                                        fontSize = 12.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                        modifier = Modifier.padding(horizontal = 4.dp)
+                                    )
+                                    Text(
+                                        text = value,
+                                        color = if (value.startsWith("\"")) Color(0xFF98C379) else Color(0xFF61AFEF),
+                                        fontSize = 12.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(20.dp))
+                        Button(
+                            onClick = { isEditing = true },
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = M3_Primary,
+                                contentColor = M3_OnPrimary
+                            ),
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Edit,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Correct Extraction Details",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(16.dp))
+                    } else {
+                        // Edit Mode Title Row
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 12.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Correct Extracted Info",
+                                color = M3_OnSurface,
+                                fontSize = 18.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "EDIT MODE",
+                                color = M3_Primary,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                letterSpacing = 1.sp,
+                                fontFamily = FontFamily.Monospace,
                                 modifier = Modifier
-                                    .background(M3_SurfaceContainer, RoundedCornerShape(8.dp))
-                                    .padding(horizontal = 12.dp, vertical = 6.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.CreditCard,
-                                    contentDescription = null,
-                                    tint = M3_OnSurfaceVariant,
-                                    modifier = Modifier.size(14.dp)
+                                    .background(M3_PrimaryContainer.copy(alpha = 0.3f), RoundedCornerShape(4.dp))
+                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
+
+                        // Editable form inputs
+                        OutlinedTextField(
+                            value = editMerchant,
+                            onValueChange = { editMerchant = it },
+                            label = { Text("Merchant / Counterparty") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = M3_Primary,
+                                unfocusedBorderColor = M3_OutlineVariant,
+                                focusedLabelColor = M3_Primary,
+                                unfocusedLabelColor = M3_OnSurfaceVariant,
+                                focusedTextColor = M3_OnSurface,
+                                unfocusedTextColor = M3_OnSurface
+                            )
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        OutlinedTextField(
+                            value = editAmount,
+                            onValueChange = { editAmount = it },
+                            label = { Text("Amount (₹)") },
+                            singleLine = true,
+                            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                                keyboardType = androidx.compose.ui.text.input.KeyboardType.Decimal
+                            ),
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = M3_Primary,
+                                unfocusedBorderColor = M3_OutlineVariant,
+                                focusedLabelColor = M3_Primary,
+                                unfocusedLabelColor = M3_OnSurfaceVariant,
+                                focusedTextColor = M3_OnSurface,
+                                unfocusedTextColor = M3_OnSurface
+                            )
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        OutlinedTextField(
+                            value = editAccountName,
+                            onValueChange = { editAccountName = it },
+                            label = { Text("Account / Card Name") },
+                            singleLine = true,
+                            placeholder = { Text("e.g. A/c XX1234") },
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = M3_Primary,
+                                unfocusedBorderColor = M3_OutlineVariant,
+                                focusedLabelColor = M3_Primary,
+                                unfocusedLabelColor = M3_OnSurfaceVariant,
+                                focusedTextColor = M3_OnSurface,
+                                unfocusedTextColor = M3_OnSurface
+                            )
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        Box(modifier = Modifier.fillMaxWidth()) {
+                            OutlinedTextField(
+                                value = if (editType == TransactionType.CREDIT) "Credit" else "Debit",
+                                onValueChange = {},
+                                readOnly = true,
+                                label = { Text("Transaction Type") },
+                                trailingIcon = {
+                                    IconButton(onClick = { typeDropdownExpanded = !typeDropdownExpanded }) {
+                                        Icon(
+                                            imageVector = Icons.Default.ArrowDropDown,
+                                            contentDescription = null,
+                                            tint = M3_OnSurfaceVariant
+                                        )
+                                    }
+                                },
+                                modifier = Modifier.fillMaxWidth().clickable { typeDropdownExpanded = !typeDropdownExpanded },
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = M3_Primary,
+                                    unfocusedBorderColor = M3_OutlineVariant,
+                                    focusedLabelColor = M3_Primary,
+                                    unfocusedLabelColor = M3_OnSurfaceVariant,
+                                    focusedTextColor = M3_OnSurface,
+                                    unfocusedTextColor = M3_OnSurface
                                 )
-                                Text(
-                                    text = tx.accountLabel ?: "Unknown Account",
-                                    color = M3_OnSurface,
-                                    fontSize = 12.sp,
-                                    fontFamily = FontFamily.Monospace
+                            )
+                            DropdownMenu(
+                                expanded = typeDropdownExpanded,
+                                onDismissRequest = { typeDropdownExpanded = false },
+                                modifier = Modifier
+                                    .fillMaxWidth(0.85f)
+                                    .background(M3_SurfaceContainerHigh)
+                            ) {
+                                DropdownMenuItem(
+                                    text = { Text("Debit", color = M3_OnSurface) },
+                                    onClick = {
+                                        editType = TransactionType.DEBIT
+                                        typeDropdownExpanded = false
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Credit", color = M3_OnSurface) },
+                                    onClick = {
+                                        editType = TransactionType.CREDIT
+                                        typeDropdownExpanded = false
+                                    }
                                 )
                             }
                         }
-                    }
+                        Spacer(modifier = Modifier.height(20.dp))
 
-                    Spacer(modifier = Modifier.height(16.dp))
-                    HorizontalDivider(color = M3_OutlineVariant.copy(alpha = 0.3f))
-                    Spacer(modifier = Modifier.height(16.dp))
-
-                    // SLM OUTPUT Codeblock Section
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Terminal,
-                            contentDescription = null,
-                            tint = M3_OnSurfaceVariant,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Text(
-                            text = "SLM OUTPUT",
-                            color = M3_OnSurfaceVariant,
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Bold,
-                            letterSpacing = 1.sp,
-                            fontFamily = FontFamily.Monospace
-                        )
-                    }
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .background(M3_SurfaceContainerLowest, RoundedCornerShape(12.dp))
-                            .border(BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.3f)), RoundedCornerShape(12.dp))
-                            .padding(12.dp)
-                    ) {
-                        val slmProps = listOf(
-                            "amount" to tx.amount.toString(),
-                            "type" to "\"${tx.type.name.lowercase()}\"",
-                            "counterparty" to "\"${tx.merchant}\"",
-                            "date" to "\"${formatDate(tx.date)}\"",
-                            "account" to "\"${tx.accountLabel ?: ""}\""
-                        )
-                        slmProps.forEach { (key, value) ->
-                            Row(
-                                modifier = Modifier.padding(vertical = 2.dp)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            OutlinedButton(
+                                onClick = { isEditing = false },
+                                modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(12.dp),
+                                colors = ButtonDefaults.outlinedButtonColors(
+                                    contentColor = M3_OnSurfaceVariant
+                                ),
+                                border = BorderStroke(1.dp, M3_OutlineVariant)
                             ) {
-                                Text(
-                                    text = key,
-                                    color = M3_OnSurfaceVariant,
-                                    fontSize = 12.sp,
-                                    fontFamily = FontFamily.Monospace,
-                                    modifier = Modifier.width(100.dp)
+                                Text("Cancel")
+                            }
+                            Button(
+                                onClick = {
+                                    val parsedAmount = editAmount.toDoubleOrNull() ?: 0.0
+                                    viewModel.updateTransaction(
+                                        id = tx.id,
+                                        amount = parsedAmount,
+                                        merchant = editMerchant,
+                                        type = editType,
+                                        accountName = editAccountName
+                                    )
+                                    isEditing = false
+                                },
+                                modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(12.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = M3_Primary,
+                                    contentColor = M3_OnPrimary
                                 )
-                                Text(
-                                    text = ":",
-                                    color = M3_OnSurfaceVariant,
-                                    fontSize = 12.sp,
-                                    fontFamily = FontFamily.Monospace,
-                                    modifier = Modifier.padding(horizontal = 4.dp)
-                                )
-                                Text(
-                                    text = value,
-                                    color = if (value.startsWith("\"")) Color(0xFF98C379) else Color(0xFF61AFEF),
-                                    fontSize = 12.sp,
-                                    fontFamily = FontFamily.Monospace,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
+                            ) {
+                                Text("Save Changes")
                             }
                         }
+                        Spacer(modifier = Modifier.height(20.dp))
+                        HorizontalDivider(color = M3_OutlineVariant.copy(alpha = 0.3f))
+                        Spacer(modifier = Modifier.height(16.dp))
                     }
-
-                    Spacer(modifier = Modifier.height(16.dp))
 
                     // SOURCE SMS Section
                     Row(
@@ -622,15 +853,31 @@ fun TransactionItem(
                         overflow = TextOverflow.Ellipsis
                     )
                     Spacer(modifier = Modifier.height(2.dp))
-                    Text(
-                        text = transaction.accountLabel ?: "Unknown Card",
-                        color = M3_OnSurfaceVariant,
-                        fontSize = 9.sp,
-                        fontFamily = FontFamily.Monospace,
-                        modifier = Modifier
-                            .background(M3_SurfaceContainerHigh, RoundedCornerShape(4.dp))
-                            .padding(horizontal = 6.dp, vertical = 1.dp)
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text(
+                            text = transaction.accountLabel ?: "Unknown Card",
+                            color = M3_OnSurfaceVariant,
+                            fontSize = 9.sp,
+                            fontFamily = FontFamily.Monospace,
+                            modifier = Modifier
+                                .background(M3_SurfaceContainerHigh, RoundedCornerShape(4.dp))
+                                .padding(horizontal = 6.dp, vertical = 1.dp)
+                        )
+                        if (transaction.isEdited) {
+                            Text(
+                                text = "Corrected",
+                                color = M3_OnPrimaryContainer,
+                                fontSize = 8.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier
+                                    .background(M3_PrimaryContainer, RoundedCornerShape(4.dp))
+                                    .padding(horizontal = 4.dp, vertical = 1.dp)
+                            )
+                        }
+                    }
                 }
             }
             Column(

@@ -4,6 +4,8 @@ import android.content.Context
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import com.pocketfinancer.data.db.dao.AccountDao
 import com.pocketfinancer.data.db.dao.TransactionDao
 import com.pocketfinancer.data.db.entity.AccountEntity
@@ -25,7 +27,7 @@ import javax.inject.Singleton
         TransactionEntity::class,
         AccountEntity::class
     ],
-    version = 1,
+    version = 2,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -57,6 +59,12 @@ abstract class AppDatabase : RoomDatabase() {
             prefs.edit().putString("db_passphrase", hex).apply()
             return hex.toByteArray(Charsets.UTF_8)
         }
+
+        val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE transactions ADD COLUMN isEdited INTEGER NOT NULL DEFAULT 0")
+            }
+        }
     }
 
     /**
@@ -73,6 +81,7 @@ abstract class AppDatabase : RoomDatabase() {
 
             return Room.databaseBuilder(context, AppDatabase::class.java, DB_NAME)
                 .openHelperFactory(factory)
+                .addMigrations(MIGRATION_1_2)
                 .fallbackToDestructiveMigration()
                 .build()
         }

@@ -12,7 +12,8 @@ data class Transaction(
     val accountId: String,
     val accountLabel: String?,
     val rawMessage: String,
-    val sender: String
+    val sender: String,
+    val isEdited: Boolean = false
 )
 
 enum class TransactionType {
