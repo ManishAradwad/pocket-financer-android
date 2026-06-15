@@ -1,5 +1,6 @@
 package com.pocketfinancer.pipeline
 
+import com.pocketfinancer.data.model.TransactionType
 import org.junit.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
@@ -17,7 +18,7 @@ class ExtractionParserTest {
         val result = parser.parse(output)
         assertNotNull(result)
         assertEquals(1500.0, result.amount)
-        assertEquals(ExtractionParser.TransactionType.DEBIT, result.type)
+        assertEquals(TransactionType.DEBIT, result.type)
         assertEquals("A/c XX6254", result.account)
         assertEquals("Amazon Pay", result.counterparty)
     }
@@ -28,7 +29,7 @@ class ExtractionParserTest {
         val result = parser.parse(output)
         assertNotNull(result)
         assertEquals(500.0, result.amount)
-        assertEquals(ExtractionParser.TransactionType.CREDIT, result.type)
+        assertEquals(TransactionType.CREDIT, result.type)
         assertEquals("A/c XX0000", result.account)
         assertEquals("UPI Ref 12345", result.counterparty)
     }
@@ -100,7 +101,7 @@ class ExtractionParserTest {
         val output = """{"amount": 100.0, "type": "DEBIT", "account": "A/c XX6254"}"""
         val result = parser.parse(output)
         assertNotNull(result)
-        assertEquals(ExtractionParser.TransactionType.DEBIT, result.type)
+        assertEquals(TransactionType.DEBIT, result.type)
     }
 
     @Test
@@ -108,7 +109,7 @@ class ExtractionParserTest {
         val output = """{"amount": 100.0, "type": "Credit", "account": "A/c XX6254"}"""
         val result = parser.parse(output)
         assertNotNull(result)
-        assertEquals(ExtractionParser.TransactionType.CREDIT, result.type)
+        assertEquals(TransactionType.CREDIT, result.type)
     }
 
     // ── Amount coercion ───────────────────────────────────────────────────
@@ -193,7 +194,7 @@ class ExtractionParserTest {
         val result = parser.parse(output)
         assertNotNull(result)
         assertEquals(1500.0, result.amount)
-        assertEquals(ExtractionParser.TransactionType.DEBIT, result.type)
+        assertEquals(TransactionType.DEBIT, result.type)
     }
 
     @Test

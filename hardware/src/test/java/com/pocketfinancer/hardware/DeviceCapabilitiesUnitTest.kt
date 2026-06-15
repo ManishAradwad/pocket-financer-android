@@ -169,10 +169,9 @@ class DeviceCapabilitiesUnitTest {
     // ── DeviceInfo structure ─────────────────────────────────────────
 
     @Test
-    fun `DeviceInfo should compute ramGb from totalRamGb initially`() {
+    fun `DeviceInfo should compute ramGb initially`() {
         val info = DeviceCapabilities.DeviceInfo(
             ramGb = 4.0f,
-            totalRamGb = 4.0f,
             ramTier = DeviceCapabilities.RamTier.OK,
             gpu = null,
             cpu = null,
@@ -180,7 +179,6 @@ class DeviceCapabilitiesUnitTest {
             isHighPerformanceDevice = false
         )
         assertEquals(4.0f, info.ramGb)
-        assertEquals(4.0f, info.totalRamGb)
     }
 
     @Test

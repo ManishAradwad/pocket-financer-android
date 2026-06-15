@@ -75,7 +75,6 @@ class DeviceCapabilities @Inject constructor(
 
     data class DeviceInfo(
         val ramGb: Float,
-        val totalRamGb: Float,
         val ramTier: RamTier,
         val gpu: GpuInfo?,
         val cpu: CpuInfo?,
@@ -279,6 +278,6 @@ class DeviceCapabilities @Inject constructor(
         val cpu = try { getCpuInfo() } catch (_: Exception) { null }
         val highPerf = isHighPerformanceDevice()
 
-        return DeviceInfo(ram, ram, tier, gpu, cpu, storage, highPerf)
+        return DeviceInfo(ram, tier, gpu, cpu, storage, highPerf)
     }
 }

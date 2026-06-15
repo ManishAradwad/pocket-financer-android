@@ -21,9 +21,7 @@ import javax.inject.Singleton
  * LFS redirects automatically via HttpURLConnection follow-redirects.
  */
 @Singleton
-class ModelDownloader @Inject constructor(
-    @ApplicationContext private val context: Context
-) {
+class ModelDownloader @Inject constructor() {
     data class DownloadState(
         val isDownloading: Boolean = false,
         val progress: Float = 0f,

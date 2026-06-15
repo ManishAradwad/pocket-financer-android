@@ -39,7 +39,6 @@ class SlmSelectorUnitTest {
         } else null
         return DeviceCapabilities.DeviceInfo(
             ramGb = ramGb,
-            totalRamGb = ramGb,
             ramTier = when {
                 ramGb >= 3.5f -> DeviceCapabilities.RamTier.OK
                 ramGb >= 2.5f -> DeviceCapabilities.RamTier.WARNING

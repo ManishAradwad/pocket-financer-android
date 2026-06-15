@@ -956,18 +956,6 @@ private fun getInitials(name: String): String {
     }
 }
 
-private fun getAvatarColors(name: String): Pair<Color, Color> {
-    val hash = name.hashCode()
-    val index = Math.abs(hash) % 5
-    return when (index) {
-        0 -> Color(0xFF452B0E) to Color(0xFFFFDCC1) // amber-like
-        1 -> Color(0xFF12472B) to Color(0xFFC7F3C8) // green-like
-        2 -> Color(0xFF0E3E75) to Color(0xFFD3E4FF) // blue-like
-        3 -> Color(0xFF421863) to Color(0xFFF2DAFF) // purple-like
-        else -> Color(0xFF611221) to Color(0xFFFFDAD9) // rose-like
-    }
-}
-
 private fun getAvatarGradient(name: String): Brush {
     val hash = name.hashCode()
     val index = Math.abs(hash) % 5

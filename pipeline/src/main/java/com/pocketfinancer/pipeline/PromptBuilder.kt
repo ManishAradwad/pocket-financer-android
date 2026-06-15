@@ -64,25 +64,10 @@ class PromptBuilder @Inject constructor(
      */
     fun buildExtractionPrompt(sender: String, smsBody: String): String {
         val sb = StringBuilder()
-
-        // ── System prompt ──
-        sb.append(systemPrompt)
-
-        // ── Few-shot examples ──
-        sb.append("\n\n### EXAMPLES (already labeled — for reference only, do NOT answer these)\n\n")
-        for (i in 0 until fewShotExamples.length()) {
-            val ex = fewShotExamples.getJSONObject(i)
-            sb.append("Sender: ${ex.getString("sender")}\n")
-            sb.append("SMS: ${ex.getString("sms")}\n")
-            sb.append("Output: ${ex.getString("answer")}\n\n")
-        }
-
-        // ── Query ──
-        sb.append("### YOUR TASK (answer this one SMS only — output JSON or null, nothing else)\n\n")
+        sb.append(getStaticPrefix())
         sb.append("Sender: $sender\n")
         sb.append("SMS: $smsBody\n")
         sb.append("Output: ")
-
         return sb.toString()
     }
 

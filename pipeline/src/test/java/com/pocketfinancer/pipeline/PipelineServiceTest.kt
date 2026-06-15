@@ -93,7 +93,7 @@ Output:
             every { extractionParser.parse(any()) } returns ExtractionParser.ExtractedTransaction(
                 amount = 500.0,
                 counterparty = "UPI Ref 12345",
-                type = ExtractionParser.TransactionType.CREDIT,
+                type = TransactionType.CREDIT,
                 account = "A/c XX0000"
             )
             coEvery { llamaEngine.inferForExtraction(any(), any(), any(), any()) } returns
@@ -191,7 +191,7 @@ Output:
             every { extractionParser.parse(any()) } returns ExtractionParser.ExtractedTransaction(
                 amount = 1500.0,
                 counterparty = "Amazon Pay",
-                type = ExtractionParser.TransactionType.DEBIT,
+                type = TransactionType.DEBIT,
                 account = "A/c XX6254"
             )
             coEvery { llamaEngine.inferForExtraction(any(), any(), any(), any()) } returns

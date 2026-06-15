@@ -14,6 +14,7 @@ import com.pocketfinancer.pipeline.PromptBuilder
 import com.pocketfinancer.pipeline.SmsFilterPipeline
 import com.pocketfinancer.data.repository.TransactionRepository
 import com.pocketfinancer.data.repository.AccountRepository
+import com.pocketfinancer.data.model.TransactionType
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -309,255 +310,123 @@ class SettingsViewModel @Inject constructor(
                 Log.i("PocketFinancer", "Initial raw prompt length: ${rawPrompt.length} chars")
                 Log.i("PocketFinancer", "Chat prompt length: ${chatPrompt.length} chars")
 
-                // Split prompt into static prefix and dynamic suffix
-                val splitIndex = chatPrompt.indexOf(staticPrefix)
-                if (splitIndex == -1) {
-                    throw IllegalStateException("Static prefix not found in chat prompt")
-                }
-                val prefixString = chatPrompt.substring(0, splitIndex + staticPrefix.length)
-                val suffixString = chatPrompt.substring(splitIndex + staticPrefix.length)
-
                 _state.value = _state.value.copy(
                     testProgress = "Checking/preparing KV Cache session...",
                     slmPrompt = chatPrompt
                 )
 
-                val prefixHash = llamaEngine.computeSha256(prefixString)
-                val sessionFile = llamaEngine.getSessionFile(prefixHash)
-
-                val prefixTokens = llamaEngine.tokenize(prefixString, addSpecial = true)
-                    ?: throw IllegalStateException("Failed to tokenize prefix prompt")
+                // Split prompt to calculate and show mock session logs
+                val splitIndex = chatPrompt.indexOf(staticPrefix)
+                if (splitIndex != -1) {
+                    val prefixString = chatPrompt.substring(0, splitIndex + staticPrefix.length)
+                    val prefixHash = llamaEngine.computeSha256(prefixString)
+                    val sessionFile = llamaEngine.getSessionFile(prefixHash)
+                    val prefixTokens = llamaEngine.tokenize(prefixString, addSpecial = true)
+                    val cacheLogs = mutableListOf<String>()
+                    if (prefixTokens != null) {
+                        cacheLogs.add("Prefix Size: ${prefixTokens.size} tokens")
+                        cacheLogs.add("Prefix Hash: ${prefixHash.take(12)}...")
+                        if (sessionFile.exists()) {
+                            cacheLogs.add("Session cache file found: ${sessionFile.name}")
+                            cacheLogs.add("Reusing existing KV Cache (Skipped heavy prefill phase!).")
+                        } else {
+                            cacheLogs.add("Session cache file not found. Generating new session cache...")
+                        }
+                    }
+                    _state.value = _state.value.copy(sessionCacheLogs = cacheLogs)
+                }
 
                 val startTime = System.currentTimeMillis()
-                val cacheLogs = mutableListOf<String>()
-                cacheLogs.add("Prefix Size: ${prefixTokens.size} tokens")
-                cacheLogs.add("Prefix Hash: ${prefixHash.take(12)}...")
+                _state.value = _state.value.copy(
+                    testProgress = if (hasThinking) "Phase 1: Thinking (<think> block)..." else "Generating JSON..."
+                )
 
-                // Check and load session cache
-                if (sessionFile.exists()) {
-                    cacheLogs.add("Session cache file found: ${sessionFile.name}")
-                    _state.value = _state.value.copy(
-                        sessionCacheLogs = cacheLogs.toList(),
-                        testProgress = "Loading session cache from disk..."
-                    )
-                    val loaded = withContext(Dispatchers.IO) {
-                        llamaEngine.loadSession(sessionFile.absolutePath, prefixTokens.size)
-                    }
-                    if (loaded != prefixTokens.size) {
-                        cacheLogs.add("Warning: Loaded tokens ($loaded) does not match expected size (${prefixTokens.size})")
-                        cacheLogs.add("Session cache is outdated/invalid. Regenerating cache...")
-                        _state.value = _state.value.copy(
-                            sessionCacheLogs = cacheLogs.toList(),
-                            testProgress = "Generating KV Cache session (prefill, please wait)..."
-                        )
-                        // Prefill-only run on prefixString to generate state
-                        withContext(Dispatchers.IO) {
-                            llamaEngine.complete(
-                                prompt = prefixString,
-                                params = LlamaEngine.InferenceParams(maxTokens = 0),
-                                keepCache = false
-                            )
-                        }
-                        // Delete stale sessions and save new session
-                        llamaEngine.deleteStaleSessions(prefixHash)
-                        val saved = withContext(Dispatchers.IO) {
-                            llamaEngine.saveSession(sessionFile.absolutePath, prefixTokens)
-                        }
-                        cacheLogs.add("New session cache generated & saved successfully (status=$saved).")
-                    } else {
-                        cacheLogs.add("Session cache loaded successfully ($loaded tokens matched).")
-                        cacheLogs.add("Reusing existing KV Cache (Skipped heavy prefill phase!).")
-                    }
-                } else {
-                    cacheLogs.add("Session cache file not found (Fresh install or configuration changed).")
-                    cacheLogs.add("Generating new session cache via prefix prefill...")
-                    _state.value = _state.value.copy(
-                        sessionCacheLogs = cacheLogs.toList(),
-                        testProgress = "Generating KV Cache session (prefill, please wait)..."
-                    )
-                    // Prefill-only run on prefixString to generate state
-                    withContext(Dispatchers.IO) {
-                        llamaEngine.complete(
-                            prompt = prefixString,
-                            params = LlamaEngine.InferenceParams(maxTokens = 0),
-                            keepCache = false
-                        )
-                    }
-                    // Delete stale sessions and save new session
-                    llamaEngine.deleteStaleSessions(prefixHash)
-                    val saved = withContext(Dispatchers.IO) {
-                        llamaEngine.saveSession(sessionFile.absolutePath, prefixTokens)
-                    }
-                    cacheLogs.add("New session cache generated & saved successfully (status=$saved).")
-                }
-                _state.value = _state.value.copy(sessionCacheLogs = cacheLogs.toList())
-
-                val answer: String
-                if (!hasThinking) {
-                    // ── Single-pass Grammar-constrained JSON ──────────────────
-                    _state.value = _state.value.copy(
-                        testProgress = "Generating JSON directly with GBNF grammar..."
-                    )
-                    Log.i("PocketFinancer", "=== Direct JSON generation (single-pass) ===")
-                    answer = withContext(Dispatchers.IO) {
-                        llamaEngine.complete(
-                            prompt = suffixString,
-                            params = LlamaEngine.InferenceParams(
-                                maxTokens = 256,
-                                temperature = 0.0f,
-                                grammar = grammar
-                            ),
-                            keepCache = true
-                        ) { token ->
-                            _state.value = _state.value.copy(
-                                testResult = (_state.value.testResult ?: "") + token
-                            )
-                        }
-                    }
-                } else {
-                    // ── Phase 1: Thinking ─────────────────────────────────────
-                    _state.value = _state.value.copy(
-                        testProgress = "Phase 1: Thinking (<think> block, max 1024 tokens)..."
-                    )
-                    Log.i("PocketFinancer", "=== Phase 1: Thinking ===")
-
-                    val thinkPrompt = suffixString + "<think>\n"
-                    val thinkResult = withContext(Dispatchers.IO) {
-                        llamaEngine.complete(
-                            prompt = thinkPrompt,
-                            params = LlamaEngine.InferenceParams(
-                                maxTokens = 1024,
-                                temperature = 0.0f,
-                                stopToken = "</think>"
-                            ),
-                            keepCache = true
-                        ) { token ->
+                val result = withContext(Dispatchers.IO) {
+                    llamaEngine.inferForExtraction(
+                        prompt = chatPrompt,
+                        grammar = grammar,
+                        staticPrefix = staticPrefix,
+                        thinkingTokens = 1024,
+                        answerTokens = 256,
+                        thinkingCallback = { token ->
                             _state.value = _state.value.copy(
                                 thinkingOutput = (_state.value.thinkingOutput ?: "") + token
                             )
-                        }
-                    }
-
-                    val thinkElapsed = System.currentTimeMillis() - startTime
-                    Log.i("PocketFinancer", "Phase 1 completed in ${thinkElapsed}ms")
-                    Log.i("PocketFinancer", "Phase 1 output (${thinkResult.length} chars): <<<${thinkResult}>>>")
-
-                    // Ensure final thinking output is exactly the returned block
-                    _state.value = _state.value.copy(thinkingOutput = thinkResult)
-
-                    if (thinkResult.isEmpty()) {
-                        Log.w("PocketFinancer", "Phase 1 produced empty output!")
-                        _state.value = _state.value.copy(
-                            testRunning = false,
-                            testProgress = "Phase 1 failed: empty thinking output",
-                            testError = "Phase 1 (thinking) returned empty. The model may not be responding. Check logcat."
-                        )
-                        return@launch
-                    }
-
-                    // ── Phase 2: Grammar-constrained JSON ─────────────────────
-                    _state.value = _state.value.copy(
-                        testProgress = "Phase 2: Generating JSON with GBNF grammar..."
-                    )
-                    Log.i("PocketFinancer", "=== Phase 2: JSON generation ===")
-
-                    val fullPrompt = thinkPrompt + thinkResult + "</think>\n"
-                    Log.i("PocketFinancer", "Phase 2 conceptual prompt length: ${fullPrompt.length} chars (KV cache reused, decoding suffix only)")
-
-                    answer = withContext(Dispatchers.IO) {
-                        llamaEngine.complete(
-                            prompt = "</think>\n",
-                            params = LlamaEngine.InferenceParams(
-                                maxTokens = 256,
-                                temperature = 0.0f,
-                                grammar = grammar
-                            ),
-                            keepCache = true
-                        ) { token ->
+                        },
+                        jsonCallback = { token ->
                             _state.value = _state.value.copy(
                                 testResult = (_state.value.testResult ?: "") + token
                             )
                         }
-                    }
+                    )
                 }
 
                 val totalElapsed = System.currentTimeMillis() - startTime
-                Log.i("PocketFinancer", "Inference completed in ${totalElapsed}ms (total)")
-                Log.i("PocketFinancer", "Model output (${answer.length} chars): <<<${answer}>>>")
+                _state.value = _state.value.copy(testProgress = "Processing result...")
 
-                // ── Process result ────────────────────────────────────────
-                _state.value = _state.value.copy(
-                    testProgress = "Processing result..."
-                )
+                when (result) {
+                    is LlamaEngine.InferenceResult.Success -> {
+                        val trimmed = result.json.trim()
+                        val parsed = extractionParser.parse(trimmed)
+                        val perfLine = result.perf?.let { p ->
+                            "\n\n⚡ Performance:\n" +
+                            "  Generation: ${p.tEvalMs}ms for ${p.nTokens} tokens\n" +
+                            "  Speed: ${"%.1f".format(p.tokensPerSecond)} tok/s"
+                        } ?: ""
 
-                val trimmed = answer.trim()
-                if (trimmed.isEmpty()) {
-                    Log.w("PocketFinancer", "Phase 2 produced empty output!")
-                    _state.value = _state.value.copy(
-                        testRunning = false,
-                        testProgress = null,
-                        testError = "Phase 2 (JSON) returned empty. Grammar may have blocked all tokens."
-                    )
-                    return@launch
-                }
+                        // Save mock transaction to database on successful test run
+                        parsed?.let { p ->
+                            val accountName = p.account
+                            val account = if (accountName != null) {
+                                accountRepository.getOrCreate(accountName, "Unknown Bank", "auto-extracted")
+                            } else {
+                                accountRepository.ensureDefault()
+                            }
+                            transactionRepository.insert(
+                                TransactionRepository.NewTransaction(
+                                    amount = p.amount,
+                                    merchant = p.counterparty ?: "Unknown Merchant",
+                                    date = System.currentTimeMillis(),
+                                    type = p.type,
+                                    accountId = account.id,
+                                    rawMessage = testBody,
+                                    sender = testSender
+                                )
+                            )
+                        }
 
-                if (trimmed == "null") {
-                    Log.i("PocketFinancer", "Model returned null (non-financial)")
-                    _state.value = _state.value.copy(
-                        testRunning = false,
-                        testProgress = null,
-                        testResult = "Model returned null (not a financial transaction)\n⏱ ${totalElapsed}ms",
-                        testParsed = "N/A"
-                    )
-                    return@launch
-                }
-
-                // Parse the JSON output
-                val parsed = extractionParser.parse(trimmed)
-                val perfData = llamaEngine.getPerformanceData()
-                val perfLine = perfData?.let { p ->
-                    "\n\n⚡ Performance:\n" +
-                    "  Generation: ${p.tEvalMs}ms for ${p.nTokens} tokens\n" +
-                    "  Speed: ${"%.1f".format(p.tokensPerSecond)} tok/s"
-                } ?: ""
-
-                Log.i("PocketFinancer", "Parsed result: $parsed")
-                Log.i("PocketFinancer", "Performance: ${perfData}")
-
-                // Save mock transaction to database on successful test run
-                parsed?.let { p ->
-                    val accountName = p.account
-                    val account = if (accountName != null) {
-                        accountRepository.getOrCreate(accountName, "Unknown Bank", "auto-extracted")
-                    } else {
-                        accountRepository.ensureDefault()
-                    }
-                    val txType = when (p.type) {
-                        ExtractionParser.TransactionType.CREDIT -> com.pocketfinancer.data.model.TransactionType.CREDIT
-                        ExtractionParser.TransactionType.DEBIT -> com.pocketfinancer.data.model.TransactionType.DEBIT
-                    }
-                    transactionRepository.insert(
-                        TransactionRepository.NewTransaction(
-                            amount = p.amount,
-                            merchant = p.counterparty ?: "Unknown Merchant",
-                            date = System.currentTimeMillis(),
-                            type = txType,
-                            accountId = account.id,
-                            rawMessage = testBody,
-                            sender = testSender
+                        _state.value = _state.value.copy(
+                            testRunning = false,
+                            testProgress = null,
+                            testResult = "Raw JSON: $trimmed\n⏱ ${totalElapsed}ms$perfLine",
+                            testParsed = parsed?.let {
+                                "amount=${it.amount}, type=${it.type.name.lowercase()}, counterparty=${it.counterparty ?: "-"}, account=${it.account ?: "-"}"
+                            } ?: "Parsed: null (non-financial)"
                         )
-                    )
+                    }
+                    is LlamaEngine.InferenceResult.Null -> {
+                        _state.value = _state.value.copy(
+                            testRunning = false,
+                            testProgress = null,
+                            testResult = "Model returned null (not a financial transaction)\n⏱ ${totalElapsed}ms",
+                            testParsed = "N/A"
+                        )
+                    }
+                    is LlamaEngine.InferenceResult.Error -> {
+                        _state.value = _state.value.copy(
+                            testRunning = false,
+                            testProgress = null,
+                            testError = result.message
+                        )
+                    }
+                    is LlamaEngine.InferenceResult.Stopped -> {
+                        _state.value = _state.value.copy(
+                            testRunning = false,
+                            testProgress = null,
+                            testError = "Inference stopped"
+                        )
+                    }
                 }
-
-                _state.value = _state.value.copy(
-                    testRunning = false,
-                    testProgress = null,
-                    testResult = "Raw JSON: $trimmed\n⏱ ${totalElapsed}ms$perfLine",
-                    testParsed = parsed?.let {
-                        "amount=${it.amount}, type=${it.type}, counterparty=${it.counterparty ?: "-"}, account=${it.account ?: "-"}"
-                    } ?: "Parsed: null (non-financial)"
-                )
-
             } catch (e: Exception) {
                 Log.e("PocketFinancer", "Test failed with exception", e)
                 _state.value = _state.value.copy(

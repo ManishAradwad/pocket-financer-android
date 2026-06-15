@@ -1,6 +1,7 @@
 package com.pocketfinancer.pipeline
 
 import android.util.Log
+import com.pocketfinancer.data.model.TransactionType
 import org.json.JSONObject
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -26,8 +27,6 @@ class ExtractionParser @Inject constructor() {
         val type: TransactionType,
         val account: String?
     )
-
-    enum class TransactionType { DEBIT, CREDIT }
 
     /**
      * Parse the raw SLM output into either null (non-financial) or an
@@ -72,13 +71,13 @@ class ExtractionParser @Inject constructor() {
             }
 
             // ── Account ──
-            val account = obj.optString("account", null)
-                ?.takeIf { it.isNotBlank() }
-
+            val account = obj.optString("account", "")
+                .takeIf { it.isNotBlank() }
+ 
             // ── Counterparty ──
-            val counterparty = obj.optString("counterparty", null)
-                ?.takeIf { it.isNotBlank() }
-
+            val counterparty = obj.optString("counterparty", "")
+                .takeIf { it.isNotBlank() }
+ 
             ExtractedTransaction(amount, counterparty, type, account)
         } catch (_: Exception) {
             null

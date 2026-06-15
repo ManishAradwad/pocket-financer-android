@@ -197,17 +197,12 @@ class PipelineService @Inject constructor(
                 }
 
                 // 5. Save transaction
-                val txType = when (parsed.type) {
-                    ExtractionParser.TransactionType.CREDIT -> com.pocketfinancer.data.model.TransactionType.CREDIT
-                    ExtractionParser.TransactionType.DEBIT -> com.pocketfinancer.data.model.TransactionType.DEBIT
-                }
-
                 transactionRepository.insert(
                     TransactionRepository.NewTransaction(
                         amount = parsed.amount,
                         merchant = parsed.counterparty ?: "Unknown Merchant",
                         date = sms.date,
-                        type = txType,
+                        type = parsed.type,
                         accountId = account.id,
                         rawMessage = sms.body,
                         sender = sms.address

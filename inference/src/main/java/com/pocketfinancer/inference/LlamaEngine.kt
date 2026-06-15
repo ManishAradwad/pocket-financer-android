@@ -201,7 +201,8 @@ class LlamaEngine @Inject constructor(
         staticPrefix: String? = null,
         thinkingTokens: Int = 1024,
         answerTokens: Int = 256,
-        callback: TokenCallback? = null
+        thinkingCallback: TokenCallback? = null,
+        jsonCallback: TokenCallback? = null
     ): InferenceResult = withContext(Dispatchers.IO) {
         if (!isLoaded) {
             return@withContext InferenceResult.Error("Model not loaded")
@@ -269,7 +270,7 @@ class LlamaEngine @Inject constructor(
                     0.0f,
                     null,
                     keepCache,
-                    callback
+                    jsonCallback ?: thinkingCallback
                 )
 
                 if (answer.isEmpty()) {
@@ -345,7 +346,7 @@ class LlamaEngine @Inject constructor(
                 0.0f,             // greedy sampling
                 "</think>",        // stop token
                 keepCacheFirstPhase,
-                callback
+                thinkingCallback
             )
 
             // Check for stop signal
@@ -365,7 +366,7 @@ class LlamaEngine @Inject constructor(
                 0.0f,              // greedy sampling for deterministic output
                 null,              // no stop token — grammar controls completion
                 true,              // keep cache!
-                callback
+                jsonCallback
             )
 
             if (answer.isEmpty()) {
