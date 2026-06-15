@@ -19,13 +19,13 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
-import android.Manifest
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableStateOf
 import com.pocketfinancer.ui.navigation.Screen
 import com.pocketfinancer.ui.settings.SettingsScreen
 import com.pocketfinancer.ui.transactions.TransactionsScreen
+import com.pocketfinancer.ui.onboarding.OnboardingScreen
 import com.pocketfinancer.ui.theme.M3_OnSecondaryContainer
 import com.pocketfinancer.ui.theme.M3_OnSurface
 import com.pocketfinancer.ui.theme.M3_OnSurfaceVariant
@@ -36,78 +36,79 @@ import com.pocketfinancer.ui.theme.PocketFinancerTheme
 @Composable
 fun PocketFinancerRoot() {
     PocketFinancerTheme {
-        val permissionLauncher = rememberLauncherForActivityResult(
-            contract = ActivityResultContracts.RequestMultiplePermissions()
-        ) { _ -> }
-
-        LaunchedEffect(Unit) {
-            permissionLauncher.launch(
-                arrayOf(
-                    Manifest.permission.RECEIVE_SMS,
-                    Manifest.permission.READ_SMS
-                )
+        val context = androidx.compose.ui.platform.LocalContext.current
+        var onboardingCompleted by remember {
+            mutableStateOf(
+                context.getSharedPreferences(".app_settings", android.content.Context.MODE_PRIVATE)
+                    .getBoolean("onboarding_completed", false)
             )
         }
 
-        val navController = rememberNavController()
+        if (!onboardingCompleted) {
+            OnboardingScreen(
+                onComplete = { onboardingCompleted = true }
+            )
+        } else {
+            val navController = rememberNavController()
 
-        Scaffold(
-            bottomBar = {
-                NavigationBar(
-                    containerColor = M3_SurfaceContainer
-                ) {
-                    val navBackStackEntry by navController.currentBackStackEntryAsState()
-                    val currentDestination = navBackStackEntry?.destination
+            Scaffold(
+                bottomBar = {
+                    NavigationBar(
+                        containerColor = M3_SurfaceContainer
+                    ) {
+                        val navBackStackEntry by navController.currentBackStackEntryAsState()
+                        val currentDestination = navBackStackEntry?.destination
 
-                    Screen.tabs.forEach { screen ->
-                        val selected = currentDestination?.hierarchy?.any {
-                            it.route == screen.route
-                        } == true
+                        Screen.tabs.forEach { screen ->
+                            val selected = currentDestination?.hierarchy?.any {
+                                it.route == screen.route
+                            } == true
 
-                        NavigationBarItem(
-                            icon = {
-                                Icon(
-                                    imageVector = if (selected) screen.selectedIcon else screen.unselectedIcon,
-                                    contentDescription = screen.label
-                                )
-                            },
-                            label = {
-                                Text(
-                                    text = screen.label,
-                                    style = androidx.compose.material3.MaterialTheme.typography.labelSmall
-                                )
-                            },
-                            selected = selected,
-                            onClick = {
-                                navController.navigate(screen.route) {
-                                    popUpTo(navController.graph.findStartDestination().id) {
-                                        saveState = true
+                            NavigationBarItem(
+                                icon = {
+                                    Icon(
+                                        imageVector = if (selected) screen.selectedIcon else screen.unselectedIcon,
+                                        contentDescription = screen.label
+                                    )
+                                },
+                                label = {
+                                    Text(
+                                        text = screen.label,
+                                        style = androidx.compose.material3.MaterialTheme.typography.labelSmall
+                                    )
+                                },
+                                selected = selected,
+                                onClick = {
+                                    navController.navigate(screen.route) {
+                                        popUpTo(navController.graph.findStartDestination().id) {
+                                            saveState = true
+                                        }
+                                        launchSingleTop = true
+                                        restoreState = true
                                     }
-                                    launchSingleTop = true
-                                    restoreState = true
-                                }
-                            },
-                            colors = NavigationBarItemDefaults.colors(
-                                selectedIconColor = M3_OnSecondaryContainer,
-                                selectedTextColor = M3_OnSurface,
-                                unselectedIconColor = M3_OnSurfaceVariant,
-                                unselectedTextColor = M3_OnSurfaceVariant,
-                                indicatorColor = M3_SecondaryContainer
+                                },
+                                colors = NavigationBarItemDefaults.colors(
+                                    selectedIconColor = M3_OnSecondaryContainer,
+                                    selectedTextColor = M3_OnSurface,
+                                    unselectedIconColor = M3_OnSurfaceVariant,
+                                    unselectedTextColor = M3_OnSurfaceVariant,
+                                    indicatorColor = M3_SecondaryContainer
+                                )
                             )
-                        )
+                        }
                     }
                 }
-            }
-        ) { innerPadding ->
-            NavHost(
-                navController = navController,
-                startDestination = Screen.Home.route,
-                modifier = Modifier.padding(innerPadding)
-            ) {
-                composable(Screen.Home.route) { PlaceholderScreen("Home Dashboard") }
-                composable(Screen.Transactions.route) { TransactionsScreen() }
-                composable(Screen.Insights.route) { PlaceholderScreen("Insights") }
-                composable(Screen.Settings.route) { SettingsScreen() }
+            ) { innerPadding ->
+                NavHost(
+                    navController = navController,
+                    startDestination = Screen.Home.route,
+                    modifier = Modifier.padding(innerPadding)
+                ) {
+                    composable(Screen.Home.route) { PlaceholderScreen("Home Dashboard") }
+                    composable(Screen.Transactions.route) { TransactionsScreen() }
+                    composable(Screen.Insights.route) { PlaceholderScreen("Insights") }
+                    composable(Screen.Settings.route) { SettingsScreen() }
+                }
             }
         }
     }

@@ -117,7 +117,7 @@ class TransactionRepositoryTest {
             .allowMainThreadQueries()
             .build()
         mockAccountRepo = AccountRepository(db.accountDao())
-        repo = TransactionRepository(db.transactionDao(), mockAccountRepo)
+        repo = TransactionRepository(db, db.transactionDao(), mockAccountRepo)
     }
 
     @After

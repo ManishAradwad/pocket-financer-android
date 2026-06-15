@@ -1,5 +1,6 @@
 package com.pocketfinancer.data.repository
 
+import com.pocketfinancer.data.db.AppDatabase
 import com.pocketfinancer.data.db.dao.TransactionDao
 import com.pocketfinancer.data.db.entity.TransactionEntity
 import com.pocketfinancer.data.model.Transaction
@@ -12,9 +13,14 @@ import javax.inject.Singleton
 
 @Singleton
 class TransactionRepository @Inject constructor(
+    private val appDatabase: AppDatabase,
     private val transactionDao: TransactionDao,
     private val accountRepository: AccountRepository
 ) {
+
+    suspend fun clearDatabase() {
+        appDatabase.clearAllTables()
+    }
     fun getAllByDateDesc(): Flow<List<Transaction>> =
         transactionDao.getAllByDateDesc().map { list -> list.map { it.toDomain() } }
 

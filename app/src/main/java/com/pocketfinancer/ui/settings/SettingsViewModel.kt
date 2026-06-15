@@ -1,5 +1,6 @@
 package com.pocketfinancer.ui.settings
 
+import android.content.Context
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -16,6 +17,7 @@ import com.pocketfinancer.data.repository.TransactionRepository
 import com.pocketfinancer.data.repository.AccountRepository
 import com.pocketfinancer.data.model.TransactionType
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -59,6 +61,7 @@ data class SettingsUiState(
 
 @HiltViewModel
 class SettingsViewModel @Inject constructor(
+    @ApplicationContext private val context: Context,
     private val deviceCapabilities: DeviceCapabilities,
     private val llamaEngine: LlamaEngine,
     private val modelDownloader: ModelDownloader,
@@ -434,6 +437,20 @@ class SettingsViewModel @Inject constructor(
                     testProgress = null,
                     testError = "Test failed: ${e.message}\n${e.stackTraceToString().take(500)}"
                 )
+            }
+        }
+    }
+
+    fun resetOnboarding(onSuccess: () -> Unit) {
+        viewModelScope.launch {
+            llamaEngine.unloadModel()
+            withContext(Dispatchers.IO) {
+                transactionRepository.clearDatabase()
+            }
+            val prefs = context.getSharedPreferences(".app_settings", Context.MODE_PRIVATE)
+            prefs.edit().putBoolean("onboarding_completed", false).apply()
+            withContext(Dispatchers.Main) {
+                onSuccess()
             }
         }
     }

@@ -40,6 +40,9 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
         // ── Section 3: Engine Status + Test ──────────────────────────────
         EngineCard(state, viewModel)
 
+        // ── Section 4: Developer Options ─────────────────────────────────
+        DeveloperToolsCard(viewModel)
+
         Spacer(modifier = Modifier.height(8.dp))
     }
 }
@@ -467,5 +470,33 @@ private fun ramBadge(tier: DeviceCapabilities.RamTier): Pair<String, Color>? {
         DeviceCapabilities.RamTier.OK -> "OK" to M3_Pos
         DeviceCapabilities.RamTier.WARNING -> "WARNING" to Color(0xFFF2C94C)
         DeviceCapabilities.RamTier.BLOCKED -> "BLOCKED" to M3_Error
+    }
+}
+
+@Composable
+private fun DeveloperToolsCard(viewModel: SettingsViewModel) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    
+    SectionCard(title = "DEVELOPER OPTIONS") {
+        Text(
+            text = "Testing utilities for app developers. Resetting onboarding will clear transaction history, but will keep the downloaded local AI model file intact.",
+            color = M3_OnSurfaceVariant,
+            style = MaterialTheme.typography.bodySmall
+        )
+        
+        Spacer(modifier = Modifier.height(12.dp))
+        
+        Button(
+            onClick = {
+                viewModel.resetOnboarding {
+                    val activity = context as? android.app.Activity
+                    activity?.recreate()
+                }
+            },
+            colors = ButtonDefaults.buttonColors(containerColor = M3_Error),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("RESET ONBOARDING & CLEAR DB", color = Color.White, style = MaterialTheme.typography.labelMedium)
+        }
     }
 }
