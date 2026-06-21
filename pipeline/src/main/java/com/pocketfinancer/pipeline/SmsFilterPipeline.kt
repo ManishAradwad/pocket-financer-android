@@ -21,7 +21,7 @@ class SmsFilterPipeline @Inject constructor() {
 
     // Stage 2: Masked account or card pattern
     private val acctRegex = Regex(
-        """a/?c\s*(?:no\.?\s*)?[X*x]+\d+|a/?c\s*(?:no\.?\s*)?\*+\d+|card\s*(?:no\.?\s*)?[Xx*]+\d+|card\s+\d{4}\b|card\s+ending\s+[Xx*]*\d+""",
+        """a/c\s*(?:no\.?\s*)?[X*x]+\d+|a/?c\s*(?:no\.?\s*)?\*+\d+|card\s*(?:no\.?\s*)?[Xx*]+\d+|card\s+\d{4}\b|card\s+ending\s+[Xx*]*\d+""",
         RegexOption.IGNORE_CASE
     )
 
