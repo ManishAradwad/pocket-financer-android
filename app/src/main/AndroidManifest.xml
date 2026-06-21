@@ -5,6 +5,8 @@
     <uses-permission android:name="android.permission.RECEIVE_SMS" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
     <application
         android:name=".PocketFinancerApp"
@@ -13,6 +15,11 @@
         android:label="Pocket Financer"
         android:supportsRtl="true"
         android:theme="@style/Theme.PocketFinancer">
+
+        <service
+            android:name=".ui.onboarding.OnboardingService"
+            android:foregroundServiceType="dataSync"
+            android:exported="false" />
 
         <activity
             android:name=".MainActivity"

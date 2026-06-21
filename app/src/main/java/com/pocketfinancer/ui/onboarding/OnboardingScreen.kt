@@ -2,6 +2,9 @@ package com.pocketfinancer.ui.onboarding
 
 import android.Manifest
 import android.os.Build
+import android.content.pm.PackageManager
+import androidx.core.content.ContextCompat
+import androidx.compose.ui.platform.LocalContext
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
@@ -49,6 +52,7 @@ fun OnboardingScreen(
     viewModel: OnboardingViewModel = hiltViewModel()
 ) {
     val state by viewModel.state.collectAsState()
+    val context = LocalContext.current
 
     // Handle completed state from ViewModel
     LaunchedEffect(state.step) {
@@ -60,9 +64,28 @@ fun OnboardingScreen(
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
     ) { result ->
-        val allGranted = result.values.all { it }
         viewModel.checkPermissions()
-        if (!allGranted) {
+        
+        val readSmsGranted = result[Manifest.permission.READ_SMS] == true ||
+                ContextCompat.checkSelfPermission(context, Manifest.permission.READ_SMS) == PackageManager.PERMISSION_GRANTED
+        val receiveSmsGranted = result[Manifest.permission.RECEIVE_SMS] == true ||
+                ContextCompat.checkSelfPermission(context, Manifest.permission.RECEIVE_SMS) == PackageManager.PERMISSION_GRANTED
+        
+        val smsGranted = readSmsGranted && receiveSmsGranted
+        val notifGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            result[Manifest.permission.POST_NOTIFICATIONS] == true ||
+                    ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+        } else {
+            true
+        }
+
+        if (smsGranted) {
+            if (!notifGranted) {
+                viewModel.showNotificationWarning()
+            } else {
+                viewModel.setStep(OnboardingStep.DOWNLOAD_SLM)
+            }
+        } else {
             viewModel.incrementPermissionDeny()
         }
     }
@@ -97,6 +120,7 @@ fun OnboardingScreen(
                         )
                         OnboardingStep.PERMISSIONS -> PermissionsStepScreen(
                             deniedCount = state.deniedCount,
+                            showNotificationWarning = state.showNotificationWarning,
                             onGrant = {
                                 val permissions = mutableListOf(
                                     Manifest.permission.READ_SMS,
@@ -107,6 +131,7 @@ fun OnboardingScreen(
                                 }
                                 permissionLauncher.launch(permissions.toTypedArray())
                             },
+                            onProceedAnyway = { viewModel.proceedAnyway() },
                             onNotNow = { viewModel.incrementPermissionDeny() }
                         )
                         OnboardingStep.DOWNLOAD_SLM -> DownloadSlmStepScreen(
@@ -306,7 +331,9 @@ private fun InfoRowItem(
 @Composable
 private fun PermissionsStepScreen(
     deniedCount: Int,
+    showNotificationWarning: Boolean,
     onGrant: () -> Unit,
+    onProceedAnyway: () -> Unit,
     onNotNow: () -> Unit
 ) {
     Column(
@@ -343,7 +370,7 @@ private fun PermissionsStepScreen(
             Spacer(modifier = Modifier.height(20.dp))
 
             Text(
-                text = "Grant SMS Access",
+                text = "Grant App Permissions",
                 color = M3_OnSurface,
                 fontSize = 24.sp,
                 fontWeight = FontWeight.Bold
@@ -352,7 +379,7 @@ private fun PermissionsStepScreen(
             Spacer(modifier = Modifier.height(8.dp))
 
             Text(
-                text = "Pocket Financer works by parsing your bank's transactional SMS messages.",
+                text = "Pocket Financer uses local AI processing and requires the following permissions to function:",
                 color = M3_OnSurfaceVariant,
                 fontSize = 12.sp,
                 lineHeight = 18.sp,
@@ -361,35 +388,130 @@ private fun PermissionsStepScreen(
 
             Spacer(modifier = Modifier.height(20.dp))
 
-            // Clarifying Note Card
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(M3_SurfaceContainerLow, RoundedCornerShape(20.dp))
-                    .border(
-                        BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.2f)),
-                        RoundedCornerShape(20.dp)
+            // Permission Items explanations
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(M3_SurfaceContainerLow, RoundedCornerShape(16.dp))
+                        .border(
+                            BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.2f)),
+                            RoundedCornerShape(16.dp)
+                        )
+                        .padding(14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Sms,
+                        contentDescription = null,
+                        tint = M3_Primary,
+                        modifier = Modifier.size(20.dp)
                     )
-                    .padding(16.dp),
-                verticalAlignment = Alignment.Top
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.Info,
-                    contentDescription = null,
-                    tint = M3_Primary,
-                    modifier = Modifier.size(18.dp)
-                )
-                Spacer(modifier = Modifier.width(12.dp))
-                Text(
-                    text = "Our local SLM will extract values like amount and counterparty. No personal chats are ever read or processed.",
-                    color = M3_OnSurfaceVariant,
-                    fontSize = 12.sp,
-                    lineHeight = 16.sp,
-                    fontWeight = FontWeight.Medium
-                )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column {
+                        Text("SMS Access (Required)", color = M3_OnSurface, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        Text("Used to read and parse your bank's transactional alerts locally on-device.", color = M3_OnSurfaceVariant, fontSize = 10.sp, lineHeight = 14.sp)
+                    }
+                }
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(M3_SurfaceContainerLow, RoundedCornerShape(16.dp))
+                        .border(
+                            BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.2f)),
+                            RoundedCornerShape(16.dp)
+                        )
+                        .padding(14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Notifications,
+                        contentDescription = null,
+                        tint = M3_Primary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column {
+                        Text("Notifications (Optional)", color = M3_OnSurface, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        Text("Shows persistent background updates during the local model download and SMS sync stages.", color = M3_OnSurfaceVariant, fontSize = 10.sp, lineHeight = 14.sp)
+                    }
+                }
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(20.dp))
+
+            if (showNotificationWarning) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(M3_ErrorContainer.copy(alpha = 0.2f), RoundedCornerShape(16.dp))
+                        .border(
+                            BorderStroke(1.dp, M3_Error.copy(alpha = 0.3f)),
+                            RoundedCornerShape(16.dp)
+                        )
+                        .padding(14.dp),
+                    verticalAlignment = Alignment.Top
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Warning,
+                        contentDescription = null,
+                        tint = M3_Error,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column {
+                        Text(
+                            text = "Notification Permission Denied",
+                            color = M3_OnErrorContainer,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "Model download and SMS parsing progress updates won't be available through system notifications. We promise this app never spams you with promotional alerts.",
+                            color = M3_OnErrorContainer.copy(alpha = 0.85f),
+                            fontSize = 11.sp,
+                            lineHeight = 15.sp
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(16.dp))
+            } else if (deniedCount > 0) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(M3_ErrorContainer.copy(alpha = 0.3f), RoundedCornerShape(16.dp))
+                        .border(
+                            BorderStroke(1.dp, M3_Error.copy(alpha = 0.2f)),
+                            RoundedCornerShape(16.dp)
+                        )
+                        .padding(14.dp),
+                    verticalAlignment = Alignment.Top
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Warning,
+                        contentDescription = null,
+                        tint = M3_Error,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column {
+                        Text(
+                            text = "SMS Permission Required",
+                            color = M3_OnErrorContainer,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "The app cannot function without SMS access. Please allow it to proceed.",
+                            color = M3_OnErrorContainer.copy(alpha = 0.85f),
+                            fontSize = 11.sp,
+                            lineHeight = 14.sp
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(16.dp))
+            }
 
             // Safety Shield Card
             Row(
@@ -418,43 +540,6 @@ private fun PermissionsStepScreen(
                     fontWeight = FontWeight.Bold
                 )
             }
-
-            if (deniedCount > 0) {
-                Spacer(modifier = Modifier.height(20.dp))
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(M3_ErrorContainer.copy(alpha = 0.3f), RoundedCornerShape(16.dp))
-                        .border(
-                            BorderStroke(1.dp, M3_Error.copy(alpha = 0.2f)),
-                            RoundedCornerShape(16.dp)
-                        )
-                        .padding(14.dp),
-                    verticalAlignment = Alignment.Top
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Warning,
-                        contentDescription = null,
-                        tint = M3_Error,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Column {
-                        Text(
-                            text = "Permission Required",
-                            color = M3_OnErrorContainer,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Text(
-                            text = "The app cannot function without SMS access. Please allow it to proceed.",
-                            color = M3_OnErrorContainer.copy(alpha = 0.85f),
-                            fontSize = 11.sp,
-                            lineHeight = 14.sp
-                        )
-                    }
-                }
-            }
         }
 
         Column(
@@ -462,7 +547,7 @@ private fun PermissionsStepScreen(
         ) {
             Spacer(modifier = Modifier.height(24.dp))
             Button(
-                onClick = onGrant,
+                onClick = if (showNotificationWarning) onProceedAnyway else onGrant,
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(48.dp),
@@ -473,7 +558,7 @@ private fun PermissionsStepScreen(
                 )
             ) {
                 Text(
-                    text = "Allow SMS Access",
+                    text = if (showNotificationWarning) "Proceed Anyway" else "Allow Permissions",
                     fontSize = 14.sp,
                     fontWeight = FontWeight.Bold
                 )

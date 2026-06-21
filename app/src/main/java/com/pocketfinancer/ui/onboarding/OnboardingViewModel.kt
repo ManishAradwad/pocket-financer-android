@@ -1,28 +1,23 @@
 package com.pocketfinancer.ui.onboarding
 
 import android.content.Context
+import android.os.Build
 import android.util.Log
+import androidx.core.content.ContextCompat
+import android.content.pm.PackageManager
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.pocketfinancer.data.model.TransactionType
 import com.pocketfinancer.hardware.DeviceCapabilities
 import com.pocketfinancer.hardware.SlmTier
 import com.pocketfinancer.hardware.selectSlmForDevice
 import com.pocketfinancer.inference.LlamaEngine
 import com.pocketfinancer.inference.ModelDownloader
-import com.pocketfinancer.pipeline.PipelineService
-import com.pocketfinancer.pipeline.SmsFilterPipeline
-import com.pocketfinancer.pipeline.ExtractionParser
-import com.pocketfinancer.sms.SmsRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import java.io.File
 import javax.inject.Inject
 
@@ -52,6 +47,8 @@ data class OnboardingUiState(
     val syncLogs: List<String> = emptyList(),
     val syncEtaSeconds: Int = 0,
     val hasPermissions: Boolean = false,
+    val hasNotificationPermission: Boolean = false,
+    val showNotificationWarning: Boolean = false,
     val deniedCount: Int = 0,
     val syncTotalMessages: Int = 0,
     val syncTransactionalCount: Int = 0,
@@ -65,10 +62,8 @@ class OnboardingViewModel @Inject constructor(
     @ApplicationContext private val context: Context,
     private val deviceCapabilities: DeviceCapabilities,
     private val llamaEngine: LlamaEngine,
-    private val modelDownloader: ModelDownloader,
-    private val smsRepository: SmsRepository,
-    private val smsFilterPipeline: SmsFilterPipeline,
-    private val pipelineService: PipelineService
+    private val smsRepository: com.pocketfinancer.sms.SmsRepository,
+    private val syncManager: OnboardingSyncManager
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(OnboardingUiState())
@@ -79,15 +74,15 @@ class OnboardingViewModel @Inject constructor(
         assessDeviceHardware()
         checkModelDownloadStatus()
 
-        // Sync downloader state
+        // Sync manager state
         viewModelScope.launch {
-            modelDownloader.state.collect { ds ->
+            syncManager.syncState.collect { syncState ->
                 val slm = _state.value.selectedSlm
                 val file = slm?.let { getModelFile(it) }
                 val isDone = file != null && file.exists() && file.length() > 0
 
-                val finalDs = if (!ds.isDownloading && !ds.isComplete && isDone) {
-                    ds.copy(
+                val finalDs = if (!syncState.isDownloading && !syncState.downloadState.isComplete && isDone) {
+                    syncState.downloadState.copy(
                         isComplete = true,
                         progress = 1f,
                         downloadedMb = file!!.length() / 1_048_576f,
@@ -95,19 +90,26 @@ class OnboardingViewModel @Inject constructor(
                         outputPath = file.absolutePath
                     )
                 } else {
-                    ds
+                    syncState.downloadState
                 }
 
                 _state.value = _state.value.copy(
+                    step = if (syncState.isRunning || syncState.step == OnboardingStep.COMPLETED) syncState.step else _state.value.step,
+                    selectedSlm = syncState.selectedSlm ?: _state.value.selectedSlm,
                     downloadState = finalDs,
-                    isDownloading = finalDs.isDownloading
+                    isDownloading = syncState.isDownloading,
+                    isModelLoaded = syncState.isModelLoaded,
+                    modelLoadError = syncState.modelLoadError,
+                    syncProgress = syncState.syncProgress,
+                    syncMessage = syncState.syncMessage,
+                    syncLogs = syncState.syncLogs,
+                    syncEtaSeconds = syncState.syncEtaSeconds,
+                    syncTotalMessages = syncState.syncTotalMessages,
+                    syncTransactionalCount = syncState.syncTransactionalCount,
+                    syncParsedCount = syncState.syncParsedCount,
+                    syncSpendsTotal = syncState.syncSpendsTotal,
+                    syncRecentTransactions = syncState.syncRecentTransactions
                 )
-
-                // Auto-transition to syncing when download completes
-                if (finalDs.isComplete && _state.value.step == OnboardingStep.DOWNLOAD_SLM) {
-                    delay(800)
-                    startSyncingPhase()
-                }
             }
         }
     }
@@ -118,14 +120,39 @@ class OnboardingViewModel @Inject constructor(
 
     fun checkPermissions() {
         val granted = smsRepository.hasPermissions()
-        _state.value = _state.value.copy(hasPermissions = granted)
-        if (granted && _state.value.step == OnboardingStep.PERMISSIONS) {
+        val notifGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ContextCompat.checkSelfPermission(
+                context,
+                android.Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+        } else {
+            true
+        }
+
+        _state.value = _state.value.copy(
+            hasPermissions = granted,
+            hasNotificationPermission = notifGranted
+        )
+
+        // Automatically transition if both are granted and we are on the permissions screen
+        if (granted && notifGranted && _state.value.step == OnboardingStep.PERMISSIONS) {
             _state.value = _state.value.copy(step = OnboardingStep.DOWNLOAD_SLM)
         }
     }
 
     fun incrementPermissionDeny() {
         _state.value = _state.value.copy(deniedCount = _state.value.deniedCount + 1)
+    }
+
+    fun showNotificationWarning() {
+        _state.value = _state.value.copy(showNotificationWarning = true)
+    }
+
+    fun proceedAnyway() {
+        _state.value = _state.value.copy(
+            step = OnboardingStep.DOWNLOAD_SLM,
+            showNotificationWarning = false
+        )
     }
 
     private fun assessDeviceHardware() {
@@ -157,209 +184,7 @@ class OnboardingViewModel @Inject constructor(
 
     fun downloadModel() {
         val slm = _state.value.selectedSlm ?: return
-        val destFile = getModelFile(slm)
-        _state.value = _state.value.copy(isDownloading = true)
-        viewModelScope.launch {
-            modelDownloader.download(slm.downloadUrl, destFile)
-        }
-    }
-
-    private fun startSyncingPhase() {
-        _state.value = _state.value.copy(step = OnboardingStep.SYNCING)
-        viewModelScope.launch {
-            runOnboardingSync()
-        }
-    }
-
-    private suspend fun runOnboardingSync() {
-        val slm = _state.value.selectedSlm ?: return
-        val modelFile = getModelFile(slm)
-        val logs = mutableListOf<String>()
-
-        fun addLog(msg: String) {
-            logs.add(msg)
-            _state.value = _state.value.copy(syncLogs = logs.toList())
-        }
-
-        addLog("System: Initializing local sync...")
-        _state.value = _state.value.copy(
-            syncProgress = 0.05f,
-            syncMessage = "Warming up local AI engine..."
-        )
-        delay(800)
-
-        // 1. Load the model
-        if (!llamaEngine.isModelLoaded()) {
-            addLog("Model: Loading ${slm.name} into memory...")
-            _state.value = _state.value.copy(syncMessage = "Initializing model layers...")
-            val device = deviceCapabilities.assessDevice()
-            val hasFp16 = device.cpu?.hasFp16 ?: false
-            val result = llamaEngine.loadModel(
-                path = modelFile.absolutePath,
-                contextSize = 3072,
-                gpuLayers = 0,
-                numThreads = 0,
-                hasFp16 = hasFp16,
-                hasThinkingMode = slm.hasThinkingMode
-            )
-            if (result.isFailure) {
-                val errorMsg = result.exceptionOrNull()?.message ?: "Unknown error"
-                addLog("Error: Failed to load model ($errorMsg)")
-                _state.value = _state.value.copy(
-                    modelLoadError = "Failed to load model: $errorMsg"
-                )
-                return
-            }
-        }
-        addLog("Model: Loaded successfully on device CPU.")
-
-        _state.value = _state.value.copy(
-            syncProgress = 0.15f,
-            syncMessage = "Scanning recent message inbox..."
-        )
-        addLog("SmsReader: Querying inbox history (last 7 days)...")
-        delay(600)
-
-        // 2. Fetch SMS history (last 7 days)
-        val rawMessages = withContext(Dispatchers.IO) {
-            smsRepository.fetchHistory(daysBack = 7, limit = 250)
-        }
-
-        if (rawMessages.isEmpty()) {
-            addLog("SmsReader: No SMS found in inbox.")
-            _state.value = _state.value.copy(
-                syncProgress = 1.0f,
-                syncMessage = "No SMS found in inbox. Complete!",
-                syncTotalMessages = 0
-            )
-            completeOnboarding()
-            return
-        }
-        addLog("SmsReader: Retrieved ${rawMessages.size} messages.")
-        _state.value = _state.value.copy(
-            syncTotalMessages = rawMessages.size
-        )
-
-        // 3. Deterministic Pre-Filtering
-        _state.value = _state.value.copy(
-            syncProgress = 0.25f,
-            syncMessage = "Filtering promotional messages..."
-        )
-        addLog("Pipeline: Applying regex filters to filter promotional/spam SMS...")
-        delay(600)
-
-        val transactionalMessages = rawMessages.filter { msg ->
-            smsFilterPipeline.isTransactional(msg.address, msg.body)
-        }
-
-        val spamCount = rawMessages.size - transactionalMessages.size
-        addLog("Pipeline: Discarded $spamCount non-transactional messages.")
-        _state.value = _state.value.copy(
-            syncTransactionalCount = transactionalMessages.size
-        )
-
-        if (transactionalMessages.isEmpty()) {
-            addLog("Pipeline: Found 0 transactional messages.")
-            _state.value = _state.value.copy(
-                syncProgress = 1.0f,
-                syncMessage = "Sync completed! No transactional history."
-            )
-            completeOnboarding()
-            return
-        }
-        addLog("Pipeline: Found ${transactionalMessages.size} transactions to process.")
-
-        // Limit the heavy sync workload during onboarding to prevent long waiting times
-        val syncLimit = 20
-        val messagesToProcess = transactionalMessages.take(syncLimit)
-        val totalCount = messagesToProcess.size
-        addLog("AI: Beginning local offline parsing for $totalCount transactions...")
-
-        val loopStartTime = System.currentTimeMillis()
-        val defaultTimePerTxMs = 10000L
-        var parsedCount = 0
-        var spendsTotal = 0.0
-        val recentTxList = mutableListOf<ExtractedTxPreview>()
-
-        // 4. Sequential Inference Pass
-        for ((index, sms) in messagesToProcess.withIndex()) {
-            val progressBase = 0.25f
-            val progressScale = 0.70f
-            val currentProgress = progressBase + (index.toFloat() / totalCount) * progressScale
-            
-            // Set initial/dynamic ETA
-            val currentRemaining = totalCount - index
-            val elapsedSoFar = System.currentTimeMillis() - loopStartTime
-            val estimatedAvgTime = if (index > 0) (elapsedSoFar / index) else defaultTimePerTxMs
-            val currentEtaSec = ((estimatedAvgTime * currentRemaining) / 1000f).toInt().coerceAtLeast(1)
-
-            _state.value = _state.value.copy(
-                syncProgress = currentProgress,
-                syncMessage = "Analyzing SMS ${index + 1} of $totalCount: ${sms.address}...",
-                syncEtaSeconds = currentEtaSec
-            )
-            
-            addLog("AI: Analyzing transaction ${index + 1}/$totalCount (${sms.address})...")
-            
-            val txStartTime = System.currentTimeMillis()
-            val result = withContext(Dispatchers.IO) {
-                try {
-                    pipelineService.processSingle(sms)
-                } catch (e: Exception) {
-                    Log.e("OnboardingViewModel", "Sync parse error", e)
-                    null
-                }
-            }
-            val durationMs = System.currentTimeMillis() - txStartTime
-            
-            if (result != null) {
-                parsedCount++
-                if (result.type == TransactionType.DEBIT) {
-                    spendsTotal += result.amount
-                }
-                recentTxList.add(
-                    0,
-                    ExtractedTxPreview(
-                        amount = result.amount,
-                        merchant = result.counterparty ?: "Unknown Merchant",
-                        type = result.type.name.lowercase()
-                    )
-                )
-
-                _state.value = _state.value.copy(
-                    syncParsedCount = parsedCount,
-                    syncSpendsTotal = spendsTotal,
-                    syncRecentTransactions = recentTxList.take(3)
-                )
-
-                addLog("➔ Extracted: ₹${result.amount} at ${result.counterparty ?: "Unknown Merchant"} [${"%.1f".format(durationMs / 1000f)}s]")
-                addLog("➔ Saved to encrypted local database.")
-            } else {
-                addLog("➔ Skipped (non-transactional content detected) [${"%.1f".format(durationMs / 1000f)}s]")
-            }
-        }
-
-        _state.value = _state.value.copy(
-            syncProgress = 0.98f,
-            syncMessage = "Optimizing encrypted local database...",
-            syncEtaSeconds = 0
-        )
-        addLog("Database: Reindexing and optimizing storage encryption...")
-        delay(1000)
-
-        addLog("System: Offline synchronization fully completed!")
-        _state.value = _state.value.copy(
-            syncProgress = 1.0f,
-            syncMessage = "Synchronization completed!"
-        )
-        delay(600)
-        completeOnboarding()
-    }
-
-    private fun completeOnboarding() {
-        val prefs = context.getSharedPreferences(".app_settings", Context.MODE_PRIVATE)
-        prefs.edit().putBoolean("onboarding_completed", true).apply()
-        _state.value = _state.value.copy(step = OnboardingStep.COMPLETED)
+        syncManager.startOnboarding(context, slm)
     }
 
     private fun getModelFile(slm: SlmTier): File {
