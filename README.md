@@ -25,7 +25,10 @@ By leveraging a local **Small Language Model (SLM)** backed by `llama.cpp` via a
 *   **Disk-Based KV Cache Caching**: Saves and loads the static prefix KV cache state to/from disk using SHA-256 hashes. This cuts prefill time from ~140 seconds down to `< 100ms` on subsequent runs while automatically cleaning up old stale session files.
 *   **Cryptographically Secured Database**: Persists transaction and account information in a Room database encrypted with **SQLCipher (AES-256)**, securing sensitive ledger data from third-party app leaks or root-level vulnerabilities.
 *   **Real-time & Batch Synchronization**: Employs an Android `BroadcastReceiver` flow to catch transaction alerts as they land, combined with an inbox ContentProvider scraper to catch up on historical transactions during launch.
-*   **Modern Jetpack Compose UI**: Designed around Material 3 dark-themed specs to present clean dashboards, insight graphs, transaction histories, and device diagnostics.
+*   **Interactive Onboarding Sync**: Redesigned sync dashboard displaying a real-time progress hub with remaining ETA, a visual pipeline stepper (Engine Init ➔ SMS Filter ➔ Parse SMS ➔ DB Save), dynamic cards showing total spends detected and parsed items, a live rolling feed of extracted transactions, rotating privacy tips, and a collapsible raw LLM engine log console.
+*   **Developer Onboarding Reset**: Built-in developer settings card allowing users to wipe local database tables and reset the onboarding status, instantly restarting the onboarding Compose flow while preserving downloaded model files on-device.
+*   **Modern Jetpack Compose UI**: Designed around Material 3 dark-themed specs to present clean dashboards, transaction histories, system hardware capabilities, and engine diagnostics.
+*   **Native Edge-to-Edge System Bars**: Integrated transparent Android system bars padding and custom color styling (`SystemBarStyle.dark`) to ensure that time, wifi, and battery icons remain white and visible on dark background themes across all Light/Dark global OS themes.
 
 ---
 
@@ -182,6 +185,27 @@ cd pocket-financer-android
 - [x] **Phase 5**: Pipeline service orchestration, validation rules, & SQLCipher secure database persistence.
 - [/] **Phase 6**: UI screen development. Dashboard registers (`Transactions` tab with full date-grouped cards, debit/credit filters, and SLM metadata bottom sheets) and Settings debug metrics are active. Dashboard summary (`Home` tab) and analytics graphs (`Insights` tab) are under development.
 - [ ] **Phase 7**: Background Worker integration for sleeping SMS parses.
+
+---
+
+## 🧪 Testing & Verification
+
+For testing the application's offline AI ingestion pipeline without using real bank alerts, we provide testing scripts and developer utilities:
+
+### 1. Ingest Mock Transactions
+Run the Python script in the workspace root to inject exactly 20 test SMS messages (including both transactional debits/credits and promotional spams) into your emulator's telephony provider:
+```powershell
+python inject_sms.py
+```
+This utility automatically configures shell appops permissions (`WRITE_SMS`) and restarts the Android Messages application to refresh the inbox view.
+
+### 2. Replay Onboarding
+To test the onboarding sync visual elements repeatedly:
+- Open the application and navigate to the **Settings** tab.
+- Scroll down to the **DEVELOPER OPTIONS** card.
+- Tap **RESET ONBOARDING & CLEAR DB**.
+- The app will reset the database tables, clear the onboarding completion preferences, and recreate the activity to launch the Welcome flow.
+- Because the SLM model file remains cached in internal storage, the onboarding screen will automatically detect it, bypass the download step within 800ms, and initiate the transactional sync flow again.
 
 ---
 
