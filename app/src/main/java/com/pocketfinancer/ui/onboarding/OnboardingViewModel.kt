@@ -276,7 +276,7 @@ class OnboardingViewModel @Inject constructor(
         addLog("AI: Beginning local offline parsing for $totalCount transactions...")
 
         val loopStartTime = System.currentTimeMillis()
-        val defaultTimePerTxMs = 2500L
+        val defaultTimePerTxMs = 10000L
         var parsedCount = 0
         var spendsTotal = 0.0
         val recentTxList = mutableListOf<ExtractedTxPreview>()

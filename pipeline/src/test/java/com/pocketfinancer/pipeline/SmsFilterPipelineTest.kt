@@ -16,7 +16,8 @@ class SmsFilterPipelineTest {
             "Dear Customer, A/c No. XX1234 has credit for Rs 1,500.00 by transfer",
             "₹500.00 received in A/c **4321",
             "Amt received Rs 200.00 in a/c XX1234",
-            "INR 1000.00 deposited into A/c XXXXXX9999"
+            "INR 1000.00 deposited into A/c XXXXXX9999",
+            "Dear customer, your acc XX9171 has been credited with Rs. 56700 by ASHOK DEV."
         )
         for (body in bodies) {
             assertTrue(

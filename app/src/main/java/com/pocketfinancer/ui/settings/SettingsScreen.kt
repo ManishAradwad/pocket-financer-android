@@ -37,6 +37,9 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
         // ── Section 2: Active Model ──────────────────────────────────────
         ActiveModelCard(state.selectedSlm, state.selectedSlm?.let { state.tierExplanations[it.id] })
 
+        // ── Section: Background SMS Processing ──────────────────────────
+        BackgroundParsingCard(state.processIncomingSms, viewModel)
+
         // ── Section 3: Engine Status + Test ──────────────────────────────
         EngineCard(state, viewModel)
 
@@ -497,6 +500,45 @@ private fun DeveloperToolsCard(viewModel: SettingsViewModel) {
             modifier = Modifier.fillMaxWidth()
         ) {
             Text("RESET ONBOARDING & CLEAR DB", color = Color.White, style = MaterialTheme.typography.labelMedium)
+        }
+    }
+}
+
+@Composable
+private fun BackgroundParsingCard(
+    enabled: Boolean,
+    viewModel: SettingsViewModel
+) {
+    SectionCard(title = "BACKGROUND SMS PROCESSING") {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Process Incoming SMS",
+                    color = M3_OnSurface,
+                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold)
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = "Automatically parse transaction alerts in the background and update transactions.",
+                    color = M3_OnSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+            Spacer(modifier = Modifier.width(16.dp))
+            Switch(
+                checked = enabled,
+                onCheckedChange = { viewModel.toggleProcessIncomingSms() },
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = Color.White,
+                    checkedTrackColor = M3_Primary
+                )
+            )
         }
     }
 }

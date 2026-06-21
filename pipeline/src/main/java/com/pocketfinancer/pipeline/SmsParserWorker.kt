@@ -12,6 +12,8 @@ import com.pocketfinancer.hardware.selectSlmForDevice
 import com.pocketfinancer.inference.LlamaEngine
 import com.pocketfinancer.sms.SmsReader
 import com.pocketfinancer.sms.SmsWorkScheduler
+import com.pocketfinancer.sms.SmsRepository
+import com.pocketfinancer.data.repository.TransactionRepository
 import dagger.Binds
 import dagger.Module
 import dagger.hilt.EntryPoint
@@ -45,6 +47,8 @@ class SmsParserWorker(
         fun llamaEngine(): LlamaEngine
         fun deviceCapabilities(): DeviceCapabilities
         fun pipelineService(): PipelineService
+        fun smsRepository(): SmsRepository
+        fun transactionRepository(): TransactionRepository
     }
 
     override suspend fun doWork(): Result {
@@ -52,6 +56,13 @@ class SmsParserWorker(
         val body = inputData.getString("body") ?: return Result.failure()
         val date = inputData.getLong("date", 0L)
         val type = inputData.getInt("type", 1)
+
+        val prefs = applicationContext.getSharedPreferences(".app_settings", Context.MODE_PRIVATE)
+        val processIncoming = prefs.getBoolean("process_incoming_sms", true)
+        if (!processIncoming) {
+            Log.i("SmsParserWorker", "Background SMS processing is disabled in settings. Skipping.")
+            return Result.success()
+        }
 
         val sms = SmsReader.SmsMessage(address, body, date, type)
         Log.i("SmsParserWorker", "Starting background SMS processing for sender: $address")
@@ -69,27 +80,39 @@ class SmsParserWorker(
         // 1. Stage 0-5 pre-filtering
         if (!smsFilterPipeline.isTransactional(address, body)) {
             Log.i("SmsParserWorker", "SMS from $address is non-transactional. Skipping background inference.")
+            SmsNotificationHelper.showSkippedNotification(applicationContext, address, body, date)
             return Result.success()
         }
 
         var loadedModelHere = false
         try {
+            SmsNotificationHelper.showProcessingNotification(
+                applicationContext, address, date, "Initializing local AI engine..."
+            )
+
             // 2. Ensure model is loaded
             if (!llamaEngine.isModelLoaded()) {
                 Log.i("SmsParserWorker", "Model not loaded. Performing dynamic hardware selection...")
                 val device = deviceCapabilities.assessDevice()
                 val slm = selectSlmForDevice(device)
                 if (slm == null) {
-                    Log.e("SmsParserWorker", "No viable SLM for this device (RAM below minimum).")
+                    val errMsg = "No viable SLM for this device (RAM below minimum)."
+                    Log.e("SmsParserWorker", errMsg)
+                    SmsNotificationHelper.showFailureNotification(applicationContext, address, date, errMsg)
                     return Result.failure()
                 }
 
                 val modelFile = File(llamaEngine.getModelStorageDir(), slm.modelFile)
                 if (!modelFile.exists() || modelFile.length() == 0L) {
-                    Log.e("SmsParserWorker", "Selected model ${slm.name} is not downloaded yet at ${modelFile.absolutePath}.")
+                    val errMsg = "Selected model ${slm.name} is not downloaded yet."
+                    Log.e("SmsParserWorker", errMsg)
+                    SmsNotificationHelper.showFailureNotification(applicationContext, address, date, errMsg)
                     return Result.failure()
                 }
 
+                SmsNotificationHelper.showProcessingNotification(
+                    applicationContext, address, date, "Loading model ${slm.name}..."
+                )
                 Log.i("SmsParserWorker", "Loading model ${slm.name}...")
                 val hasFp16 = device.cpu?.hasFp16 ?: false
                 val loadResult = llamaEngine.loadModel(
@@ -102,7 +125,9 @@ class SmsParserWorker(
                 )
 
                 if (loadResult.isFailure) {
-                    Log.e("SmsParserWorker", "Failed to load model in background", loadResult.exceptionOrNull())
+                    val errMsg = "Failed to load model: ${loadResult.exceptionOrNull()?.message ?: "Unknown error"}"
+                    Log.e("SmsParserWorker", errMsg)
+                    SmsNotificationHelper.showFailureNotification(applicationContext, address, date, errMsg)
                     return Result.retry()
                 }
                 loadedModelHere = true
@@ -110,10 +135,16 @@ class SmsParserWorker(
             }
 
             // 3. Process SMS transaction
+            SmsNotificationHelper.showProcessingNotification(
+                applicationContext, address, date, "Analyzing transaction content..."
+            )
             Log.i("SmsParserWorker", "Executing pipeline service for extraction...")
             val parsedResult = pipelineService.processSingle(sms)
             if (parsedResult != null) {
                 Log.i("SmsParserWorker", "Background processing completed successfully. Saved transaction of ₹${parsedResult.amount}.")
+                SmsNotificationHelper.showSuccessNotification(
+                    applicationContext, address, date, parsedResult.amount, parsedResult.counterparty ?: "Unknown Merchant"
+                )
                 try {
                     withContext(Dispatchers.Main) {
                         Toast.makeText(
@@ -127,10 +158,16 @@ class SmsParserWorker(
                 }
             } else {
                 Log.w("SmsParserWorker", "Pipeline execution finished but returned null (no transaction saved).")
+                SmsNotificationHelper.showFailureNotification(
+                    applicationContext, address, date, "Message did not contain transaction details."
+                )
             }
 
         } catch (e: Exception) {
             Log.e("SmsParserWorker", "Exception in background SMS parsing worker", e)
+            SmsNotificationHelper.showFailureNotification(
+                applicationContext, address, date, e.message ?: "Unknown error"
+            )
             return Result.failure()
         } finally {
             // 4. Always unload the model if we loaded it in this worker session to preserve device RAM
@@ -138,6 +175,22 @@ class SmsParserWorker(
                 Log.i("SmsParserWorker", "Unloading background model to release memory...")
                 llamaEngine.unloadModel()
                 Log.i("SmsParserWorker", "Background model unloaded successfully.")
+            }
+
+            // 5. Update unsynced count summary notification
+            try {
+                val smsRepository = entryPoint.smsRepository()
+                val transactionRepository = entryPoint.transactionRepository()
+                val rawMessages = smsRepository.fetchHistory(daysBack = 7, limit = 250)
+                val transactionalMessages = rawMessages.filter { msg ->
+                    smsFilterPipeline.isTransactional(msg.address, msg.body)
+                }
+                val unsyncedCount = transactionalMessages.count { msg ->
+                    !transactionRepository.exists(msg.address, msg.date)
+                }
+                SmsNotificationHelper.showUnsyncedSummaryNotification(applicationContext, unsyncedCount)
+            } catch (ex: Exception) {
+                Log.e("SmsParserWorker", "Failed to update unsynced count summary", ex)
             }
         }
 

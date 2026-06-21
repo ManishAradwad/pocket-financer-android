@@ -76,6 +76,9 @@ class TransactionRepository @Inject constructor(
 
     suspend fun count(): Int = transactionDao.count()
 
+    suspend fun exists(sender: String, date: Long): Boolean =
+        transactionDao.exists(sender, date)
+
     private suspend fun TransactionEntity.toDomain(): Transaction {
         val account = accountRepository.getById(accountId)
         return Transaction(

@@ -56,7 +56,8 @@ data class SettingsUiState(
     val testError: String? = null,
     val filterLogs: List<String>? = null,
     val sessionCacheLogs: List<String>? = null,
-    val slmPrompt: String? = null
+    val slmPrompt: String? = null,
+    val processIncomingSms: Boolean = true
 )
 
 @HiltViewModel
@@ -78,6 +79,10 @@ class SettingsViewModel @Inject constructor(
     init {
         assessDevice()
         refreshModelStatus()
+
+        val prefs = context.getSharedPreferences(".app_settings", Context.MODE_PRIVATE)
+        val enabled = prefs.getBoolean("process_incoming_sms", true)
+        _state.value = _state.value.copy(processIncomingSms = enabled)
 
         // Mirror downloader state into UI state
         viewModelScope.launch {
@@ -439,6 +444,14 @@ class SettingsViewModel @Inject constructor(
                 )
             }
         }
+    }
+
+    fun toggleProcessIncomingSms() {
+        val prefs = context.getSharedPreferences(".app_settings", Context.MODE_PRIVATE)
+        val current = _state.value.processIncomingSms
+        val next = !current
+        prefs.edit().putBoolean("process_incoming_sms", next).apply()
+        _state.value = _state.value.copy(processIncomingSms = next)
     }
 
     fun resetOnboarding(onSuccess: () -> Unit) {

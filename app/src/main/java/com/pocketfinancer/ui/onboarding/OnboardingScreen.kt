@@ -1,6 +1,7 @@
 package com.pocketfinancer.ui.onboarding
 
 import android.Manifest
+import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
@@ -97,12 +98,14 @@ fun OnboardingScreen(
                         OnboardingStep.PERMISSIONS -> PermissionsStepScreen(
                             deniedCount = state.deniedCount,
                             onGrant = {
-                                permissionLauncher.launch(
-                                    arrayOf(
-                                        Manifest.permission.READ_SMS,
-                                        Manifest.permission.RECEIVE_SMS
-                                    )
+                                val permissions = mutableListOf(
+                                    Manifest.permission.READ_SMS,
+                                    Manifest.permission.RECEIVE_SMS
                                 )
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                    permissions.add(Manifest.permission.POST_NOTIFICATIONS)
+                                }
+                                permissionLauncher.launch(permissions.toTypedArray())
                             },
                             onNotNow = { viewModel.incrementPermissionDeny() }
                         )
@@ -1218,7 +1221,17 @@ private fun SyncingStepScreen(
                     )
                     Spacer(modifier = Modifier.height(2.dp))
                     
-                    val etaText = if (etaSeconds > 0) "~${etaSeconds}s left" else "SYNCING"
+                    val etaText = if (etaSeconds > 0) {
+                        val mins = etaSeconds / 60
+                        val secs = etaSeconds % 60
+                        if (mins > 0) {
+                            "~${mins}m ${secs}s left"
+                        } else {
+                            "~${secs}s left"
+                        }
+                    } else {
+                        "SYNCING"
+                    }
                     Text(
                         text = etaText,
                         color = M3_OnSurfaceVariant,
@@ -1563,24 +1576,6 @@ private fun SyncingStepScreen(
             }
 
             Spacer(modifier = Modifier.height(24.dp))
-
-            // Bottom Horizontal progress indicator
-            val animatedProgress by animateFloatAsState(
-                targetValue = progress,
-                animationSpec = ProgressIndicatorDefaults.ProgressAnimationSpec,
-                label = "SyncLinearProgressAnimation"
-            )
-            LinearProgressIndicator(
-                progress = { animatedProgress },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(4.dp)
-                    .clip(CircleShape),
-                color = M3_Primary,
-                trackColor = M3_SurfaceContainerHighest
-            )
-
-            Spacer(modifier = Modifier.height(8.dp))
         }
     }
 }

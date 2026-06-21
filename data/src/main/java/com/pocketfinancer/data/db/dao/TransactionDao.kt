@@ -38,4 +38,7 @@ interface TransactionDao {
 
     @Query("SELECT * FROM transactions WHERE id = :id")
     suspend fun getById(id: String): TransactionEntity?
+
+    @Query("SELECT EXISTS(SELECT 1 FROM transactions WHERE sender = :sender AND date = :date)")
+    suspend fun exists(sender: String, date: Long): Boolean
 }
