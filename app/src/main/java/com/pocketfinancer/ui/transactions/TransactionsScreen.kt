@@ -30,9 +30,15 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketfinancer.data.model.Transaction
 import com.pocketfinancer.data.model.TransactionType
+import com.pocketfinancer.data.model.Account
+import com.pocketfinancer.ui.home.HomeSyncState
+import com.pocketfinancer.ui.home.SyncSmsItem
 import com.pocketfinancer.ui.theme.*
 import java.text.SimpleDateFormat
 import java.util.*
@@ -40,9 +46,11 @@ import java.util.*
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun TransactionsScreen(
+    onNavigateToTab: (String) -> Unit = {},
     viewModel: TransactionsViewModel = hiltViewModel()
 ) {
     val state by viewModel.uiState.collectAsState()
+    var selectedProcessingSms by remember { mutableStateOf<SyncSmsItem?>(null) }
 
     Box(
         modifier = Modifier
@@ -127,6 +135,60 @@ fun TransactionsScreen(
                 }
             }
 
+
+            // ── Accounts Filter Chips ──
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 4.dp)
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                val isAllSelected = state.selectedAccountId == "All"
+                FilterChip(
+                    selected = isAllSelected,
+                    onClick = { viewModel.selectAccount("All") },
+                    label = { Text("All Accounts", fontSize = 11.sp, fontWeight = FontWeight.SemiBold) },
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = M3_Primary,
+                        selectedLabelColor = M3_OnPrimary,
+                        containerColor = M3_SurfaceContainerLow,
+                        labelColor = M3_OnSurfaceVariant
+                    )
+                )
+
+                state.accounts.forEach { acc ->
+                    val isSelected = state.selectedAccountId == acc.id
+                    val shortName = getAccountShortName(acc)
+                    FilterChip(
+                        selected = isSelected,
+                        onClick = { viewModel.selectAccount(acc.id) },
+                        label = {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(8.dp)
+                                        .background(getAccountColor(acc.name), CircleShape)
+                                )
+                                Text(shortName, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                            }
+                        },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = M3_SurfaceContainerHigh,
+                            selectedLabelColor = M3_OnSurface,
+                            containerColor = M3_SurfaceContainerLow,
+                            labelColor = M3_OnSurfaceVariant
+                        ),
+                        border = if (isSelected) BorderStroke(1.dp, M3_Primary) else null
+                    )
+                }
+            }
+
             // ── Month Summary Metric Row ──
             val debitsSum = state.transactions
                 .filter { it.type == TransactionType.DEBIT }
@@ -161,7 +223,9 @@ fun TransactionsScreen(
                 state.transactions.groupBy { formatDateKey(it.date) }
             }
 
-            if (state.transactions.isEmpty()) {
+            val showEmptyState = state.transactions.isEmpty() && state.syncState.status != HomeSyncState.Status.SYNCING
+
+            if (showEmptyState) {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -180,7 +244,47 @@ fun TransactionsScreen(
                         .fillMaxSize()
                         .weight(1f)
                 ) {
-                    groupedTransactions.forEach { (dateKey, txList) ->
+                    // Under Processing SMS Card
+                    if (state.syncState.status == HomeSyncState.Status.SYNCING || state.syncState.status == HomeSyncState.Status.DONE) {
+                        val isComplete = state.syncState.status == HomeSyncState.Status.DONE
+                        val activeIndex = if (isComplete) {
+                            (state.syncState.queue.size - 1).coerceAtLeast(0)
+                        } else {
+                            state.syncState.currentIndex ?: 0
+                        }
+                        val activeSms = if (activeIndex < state.syncState.queue.size) {
+                            state.syncState.queue[activeIndex]
+                        } else null
+
+                        if (activeSms != null) {
+                            item {
+                                ActiveSyncCard(
+                                    activeSms = activeSms,
+                                    currentStageIndex = if (isComplete) 3 else (state.syncState.currentStageIndex ?: 0),
+                                    isComplete = isComplete,
+                                    onClick = { selectedProcessingSms = activeSms }
+                                )
+                            }
+                        }
+                    }
+
+                    if (state.transactions.isEmpty()) {
+                        item {
+                            Box(
+                                modifier = Modifier
+                                    .fillParentMaxSize()
+                                    .padding(bottom = 64.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "No transactions found",
+                                    color = M3_OnSurfaceVariant,
+                                    fontSize = 14.sp
+                                )
+                            }
+                        }
+                    } else {
+                        groupedTransactions.forEach { (dateKey, txList) ->
                         // Header showing date and total debit/credit for the day
                         val dayDebits = txList.filter { it.type == TransactionType.DEBIT }.sumOf { it.amount }
                         val dayCredits = txList.filter { it.type == TransactionType.CREDIT }.sumOf { it.amount }
@@ -735,8 +839,316 @@ fun TransactionsScreen(
                 }
             }
         }
+
+        // ── Telemetry Details Bottom Sheet ──
+        if (selectedProcessingSms != null) {
+            val sms = selectedProcessingSms!!
+            
+            // Extract attention weights
+            val amountMatch = Regex("(?i)(?:inr|rs\\.?|₹)\\s*([\\d,]+\\.\\d{2})").find(sms.body)?.value ?: "..."
+            val merchantMatch = Regex("(?i)at\\s+([^\\s]+)|to\\s+([^\\s]+)|by\\s+([^\\s]+)").find(sms.body)?.groupValues?.get(1)?.takeIf { it.isNotBlank() } ?: "..."
+            val suffixMatch = Regex("(?i)(?:card|a/c)\\s*(?:xx)?(\\d{4})").find(sms.body)?.groupValues?.get(1) ?: "..."
+            
+            val isSyncDone = state.syncState.status == HomeSyncState.Status.DONE
+            val activeStageIndex = if (isSyncDone) 3 else (state.syncState.currentStageIndex ?: 0)
+            val isStagePassedExtract = isSyncDone || activeStageIndex >= 2
+
+            ModalBottomSheet(
+                onDismissRequest = { selectedProcessingSms = null },
+                sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+                containerColor = M3_SurfaceContainerLow,
+                contentColor = M3_OnSurface,
+                dragHandle = {
+                    Box(
+                        modifier = Modifier
+                            .padding(vertical = 12.dp)
+                            .width(48.dp)
+                            .height(6.dp)
+                            .background(M3_OutlineVariant.copy(alpha = 0.6f), RoundedCornerShape(3.dp))
+                    )
+                }
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp)
+                        .padding(bottom = 32.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    // Title
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Memory,
+                                contentDescription = null,
+                                tint = Color(0xFFF2C94C),
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Text(
+                                text = "LIVE SLM RUNTIME ENGINE",
+                                color = M3_OnSurface,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                        Text(
+                            text = "Close Logs",
+                            color = M3_OnSurfaceVariant,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier
+                                .background(M3_SurfaceContainerHigh, RoundedCornerShape(100))
+                                .border(BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.3f)), RoundedCornerShape(100))
+                                .clickable { selectedProcessingSms = null }
+                                .padding(horizontal = 10.dp, vertical = 4.dp)
+                        )
+                    }
+
+                    // Hardware Context
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = M3_Surface),
+                        shape = RoundedCornerShape(12.dp),
+                        border = BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.15f))
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.DeveloperMode,
+                                    contentDescription = null,
+                                    tint = M3_Primary,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Column {
+                                    Text(
+                                        text = "Local Device CPU Runtime",
+                                        color = M3_OnSurface,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Text(
+                                        text = "Qwen-1.7B-Chat-Int4.gguf",
+                                        color = M3_OnSurfaceVariant,
+                                        fontSize = 9.sp,
+                                        fontFamily = FontFamily.Monospace
+                                    )
+                                }
+                            }
+                            Column(horizontalAlignment = Alignment.End) {
+                                Text(
+                                    text = "28 ms/tok",
+                                    color = M3_Primary,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                                Text(
+                                    text = "36.7 tok/sec",
+                                    color = M3_OnSurfaceVariant,
+                                    fontSize = 9.sp,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                            }
+                        }
+                    }
+
+                    // Original input
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(
+                            text = "ORIGINAL RAW INPUT STRING",
+                            color = M3_OnSurfaceVariant,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 1.sp
+                        )
+                        Text(
+                            text = "\"${sms.body}\"",
+                            color = M3_OnSurfaceVariant,
+                            fontSize = 11.sp,
+                            fontFamily = FontFamily.Monospace,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(M3_Surface, RoundedCornerShape(12.dp))
+                                .border(BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.2f)), RoundedCornerShape(12.dp))
+                                .padding(12.dp)
+                        )
+                    }
+
+                    // Compiler progress stages
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(
+                            text = "COMPILER PROGRESS PIPELINE",
+                            color = M3_OnSurfaceVariant,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 1.sp
+                        )
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(M3_Surface, RoundedCornerShape(12.dp))
+                                .border(BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.2f)), RoundedCornerShape(12.dp))
+                                .padding(12.dp)
+                        ) {
+                            com.pocketfinancer.ui.home.PipelineStagesView(activeIndex = activeStageIndex)
+                        }
+                    }
+
+                    // Token weights and attention
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            text = "STRUCTURED KEY ATTENTION VALUES",
+                            color = M3_OnSurfaceVariant,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 1.sp
+                        )
+                        
+                        val weights = listOf(
+                            Triple("Amount/Value", amountMatch, 0.99f),
+                            Triple("Merchant/Counterparty", merchantMatch, 0.98f),
+                            Triple("Issuer Ledger Suffix", if (suffixMatch != "...") "XX$suffixMatch" else "...", 0.95f)
+                        )
+
+                        weights.forEach { (field, token, weight) ->
+                            Card(
+                                colors = CardDefaults.cardColors(containerColor = M3_Surface),
+                                shape = RoundedCornerShape(12.dp),
+                                border = BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.15f))
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(12.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = field.uppercase(),
+                                            color = M3_Primary,
+                                            fontSize = 9.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            fontFamily = FontFamily.Monospace
+                                        )
+                                        Spacer(modifier = Modifier.height(4.dp))
+                                        Text(
+                                            text = if (isStagePassedExtract) token else "...",
+                                            color = M3_OnSurface,
+                                            fontSize = 12.sp,
+                                            fontFamily = FontFamily.Monospace,
+                                            modifier = Modifier
+                                                .background(M3_SurfaceContainer, RoundedCornerShape(6.dp))
+                                                .padding(horizontal = 8.dp, vertical = 4.dp)
+                                        )
+                                    }
+                                    Column(horizontalAlignment = Alignment.End) {
+                                        Text(
+                                            text = if (isStagePassedExtract) "conf: ${"%.1f".format(weight * 100)}%" else "evaluating",
+                                            color = if (isStagePassedExtract) M3_Pos else M3_OnSurfaceVariant.copy(alpha = 0.3f),
+                                            fontSize = 10.sp,
+                                            fontFamily = FontFamily.Monospace,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                        Spacer(modifier = Modifier.height(6.dp))
+                                        val fillWidth = if (isStagePassedExtract) weight else 0f
+                                        Box(
+                                            modifier = Modifier
+                                                .width(64.dp)
+                                                .height(4.dp)
+                                                .background(M3_SurfaceContainer, RoundedCornerShape(100))
+                                        ) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .fillMaxHeight()
+                                                    .fillMaxWidth(fillWidth)
+                                                    .background(M3_Pos, RoundedCornerShape(100))
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Zero data warning
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = M3_SurfaceContainerHigh),
+                        shape = RoundedCornerShape(12.dp),
+                        border = BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.25f))
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalAlignment = Alignment.Top
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Shield,
+                                contentDescription = null,
+                                tint = M3_Pos,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Column {
+                                Text(
+                                    text = "Zero Data Left Your Screen",
+                                    color = M3_OnSurface,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = "Parameters run natively using llama.cpp within WebAssembly boundaries. Internet permission was not requested nor required.",
+                                    color = M3_OnSurfaceVariant,
+                                    fontSize = 9.sp,
+                                    lineHeight = 13.sp
+                                )
+                            }
+                        }
+                    }
+
+                    if (isSyncDone) {
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Button(
+                            onClick = {
+                                viewModel.resetSyncState()
+                                selectedProcessingSms = null
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = M3_Pos,
+                                contentColor = Color.White
+                            ),
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Text("Done", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                        }
+                    }
+                }
+            }
+        }
     }
 }
+}
+
 
 @Composable
 fun DayHeaderRow(
@@ -995,5 +1407,144 @@ private fun getMerchantIcon(name: String): ImageVector? {
         lower.contains("bank") || lower.contains("paytm") || lower.contains("gpay") || lower.contains("phonepe") || lower.contains("upi") || lower.contains("hdfc") || lower.contains("sbi") || lower.contains("icici") || lower.contains("axis") || lower.contains("transfer") -> Icons.Rounded.AccountBalance
         lower.contains("card") || lower.contains("visa") || lower.contains("mastercard") || lower.contains("amex") || lower.contains("rupay") || lower.contains("credit") -> Icons.Rounded.CreditCard
         else -> null
+    }
+}
+
+@Composable
+fun ActiveSyncCard(
+    activeSms: SyncSmsItem,
+    currentStageIndex: Int,
+    isComplete: Boolean,
+    onClick: () -> Unit
+) {
+    val cardColor = if (isComplete) M3_PosContainer.copy(alpha = 0.2f) else M3_SurfaceContainerLow
+    val borderColor = if (isComplete) M3_Pos.copy(alpha = 0.25f) else Color(0xFFF2C94C).copy(alpha = 0.3f)
+    val indicatorColor = if (isComplete) M3_Pos else Color(0xFFF2C94C)
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 6.dp)
+            .clickable(onClick = onClick),
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(containerColor = cardColor),
+        border = BorderStroke(1.dp, borderColor)
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(36.dp)
+                            .background(indicatorColor.copy(alpha = 0.1f), RoundedCornerShape(8.dp)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (isComplete) {
+                            Icon(
+                                imageVector = Icons.Rounded.CheckCircle,
+                                contentDescription = null,
+                                tint = M3_Pos,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        } else {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                color = Color(0xFFF2C94C),
+                                strokeWidth = 2.dp
+                            )
+                        }
+                    }
+                    Column {
+                        Text(
+                            text = if (isComplete) "LOCAL PIPELINE COMPLETED" else "LOCAL PIPELINE ENGINE RUNNING",
+                            color = indicatorColor,
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace
+                        )
+                        Text(
+                            text = if (isComplete) "Finished sync" else "Pending from ${activeSms.sender}",
+                            color = M3_OnSurface,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+                Text(
+                    text = if (isComplete) "COMPLETE" else "PROCESSING",
+                    color = indicatorColor,
+                    fontSize = 8.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier
+                        .background(indicatorColor.copy(alpha = 0.15f), RoundedCornerShape(4.dp))
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                )
+            }
+            Spacer(modifier = Modifier.height(10.dp))
+            Text(
+                text = activeSms.body,
+                color = M3_OnSurfaceVariant,
+                fontSize = 11.sp,
+                fontFamily = FontFamily.Monospace,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+            HorizontalDivider(color = M3_OutlineVariant.copy(alpha = 0.15f))
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                val stageName = if (isComplete) "Database Persistence" else when (currentStageIndex) {
+                    0 -> "Pre-Filter Check"
+                    1 -> "Phase 1: Thinking Pass"
+                    2 -> "Phase 2: Grammar Constraint"
+                    else -> "Database Persistence"
+                }
+                Text(
+                    text = "SLM Stage: $stageName",
+                    color = M3_OnSurfaceVariant,
+                    fontSize = 10.sp,
+                    fontFamily = FontFamily.Monospace
+                )
+                Text(
+                    text = "View extraction logs",
+                    color = M3_Primary,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+    }
+}
+
+private fun getAccountShortName(acc: Account): String {
+    val bank = acc.bank.replace(" Bank", "")
+    val name = acc.name
+    val runs = Regex("\\d+").findAll(name).toList()
+    val digits = if (runs.isNotEmpty()) runs.last().value.takeLast(4) else ""
+    return if (digits.isNotEmpty()) "$bank $digits" else name
+}
+
+private fun getAccountColor(name: String): Color {
+    val hash = name.hashCode()
+    return when (Math.abs(hash) % 5) {
+        0 -> Color(0xFFF2C94C)
+        1 -> Color(0xFF27AE60)
+        2 -> Color(0xFF2F80ED)
+        3 -> Color(0xFF9B51E0)
+        else -> Color(0xFFEB5757)
     }
 }

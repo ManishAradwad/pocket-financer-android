@@ -49,6 +49,7 @@ class SmsParserWorker(
         fun pipelineService(): PipelineService
         fun smsRepository(): SmsRepository
         fun transactionRepository(): TransactionRepository
+        fun homeSyncDelegate(): HomeSyncDelegate
     }
 
     override suspend fun doWork(): Result {
@@ -59,13 +60,6 @@ class SmsParserWorker(
 
         val prefs = applicationContext.getSharedPreferences(".app_settings", Context.MODE_PRIVATE)
         val processIncoming = prefs.getBoolean("process_incoming_sms", true)
-        if (!processIncoming) {
-            Log.i("SmsParserWorker", "Background SMS processing is disabled in settings. Skipping.")
-            return Result.success()
-        }
-
-        val sms = SmsReader.SmsMessage(address, body, date, type)
-        Log.i("SmsParserWorker", "Starting background SMS processing for sender: $address")
 
         // Retrieve dependencies from Hilt Application EntryPoint
         val entryPoint = EntryPointAccessors.fromApplication(
@@ -73,6 +67,32 @@ class SmsParserWorker(
             ParserWorkerEntryPoint::class.java
         )
         val smsFilterPipeline = entryPoint.smsFilterPipeline()
+        val homeSyncDelegate = entryPoint.homeSyncDelegate()
+
+        val isForeground = homeSyncDelegate.isAppInForeground()
+
+        if (!processIncoming) {
+            Log.i("SmsParserWorker", "Background SMS processing is disabled in settings. Skipping background inference.")
+            if (isForeground) {
+                // If app is in foreground, queue it so the user sees the unsynced banner immediately
+                Log.i("SmsParserWorker", "App is in foreground. Queuing message in HomeSyncManager as pending.")
+                homeSyncDelegate.queueIncomingSms(address, body, date)
+            }
+            return Result.success()
+        }
+
+        if (isForeground) {
+            Log.i("SmsParserWorker", "App is in foreground. Routing SMS sync through HomeSyncManager foreground service.")
+            val queued = homeSyncDelegate.queueIncomingSms(address, body, date)
+            if (queued) {
+                homeSyncDelegate.startSyncService()
+            }
+            return Result.success()
+        }
+
+        val sms = SmsReader.SmsMessage(address, body, date, type)
+        Log.i("SmsParserWorker", "Starting background SMS processing for sender: $address")
+
         val llamaEngine = entryPoint.llamaEngine()
         val deviceCapabilities = entryPoint.deviceCapabilities()
         val pipelineService = entryPoint.pipelineService()

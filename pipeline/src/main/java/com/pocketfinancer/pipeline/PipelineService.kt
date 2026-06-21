@@ -191,7 +191,8 @@ class PipelineService @Inject constructor(
 
                 // 4. Resolve account
                 val account = if (parsed.account != null) {
-                    accountRepository.getOrCreate(parsed.account, "Unknown Bank", "auto-extracted")
+                    val inferredBank = inferBankFromSender(sms.address)
+                    accountRepository.getOrCreate(parsed.account, inferredBank, "auto-extracted")
                 } else {
                     accountRepository.ensureDefault()
                 }
@@ -212,6 +213,18 @@ class PipelineService @Inject constructor(
                 emit(Stage.SAVED, "Transaction saved: ₹${parsed.amount} ${parsed.type.name}")
                 parsed
             }
+        }
+    }
+
+    private fun inferBankFromSender(sender: String): String {
+        val upper = sender.uppercase()
+        return when {
+            upper.contains("HDFC") -> "HDFC Bank"
+            upper.contains("AXIS") -> "Axis Bank"
+            upper.contains("ICICI") -> "ICICI Bank"
+            upper.contains("SBI") -> "State Bank of India"
+            upper.contains("KOTAK") -> "Kotak Bank"
+            else -> "Unknown Bank"
         }
     }
 

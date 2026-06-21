@@ -7,6 +7,8 @@ import com.pocketfinancer.data.model.TransactionType
 import com.pocketfinancer.data.model.Account
 import com.pocketfinancer.data.repository.TransactionRepository
 import com.pocketfinancer.data.repository.AccountRepository
+import com.pocketfinancer.ui.home.HomeSyncManager
+import com.pocketfinancer.ui.home.HomeSyncState
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -21,13 +23,16 @@ data class TransactionsUiState(
     val transactions: List<Transaction> = emptyList(),
     val activeSegment: String = "All",
     val selectedTransaction: Transaction? = null,
-    val accounts: List<Account> = emptyList()
+    val accounts: List<Account> = emptyList(),
+    val selectedAccountId: String = "All",
+    val syncState: HomeSyncState = HomeSyncState()
 )
 
 @HiltViewModel
 class TransactionsViewModel @Inject constructor(
     private val transactionRepository: TransactionRepository,
-    private val accountRepository: AccountRepository
+    private val accountRepository: AccountRepository,
+    private val syncManager: HomeSyncManager
 ) : ViewModel() {
 
     private val _activeSegment = MutableStateFlow("All")
@@ -36,22 +41,42 @@ class TransactionsViewModel @Inject constructor(
     private val _selectedTransaction = MutableStateFlow<Transaction?>(null)
     val selectedTransaction: StateFlow<Transaction?> = _selectedTransaction.asStateFlow()
 
+    private val _selectedAccountId = MutableStateFlow("All")
+    val selectedAccountId: StateFlow<String> = _selectedAccountId.asStateFlow()
+
     val uiState: StateFlow<TransactionsUiState> = combine(
         transactionRepository.getAllByDateDesc(),
         _activeSegment,
         _selectedTransaction,
-        accountRepository.getAll()
-    ) { txs, segment, selected, accountsList ->
-        val filtered = when (segment) {
+        accountRepository.getAll(),
+        _selectedAccountId,
+        syncManager.syncState
+    ) { flowsArray ->
+        val txs = flowsArray[0] as List<Transaction>
+        val segment = flowsArray[1] as String
+        val selected = flowsArray[2] as Transaction?
+        val accountsList = flowsArray[3] as List<Account>
+        val selectedAccId = flowsArray[4] as String
+        val syncState = flowsArray[5] as HomeSyncState
+
+        val filteredBySegment = when (segment) {
             "Debits" -> txs.filter { it.type == TransactionType.DEBIT }
             "Credits" -> txs.filter { it.type == TransactionType.CREDIT }
             else -> txs
         }
+        val filtered = if (selectedAccId == "All") {
+            filteredBySegment
+        } else {
+            filteredBySegment.filter { it.accountId == selectedAccId }
+        }
+
         TransactionsUiState(
             transactions = filtered,
             activeSegment = segment,
             selectedTransaction = selected,
-            accounts = accountsList
+            accounts = accountsList,
+            selectedAccountId = selectedAccId,
+            syncState = syncState
         )
     }
     .stateIn(
@@ -66,6 +91,14 @@ class TransactionsViewModel @Inject constructor(
 
     fun selectTransaction(transaction: Transaction?) {
         _selectedTransaction.value = transaction
+    }
+
+    fun selectAccount(accountId: String) {
+        _selectedAccountId.value = accountId
+    }
+
+    fun resetSyncState() {
+        syncManager.resetState()
     }
 
     fun updateTransaction(

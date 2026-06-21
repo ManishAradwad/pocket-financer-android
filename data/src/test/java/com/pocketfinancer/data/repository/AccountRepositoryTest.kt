@@ -29,7 +29,7 @@ class AccountRepositoryTest {
         db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java)
             .allowMainThreadQueries()
             .build()
-        repo = AccountRepository(db.accountDao())
+        repo = AccountRepository(db.accountDao(), db.transactionDao())
     }
 
     @After
@@ -41,7 +41,7 @@ class AccountRepositoryTest {
     fun `getOrCreate should create new account when not found`() {
         runBlocking {
             val account = repo.getOrCreate("A/c XX6254", "HDFC Bank", "auto-extracted")
-            assertEquals("A/c XX6254", account.name)
+            assertEquals("HDFC Bank A/c XX6254", account.name)
             assertEquals("HDFC Bank", account.bank)
             assertNotNull(account.id)
         }
@@ -95,6 +95,42 @@ class AccountRepositoryTest {
     }
 
     @Test
+    fun `consolidateAccounts should merge duplicate accounts and update transaction references`() {
+        runBlocking {
+            val acc1 = com.pocketfinancer.data.db.entity.AccountEntity("id1", "Unknown Bank A/c XX9141", "Unknown Bank", "auto-extracted")
+            val acc2 = com.pocketfinancer.data.db.entity.AccountEntity("id2", "A/C **9141", "Unknown Bank", "auto-extracted")
+            val acc3 = com.pocketfinancer.data.db.entity.AccountEntity("id3", "HDFC Bank A/c XX9141", "HDFC Bank", "auto-extracted")
+            
+            db.accountDao().insert(acc1)
+            db.accountDao().insert(acc2)
+            db.accountDao().insert(acc3)
+
+            val tx1 = com.pocketfinancer.data.db.entity.TransactionEntity("tx1", 100.0, "M1", 1000L, "DEBIT", "id1", "raw1", "sender1", false)
+            val tx2 = com.pocketfinancer.data.db.entity.TransactionEntity("tx2", 200.0, "M2", 2000L, "DEBIT", "id2", "raw2", "sender2", false)
+            val tx3 = com.pocketfinancer.data.db.entity.TransactionEntity("tx3", 300.0, "M3", 3000L, "DEBIT", "id3", "raw3", "sender3", false)
+
+            db.transactionDao().insert(tx1)
+            db.transactionDao().insert(tx2)
+            db.transactionDao().insert(tx3)
+
+            repo.consolidateAccounts()
+
+            val allAccs = repo.getAll().first()
+            assertEquals(1, allAccs.size)
+            assertEquals("id3", allAccs[0].id)
+            assertEquals("HDFC Bank A/c XX9141", allAccs[0].name)
+
+            val tx1Updated = db.transactionDao().getById("tx1")
+            val tx2Updated = db.transactionDao().getById("tx2")
+            val tx3Updated = db.transactionDao().getById("tx3")
+
+            assertEquals("id3", tx1Updated?.accountId)
+            assertEquals("id3", tx2Updated?.accountId)
+            assertEquals("id3", tx3Updated?.accountId)
+        }
+    }
+
+    @Test
     fun `getById should return null for missing account`() {
         runBlocking {
             val result = repo.getById("nonexistent")
@@ -116,7 +152,7 @@ class TransactionRepositoryTest {
         db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java)
             .allowMainThreadQueries()
             .build()
-        mockAccountRepo = AccountRepository(db.accountDao())
+        mockAccountRepo = AccountRepository(db.accountDao(), db.transactionDao())
         repo = TransactionRepository(db, db.transactionDao(), mockAccountRepo)
     }
 

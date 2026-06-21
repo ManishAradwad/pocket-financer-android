@@ -21,6 +21,12 @@ interface AccountDao {
     @Query("SELECT * FROM accounts WHERE name = :name LIMIT 1")
     suspend fun findByName(name: String): AccountEntity?
 
+    @Query("SELECT * FROM accounts")
+    suspend fun getAllOnce(): List<AccountEntity>
+
     @Query("SELECT * FROM accounts WHERE id = :id")
     suspend fun getById(id: String): AccountEntity?
+
+    @Query("DELETE FROM accounts WHERE id = :id")
+    suspend fun delete(id: String)
 }

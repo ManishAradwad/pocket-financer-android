@@ -26,6 +26,7 @@ import com.pocketfinancer.ui.navigation.Screen
 import com.pocketfinancer.ui.settings.SettingsScreen
 import com.pocketfinancer.ui.transactions.TransactionsScreen
 import com.pocketfinancer.ui.onboarding.OnboardingScreen
+import com.pocketfinancer.ui.home.HomeScreen
 import com.pocketfinancer.ui.theme.M3_OnSecondaryContainer
 import com.pocketfinancer.ui.theme.M3_OnSurface
 import com.pocketfinancer.ui.theme.M3_OnSurfaceVariant
@@ -104,8 +105,37 @@ fun PocketFinancerRoot() {
                     startDestination = Screen.Home.route,
                     modifier = Modifier.padding(innerPadding)
                 ) {
-                    composable(Screen.Home.route) { PlaceholderScreen("Home Dashboard") }
-                    composable(Screen.Transactions.route) { TransactionsScreen() }
+                    composable(Screen.Home.route) {
+                        HomeScreen(
+                            onNavigateToTab = { tab ->
+                                when (tab.lowercase()) {
+                                    "transactions" -> navController.navigate(Screen.Transactions.route) {
+                                        popUpTo(navController.graph.findStartDestination().id) {
+                                            saveState = true
+                                        }
+                                        launchSingleTop = true
+                                        restoreState = true
+                                    }
+                                    "settings" -> navController.navigate(Screen.Settings.route) {
+                                        popUpTo(navController.graph.findStartDestination().id) {
+                                            saveState = true
+                                        }
+                                        launchSingleTop = true
+                                        restoreState = true
+                                    }
+                                }
+                            }
+                        )
+                    }
+                    composable(Screen.Transactions.route) { TransactionsScreen(onNavigateToTab = { tab ->
+                        if (tab.lowercase() == "settings") {
+                            navController.navigate(Screen.Settings.route) {
+                                popUpTo(navController.graph.findStartDestination().id) { saveState = true }
+                                launchSingleTop = true
+                                restoreState = true
+                            }
+                        }
+                    }) }
                     composable(Screen.Insights.route) { PlaceholderScreen("Insights") }
                     composable(Screen.Settings.route) { SettingsScreen() }
                 }

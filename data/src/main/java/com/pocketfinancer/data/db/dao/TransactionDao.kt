@@ -41,4 +41,7 @@ interface TransactionDao {
 
     @Query("SELECT EXISTS(SELECT 1 FROM transactions WHERE sender = :sender AND date = :date)")
     suspend fun exists(sender: String, date: Long): Boolean
+
+    @Query("UPDATE transactions SET accountId = :newAccountId WHERE accountId = :oldAccountId")
+    suspend fun updateTransactionsAccount(oldAccountId: String, newAccountId: String)
 }

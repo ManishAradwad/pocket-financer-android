@@ -21,6 +21,11 @@
             android:foregroundServiceType="dataSync"
             android:exported="false" />
 
+        <service
+            android:name=".ui.home.SyncService"
+            android:foregroundServiceType="dataSync"
+            android:exported="false" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true"
