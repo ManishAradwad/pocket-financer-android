@@ -41,7 +41,8 @@ data class HomeSyncState(
     val currentStageIndex: Int? = null,
     val thinkingOutput: String = "",
     val jsonOutput: String = "",
-    val activeSmsPerformance: String? = null
+    val activeSmsPerformance: String? = null,
+    val hasThinkingMode: Boolean = false
 ) {
     enum class Status {
         IDLE, SYNCING, DONE
@@ -97,7 +98,8 @@ class HomeSyncManager @Inject constructor(
                 status = HomeSyncState.Status.IDLE,
                 queue = mergedQueue,
                 currentIndex = null,
-                currentStageIndex = null
+                currentStageIndex = null,
+                hasThinkingMode = llamaEngine.hasThinkingMode
             )
         } catch (e: Exception) {
             Log.e(TAG, "Failed checking for unsynced SMS", e)
@@ -123,7 +125,8 @@ class HomeSyncManager @Inject constructor(
             currentStageIndex = 0,
             thinkingOutput = "",
             jsonOutput = "",
-            activeSmsPerformance = null
+            activeSmsPerformance = null,
+            hasThinkingMode = llamaEngine.hasThinkingMode
         )
 
         var loadedModelHere = false
@@ -154,6 +157,9 @@ class HomeSyncManager @Inject constructor(
                     throw Exception("Failed to load model: ${loadResult.exceptionOrNull()?.message}")
                 }
                 loadedModelHere = true
+                _syncState.value = _syncState.value.copy(
+                    hasThinkingMode = llamaEngine.hasThinkingMode
+                )
             }
 
             val grammar = llamaEngine.readAsset("sms_extraction.gbnf")
@@ -196,8 +202,13 @@ class HomeSyncManager @Inject constructor(
                 }
 
                 try {
-                    // Update stage to Phase 1: Thinking Pass
-                    _syncState.value = _syncState.value.copy(currentStageIndex = 1)
+                    // Update stage:
+                    // If model has thinking mode: update to stage 1 (Thinking Pass)
+                    // If model has NO thinking mode: update to stage 2 (Grammar Constraint)
+                    val hasThinking = _syncState.value.hasThinkingMode
+                    _syncState.value = _syncState.value.copy(
+                        currentStageIndex = if (hasThinking) 1 else 2
+                    )
 
                     val rawPrompt = promptBuilder.buildExtractionPrompt(activeItem.sender, activeItem.body)
                     
@@ -245,6 +256,9 @@ class HomeSyncManager @Inject constructor(
 
                             if (parsed != null) {
                                 val inferredBank = inferBankFromSender(processedItem.sender)
+                                val merchantName = parsed.counterparty?.takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
+                                    ?: if (inferredBank != "Unknown Bank") "Transaction ($inferredBank)" else "Unknown Merchant"
+
                                 val parsedAcc = parsed.account
                                 val account = if (parsedAcc != null) {
                                     accountRepository.getOrCreate(parsedAcc, inferredBank, "auto-extracted")
@@ -255,7 +269,7 @@ class HomeSyncManager @Inject constructor(
                                 transactionRepository.insert(
                                     TransactionRepository.NewTransaction(
                                         amount = parsed.amount,
-                                        merchant = parsed.counterparty ?: "Unknown Merchant",
+                                        merchant = merchantName,
                                         date = processedItem.date,
                                         type = parsed.type,
                                         accountId = account.id,
@@ -266,7 +280,7 @@ class HomeSyncManager @Inject constructor(
 
                                 processedItem.status = "synced"
                                 processedItem.parsedAmount = parsed.amount
-                                processedItem.parsedMerchant = parsed.counterparty ?: "Unknown Merchant"
+                                processedItem.parsedMerchant = merchantName
                             } else {
                                 processedItem.status = "filtered_out" // Skipped by non-null filter/post-processor
                             }
@@ -322,10 +336,7 @@ class HomeSyncManager @Inject constructor(
      * Appends an incoming SMS to the queue if it's transactional and not already present.
      */
     suspend fun queueIncomingSms(address: String, body: String, date: Long): Boolean = withContext(Dispatchers.IO) {
-        if (!smsFilterPipeline.isTransactional(address, body)) {
-            Log.i(TAG, "Incoming SMS from $address is non-transactional. Skipping.")
-            return@withContext false
-        }
+        val isTxn = smsFilterPipeline.isTransactional(address, body)
 
         if (transactionRepository.exists(address, date)) {
             Log.i(TAG, "Transaction for incoming SMS from $address at $date already exists in DB. Skipping.")
@@ -343,11 +354,11 @@ class HomeSyncManager @Inject constructor(
             sender = address,
             body = body,
             date = date,
-            status = "pending"
+            status = if (isTxn) "pending" else "filtered_out"
         )
         currentQueue.add(newItem)
         _syncState.value = _syncState.value.copy(queue = currentQueue)
-        return@withContext true
+        return@withContext isTxn
     }
 
     private fun inferBankFromSender(sender: String): String {

@@ -10,6 +10,10 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import com.pocketfinancer.pipeline.SmsFilterPipeline
+import com.pocketfinancer.pipeline.PromptBuilder
+import com.pocketfinancer.pipeline.ExtractionParser
+import com.pocketfinancer.inference.LlamaEngine
 import java.util.Calendar
 import javax.inject.Inject
 
@@ -31,7 +35,11 @@ data class HomeUiState(
 class HomeViewModel @Inject constructor(
     @ApplicationContext private val context: Context,
     private val transactionRepository: TransactionRepository,
-    private val syncManager: HomeSyncManager
+    private val syncManager: HomeSyncManager,
+    private val smsFilterPipeline: SmsFilterPipeline,
+    private val promptBuilder: PromptBuilder,
+    private val llamaEngine: LlamaEngine,
+    private val extractionParser: ExtractionParser
 ) : ViewModel() {
 
     private val _selectedPeriod = MutableStateFlow("Day")
@@ -65,6 +73,13 @@ class HomeViewModel @Inject constructor(
     fun checkForUnsynced() {
         viewModelScope.launch {
             syncManager.checkForUnsyncedSms()
+            val pendingCount = syncManager.syncState.value.queue.count { it.status == "pending" }
+            val toastMsg = if (pendingCount > 0) {
+                "Scan complete: Found $pendingCount unsynced transactional messages."
+            } else {
+                "Scan complete: Up to date. No new transactional messages found."
+            }
+            android.widget.Toast.makeText(context, toastMsg, android.widget.Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -170,5 +185,58 @@ class HomeViewModel @Inject constructor(
                 recent = thisMonthDebits.take(5)
             )
         )
+    }
+
+    fun getFilterLogs(sender: String, body: String): List<String> {
+        return smsFilterPipeline.filterWithDetails(sender, body).logs
+    }
+
+    fun getKvCacheLogs(sender: String, body: String): List<String> {
+        val staticPrefix = promptBuilder.getStaticPrefix()
+        val rawPrompt = promptBuilder.buildExtractionPrompt(sender, body)
+        val hasThinking = llamaEngine.hasThinkingMode
+        val chatPrompt = promptBuilder.buildChatPrompt(rawPrompt, enableThinking = hasThinking)
+        val splitIndex = chatPrompt.indexOf(staticPrefix)
+        val cacheLogs = mutableListOf<String>()
+        if (splitIndex != -1) {
+            val prefixString = chatPrompt.substring(0, splitIndex + staticPrefix.length)
+            val prefixHash = llamaEngine.computeSha256(prefixString)
+            val sessionFile = llamaEngine.getSessionFile(prefixHash)
+            val prefixTokens = llamaEngine.tokenize(prefixString, addSpecial = true)
+            if (prefixTokens != null) {
+                cacheLogs.add("Prefix Size: ${prefixTokens.size} tokens")
+                cacheLogs.add("Prefix Hash: ${prefixHash.take(12)}...")
+                if (sessionFile.exists()) {
+                    cacheLogs.add("Session cache file found: ${sessionFile.name}")
+                    cacheLogs.add("Reusing existing KV Cache (Skipped heavy prefill phase!).")
+                } else {
+                    cacheLogs.add("Session cache file not found. Generating new session cache...")
+                }
+            } else {
+                cacheLogs.add("Prefix Hash: ${prefixHash.take(12)}...")
+                if (sessionFile.exists()) {
+                    cacheLogs.add("Session cache file found: ${sessionFile.name}")
+                    cacheLogs.add("Reusing existing KV Cache.")
+                } else {
+                    cacheLogs.add("Session cache file not found. Prefix tokenization bypassed.")
+                }
+            }
+        } else {
+            cacheLogs.add("No static prefix matched in chat prompt.")
+        }
+        return cacheLogs
+    }
+
+    fun getSlmPrompt(sender: String, body: String): String {
+        val rawPrompt = promptBuilder.buildExtractionPrompt(sender, body)
+        val hasThinking = llamaEngine.hasThinkingMode
+        return promptBuilder.buildChatPrompt(rawPrompt, enableThinking = hasThinking)
+    }
+
+    fun getParsedOutput(jsonStr: String): String {
+        val parsed = extractionParser.parse(jsonStr)
+        return parsed?.let {
+            "amount=${it.amount}, type=${it.type.name.lowercase()}, counterparty=${it.counterparty ?: "-"}, account=${it.account ?: "-"}"
+        } ?: "Parsed: null (non-financial)"
     }
 }

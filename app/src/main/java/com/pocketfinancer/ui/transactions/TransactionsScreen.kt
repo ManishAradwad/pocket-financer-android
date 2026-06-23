@@ -260,7 +260,7 @@ fun TransactionsScreen(
                             item {
                                 ActiveSyncCard(
                                     activeSms = activeSms,
-                                    currentStageIndex = if (isComplete) 3 else (state.syncState.currentStageIndex ?: 0),
+                                    currentStageIndex = if (isComplete) 4 else (state.syncState.currentStageIndex ?: 0),
                                     isComplete = isComplete,
                                     onClick = { selectedProcessingSms = activeSms }
                                 )
@@ -844,14 +844,59 @@ fun TransactionsScreen(
         if (selectedProcessingSms != null) {
             val sms = selectedProcessingSms!!
             
-            // Extract attention weights
-            val amountMatch = Regex("(?i)(?:inr|rs\\.?|₹)\\s*([\\d,]+\\.\\d{2})").find(sms.body)?.value ?: "..."
-            val merchantMatch = Regex("(?i)at\\s+([^\\s]+)|to\\s+([^\\s]+)|by\\s+([^\\s]+)").find(sms.body)?.groupValues?.get(1)?.takeIf { it.isNotBlank() } ?: "..."
-            val suffixMatch = Regex("(?i)(?:card|a/c)\\s*(?:xx)?(\\d{4})").find(sms.body)?.groupValues?.get(1) ?: "..."
-            
-            val isSyncDone = state.syncState.status == HomeSyncState.Status.DONE
-            val activeStageIndex = if (isSyncDone) 3 else (state.syncState.currentStageIndex ?: 0)
-            val isStagePassedExtract = isSyncDone || activeStageIndex >= 2
+            val currentIndex = state.syncState.currentIndex
+            val isActive = state.syncState.status == HomeSyncState.Status.SYNCING &&
+                    currentIndex != null &&
+                    currentIndex < state.syncState.queue.size &&
+                    state.syncState.queue[currentIndex].id == sms.id
+
+            val activeStageIndex = if (isActive) {
+                state.syncState.currentStageIndex ?: 0
+            } else if (sms.status == "synced" || sms.status == "filtered_out") {
+                4
+            } else {
+                0
+            }
+
+            val finalThinkingOutput = if (isActive) {
+                state.syncState.thinkingOutput
+            } else {
+                ""
+            }
+
+            val finalJsonOutput = if (isActive) {
+                state.syncState.jsonOutput
+            } else if (sms.status == "synced") {
+                """{
+  "amount": ${sms.parsedAmount ?: 0.0},
+  "counterparty": "${sms.parsedMerchant ?: "null"}",
+  "type": "debit",
+  "account": "card"
+}"""
+            } else if (sms.status == "filtered_out") {
+                "null"
+            } else {
+                ""
+            }
+
+            val finalParsedOutput = if (isActive) {
+                if (state.syncState.jsonOutput.isNotEmpty()) {
+                    val parsed = viewModel.getParsedOutput(state.syncState.jsonOutput)
+                    if (parsed == "Parsed: null (non-financial)" && activeStageIndex < 3) {
+                        "Waiting for complete JSON..."
+                    } else {
+                        parsed
+                    }
+                } else {
+                    ""
+                }
+            } else if (sms.status == "synced") {
+                "amount=${sms.parsedAmount ?: 0.0}, type=debit, counterparty=${sms.parsedMerchant ?: "-"}, account=card"
+            } else if (sms.status == "filtered_out") {
+                "Parsed: null (non-financial)"
+            } else {
+                ""
+            }
 
             ModalBottomSheet(
                 onDismissRequest = { selectedProcessingSms = null },
@@ -868,281 +913,31 @@ fun TransactionsScreen(
                     )
                 }
             ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 20.dp)
-                        .padding(bottom = 32.dp)
-                        .verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(16.dp)
-                ) {
-                    // Title
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.Memory,
-                                contentDescription = null,
-                                tint = Color(0xFFF2C94C),
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Text(
-                                text = "LIVE SLM RUNTIME ENGINE",
-                                color = M3_OnSurface,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold,
-                                fontFamily = FontFamily.Monospace
-                            )
-                        }
-                        Text(
-                            text = "Close Logs",
-                            color = M3_OnSurfaceVariant,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier
-                                .background(M3_SurfaceContainerHigh, RoundedCornerShape(100))
-                                .border(BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.3f)), RoundedCornerShape(100))
-                                .clickable { selectedProcessingSms = null }
-                                .padding(horizontal = 10.dp, vertical = 4.dp)
-                        )
-                    }
-
-                    // Hardware Context
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = M3_Surface),
-                        shape = RoundedCornerShape(12.dp),
-                        border = BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.15f))
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(12.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.DeveloperMode,
-                                    contentDescription = null,
-                                    tint = M3_Primary,
-                                    modifier = Modifier.size(20.dp)
-                                )
-                                Column {
-                                    Text(
-                                        text = "Local Device CPU Runtime",
-                                        color = M3_OnSurface,
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                    Text(
-                                        text = "Qwen-1.7B-Chat-Int4.gguf",
-                                        color = M3_OnSurfaceVariant,
-                                        fontSize = 9.sp,
-                                        fontFamily = FontFamily.Monospace
-                                    )
-                                }
-                            }
-                            Column(horizontalAlignment = Alignment.End) {
-                                Text(
-                                    text = "28 ms/tok",
-                                    color = M3_Primary,
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    fontFamily = FontFamily.Monospace
-                                )
-                                Text(
-                                    text = "36.7 tok/sec",
-                                    color = M3_OnSurfaceVariant,
-                                    fontSize = 9.sp,
-                                    fontFamily = FontFamily.Monospace
-                                )
-                            }
-                        }
-                    }
-
-                    // Original input
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text(
-                            text = "ORIGINAL RAW INPUT STRING",
-                            color = M3_OnSurfaceVariant,
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Bold,
-                            letterSpacing = 1.sp
-                        )
-                        Text(
-                            text = "\"${sms.body}\"",
-                            color = M3_OnSurfaceVariant,
-                            fontSize = 11.sp,
-                            fontFamily = FontFamily.Monospace,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(M3_Surface, RoundedCornerShape(12.dp))
-                                .border(BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.2f)), RoundedCornerShape(12.dp))
-                                .padding(12.dp)
-                        )
-                    }
-
-                    // Compiler progress stages
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text(
-                            text = "COMPILER PROGRESS PIPELINE",
-                            color = M3_OnSurfaceVariant,
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Bold,
-                            letterSpacing = 1.sp
-                        )
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(M3_Surface, RoundedCornerShape(12.dp))
-                                .border(BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.2f)), RoundedCornerShape(12.dp))
-                                .padding(12.dp)
-                        ) {
-                            com.pocketfinancer.ui.home.PipelineStagesView(activeIndex = activeStageIndex)
-                        }
-                    }
-
-                    // Token weights and attention
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text(
-                            text = "STRUCTURED KEY ATTENTION VALUES",
-                            color = M3_OnSurfaceVariant,
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Bold,
-                            letterSpacing = 1.sp
-                        )
-                        
-                        val weights = listOf(
-                            Triple("Amount/Value", amountMatch, 0.99f),
-                            Triple("Merchant/Counterparty", merchantMatch, 0.98f),
-                            Triple("Issuer Ledger Suffix", if (suffixMatch != "...") "XX$suffixMatch" else "...", 0.95f)
-                        )
-
-                        weights.forEach { (field, token, weight) ->
-                            Card(
-                                colors = CardDefaults.cardColors(containerColor = M3_Surface),
-                                shape = RoundedCornerShape(12.dp),
-                                border = BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.15f))
-                            ) {
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(12.dp),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(
-                                            text = field.uppercase(),
-                                            color = M3_Primary,
-                                            fontSize = 9.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            fontFamily = FontFamily.Monospace
-                                        )
-                                        Spacer(modifier = Modifier.height(4.dp))
-                                        Text(
-                                            text = if (isStagePassedExtract) token else "...",
-                                            color = M3_OnSurface,
-                                            fontSize = 12.sp,
-                                            fontFamily = FontFamily.Monospace,
-                                            modifier = Modifier
-                                                .background(M3_SurfaceContainer, RoundedCornerShape(6.dp))
-                                                .padding(horizontal = 8.dp, vertical = 4.dp)
-                                        )
-                                    }
-                                    Column(horizontalAlignment = Alignment.End) {
-                                        Text(
-                                            text = if (isStagePassedExtract) "conf: ${"%.1f".format(weight * 100)}%" else "evaluating",
-                                            color = if (isStagePassedExtract) M3_Pos else M3_OnSurfaceVariant.copy(alpha = 0.3f),
-                                            fontSize = 10.sp,
-                                            fontFamily = FontFamily.Monospace,
-                                            fontWeight = FontWeight.Bold
-                                        )
-                                        Spacer(modifier = Modifier.height(6.dp))
-                                        val fillWidth = if (isStagePassedExtract) weight else 0f
-                                        Box(
-                                            modifier = Modifier
-                                                .width(64.dp)
-                                                .height(4.dp)
-                                                .background(M3_SurfaceContainer, RoundedCornerShape(100))
-                                        ) {
-                                            Box(
-                                                modifier = Modifier
-                                                    .fillMaxHeight()
-                                                    .fillMaxWidth(fillWidth)
-                                                    .background(M3_Pos, RoundedCornerShape(100))
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Zero data warning
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = M3_SurfaceContainerHigh),
-                        shape = RoundedCornerShape(12.dp),
-                        border = BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.25f))
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(12.dp),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                            verticalAlignment = Alignment.Top
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.Shield,
-                                contentDescription = null,
-                                tint = M3_Pos,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Column {
-                                Text(
-                                    text = "Zero Data Left Your Screen",
-                                    color = M3_OnSurface,
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                                Spacer(modifier = Modifier.height(2.dp))
-                                Text(
-                                    text = "Parameters run natively using llama.cpp within WebAssembly boundaries. Internet permission was not requested nor required.",
-                                    color = M3_OnSurfaceVariant,
-                                    fontSize = 9.sp,
-                                    lineHeight = 13.sp
-                                )
-                            }
-                        }
-                    }
-
-                    if (isSyncDone) {
-                        Spacer(modifier = Modifier.height(12.dp))
-                        Button(
-                            onClick = {
-                                viewModel.resetSyncState()
-                                selectedProcessingSms = null
-                            },
-                            modifier = Modifier.fillMaxWidth(),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = M3_Pos,
-                                contentColor = Color.White
-                            ),
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Text("Done", fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                        }
-                    }
+                val hasThinking = state.syncState.hasThinkingMode
+                val performanceText = if (isActive) {
+                    state.syncState.activeSmsPerformance
+                } else if (sms.status == "synced") {
+                    "28 ms/tok"
+                } else {
+                    null
                 }
+
+                TelemetryLogsViewer(
+                    sender = sms.sender,
+                    body = sms.body,
+                    status = sms.status,
+                    hasThinkingMode = hasThinking,
+                    isActive = isActive,
+                    activeStageIndex = activeStageIndex,
+                    thinkingOutput = finalThinkingOutput,
+                    jsonOutput = finalJsonOutput,
+                    filterLogs = viewModel.getFilterLogs(sms.sender, sms.body),
+                    kvLogs = viewModel.getKvCacheLogs(sms.sender, sms.body),
+                    slmPrompt = viewModel.getSlmPrompt(sms.sender, sms.body),
+                    parsedOutput = finalParsedOutput,
+                    performanceText = performanceText,
+                    onClose = { selectedProcessingSms = null }
+                )
             }
         }
     }

@@ -390,10 +390,12 @@ class SettingsViewModel @Inject constructor(
                             } else {
                                 accountRepository.ensureDefault()
                             }
+                            val merchantName = p.counterparty?.takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
+                                ?: "Transaction (Test)"
                             transactionRepository.insert(
                                 TransactionRepository.NewTransaction(
                                     amount = p.amount,
-                                    merchant = p.counterparty ?: "Unknown Merchant",
+                                    merchant = merchantName,
                                     date = System.currentTimeMillis(),
                                     type = p.type,
                                     accountId = account.id,

@@ -198,10 +198,14 @@ class PipelineService @Inject constructor(
                 }
 
                 // 5. Save transaction
+                val inferredBank = inferBankFromSender(sms.address)
+                val merchantName = parsed.counterparty?.takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
+                    ?: if (inferredBank != "Unknown Bank") "Transaction ($inferredBank)" else "Unknown Merchant"
+
                 transactionRepository.insert(
                     TransactionRepository.NewTransaction(
                         amount = parsed.amount,
-                        merchant = parsed.counterparty ?: "Unknown Merchant",
+                        merchant = merchantName,
                         date = sms.date,
                         type = parsed.type,
                         accountId = account.id,

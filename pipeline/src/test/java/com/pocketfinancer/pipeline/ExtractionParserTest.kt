@@ -43,6 +43,15 @@ class ExtractionParserTest {
         assertNull(result.counterparty)
     }
 
+    @Test
+    fun `parse should treat literal string null counterparty as null`() {
+        val output = """{"amount": 250.0, "type": "debit", "account": "Card XX1234", "counterparty": "null"}"""
+        val result = parser.parse(output)
+        assertNotNull(result)
+        assertEquals(250.0, result.amount)
+        assertNull(result.counterparty)
+    }
+
     // ── Null (non-financial) ──────────────────────────────────────────────
 
     @Test

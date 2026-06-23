@@ -26,10 +26,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketfinancer.data.model.Transaction
 import com.pocketfinancer.data.model.TransactionType
 import com.pocketfinancer.ui.theme.*
+import com.pocketfinancer.ui.transactions.TelemetryLogsViewer
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -44,6 +47,7 @@ fun HomeScreen(
     
     val pData = state.periodData[selectedPeriod] ?: PeriodData()
     var showDrawer by remember { mutableStateOf(false) }
+    var selectedTelemetrySms by remember { mutableStateOf<SyncSmsItem?>(null) }
 
     val dateEyebrow = when (selectedPeriod) {
         "Day" -> {
@@ -453,7 +457,110 @@ fun HomeScreen(
                         onNavigateToTab(route)
                     },
                     onDismiss = { showDrawer = false },
-                    onResetSync = { viewModel.resetSyncState() }
+                    onResetSync = { viewModel.resetSyncState() },
+                    onItemClick = { item ->
+                        selectedTelemetrySms = item
+                    }
+                )
+            }
+        }
+
+        // ── Telemetry Logs Sheet ──
+        val telemetrySms = selectedTelemetrySms
+        if (telemetrySms != null) {
+            val currentIndex = state.syncState.currentIndex
+            val isActive = state.syncState.status == HomeSyncState.Status.SYNCING &&
+                    currentIndex != null &&
+                    currentIndex < state.syncState.queue.size &&
+                    state.syncState.queue[currentIndex].id == telemetrySms.id
+
+            val activeStageIndex = if (isActive) {
+                state.syncState.currentStageIndex ?: 0
+            } else if (telemetrySms.status == "synced" || telemetrySms.status == "filtered_out") {
+                4
+            } else {
+                0
+            }
+
+            val finalThinkingOutput = if (isActive) {
+                state.syncState.thinkingOutput
+            } else {
+                ""
+            }
+
+            val finalJsonOutput = if (isActive) {
+                state.syncState.jsonOutput
+            } else if (telemetrySms.status == "synced") {
+                """{
+  "amount": ${telemetrySms.parsedAmount ?: 0.0},
+  "counterparty": "${telemetrySms.parsedMerchant ?: "null"}",
+  "type": "debit",
+  "account": "card"
+}"""
+            } else if (telemetrySms.status == "filtered_out") {
+                "null"
+            } else {
+                ""
+            }
+
+            val finalParsedOutput = if (isActive) {
+                if (state.syncState.jsonOutput.isNotEmpty()) {
+                    val parsed = viewModel.getParsedOutput(state.syncState.jsonOutput)
+                    if (parsed == "Parsed: null (non-financial)" && activeStageIndex < 3) {
+                        "Waiting for complete JSON..."
+                    } else {
+                        parsed
+                    }
+                } else {
+                    ""
+                }
+            } else if (telemetrySms.status == "synced") {
+                "amount=${telemetrySms.parsedAmount ?: 0.0}, type=debit, counterparty=${telemetrySms.parsedMerchant ?: "-"}, account=card"
+            } else if (telemetrySms.status == "filtered_out") {
+                "Parsed: null (non-financial)"
+            } else {
+                ""
+            }
+
+            ModalBottomSheet(
+                onDismissRequest = { selectedTelemetrySms = null },
+                sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+                containerColor = M3_SurfaceContainerLow,
+                contentColor = M3_OnSurface,
+                dragHandle = {
+                    Box(
+                        modifier = Modifier
+                            .padding(vertical = 12.dp)
+                            .width(48.dp)
+                            .height(6.dp)
+                            .background(M3_OutlineVariant.copy(alpha = 0.6f), RoundedCornerShape(3.dp))
+                    )
+                }
+            ) {
+                val hasThinking = state.syncState.hasThinkingMode
+                val performanceText = if (isActive) {
+                    state.syncState.activeSmsPerformance
+                } else if (telemetrySms.status == "synced") {
+                    "28 ms/tok"
+                } else {
+                    null
+                }
+
+                TelemetryLogsViewer(
+                    sender = telemetrySms.sender,
+                    body = telemetrySms.body,
+                    status = telemetrySms.status,
+                    hasThinkingMode = hasThinking,
+                    isActive = isActive,
+                    activeStageIndex = activeStageIndex,
+                    thinkingOutput = finalThinkingOutput,
+                    jsonOutput = finalJsonOutput,
+                    filterLogs = viewModel.getFilterLogs(telemetrySms.sender, telemetrySms.body),
+                    kvLogs = viewModel.getKvCacheLogs(telemetrySms.sender, telemetrySms.body),
+                    slmPrompt = viewModel.getSlmPrompt(telemetrySms.sender, telemetrySms.body),
+                    parsedOutput = finalParsedOutput,
+                    performanceText = performanceText,
+                    onClose = { selectedTelemetrySms = null }
                 )
             }
         }
@@ -551,7 +658,13 @@ fun SyncStrip(
                             .clip(RoundedCornerShape(20.dp))
                             .background(M3_SurfaceContainerLow)
                             .border(BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.2f)), RoundedCornerShape(20.dp))
-                            .clickable { onCheckForUnsynced() }
+                            .clickable { 
+                                if (syncState.queue.isNotEmpty()) {
+                                    onInspectSync()
+                                } else {
+                                    onCheckForUnsynced()
+                                }
+                            }
                             .padding(horizontal = 14.dp, vertical = 14.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(12.dp)
@@ -596,6 +709,7 @@ fun SyncStrip(
                             modifier = Modifier
                                 .background(M3_SurfaceContainerHigh, RoundedCornerShape(100))
                                 .border(BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.3f)), RoundedCornerShape(100))
+                                .clickable { onCheckForUnsynced() }
                                 .padding(horizontal = 10.dp, vertical = 6.dp),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(4.dp)
@@ -773,7 +887,8 @@ fun DrawerContent(
     syncState: HomeSyncState,
     onNavigate: (String) -> Unit,
     onDismiss: () -> Unit,
-    onResetSync: () -> Unit
+    onResetSync: () -> Unit,
+    onItemClick: (SyncSmsItem) -> Unit
 ) {
     Column(
         modifier = Modifier
@@ -863,6 +978,7 @@ fun DrawerContent(
                         .clip(RoundedCornerShape(12.dp))
                         .background(bg)
                         .border(border, RoundedCornerShape(12.dp))
+                        .clickable { onItemClick(item) }
                         .padding(10.dp),
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                     verticalAlignment = Alignment.Top
@@ -948,7 +1064,11 @@ fun DrawerContent(
 
                         if (isActive) {
                             Spacer(modifier = Modifier.height(8.dp))
-                            PipelineStagesView(syncState.currentStageIndex ?: 0)
+                            PipelineStagesView(
+                                activeIndex = syncState.currentStageIndex ?: 0,
+                                thinkingOutput = syncState.thinkingOutput,
+                                hasThinkingMode = syncState.hasThinkingMode
+                            )
                         }
 
                         if (isFiltered) {
@@ -1051,13 +1171,38 @@ fun DrawerContent(
 }
 
 @Composable
-fun PipelineStagesView(activeIndex: Int) {
-    val stages = listOf(
-        "Pre-Filter Check" to "Checking message format and keywords",
-        "Phase 1: Thinking Pass" to "Greedy reasoning pass on device CPU",
-        "Phase 2: Grammar Constraint" to "Strict JSON output validation",
-        "Database Persistence" to "Inserting transaction in encrypted DB"
-    )
+fun PipelineStagesView(
+    activeIndex: Int,
+    thinkingOutput: String = "",
+    hasThinkingMode: Boolean = true
+) {
+    val stages = if (hasThinkingMode) {
+        listOf(
+            "Pre-Filter Check" to "Checking message format and keywords",
+            "Phase 1: Thinking Pass" to "Greedy reasoning pass on device CPU",
+            "Phase 2: Grammar Constraint" to "Strict JSON output validation",
+            "Database Persistence" to "Inserting transaction in encrypted DB"
+        )
+    } else {
+        listOf(
+            "Pre-Filter Check" to "Checking message format and keywords",
+            "Phase 2: Grammar Constraint" to "Strict JSON output validation",
+            "Database Persistence" to "Inserting transaction in encrypted DB"
+        )
+    }
+
+    val mappedActiveIndex = if (hasThinkingMode) {
+        activeIndex
+    } else {
+        when (activeIndex) {
+            0 -> 0
+            2 -> 1
+            3 -> 2
+            else -> 0
+        }
+    }
+
+    var isPhase1Expanded by remember { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
@@ -1088,71 +1233,121 @@ fun PipelineStagesView(activeIndex: Int) {
         }
 
         stages.forEachIndexed { index, (name, _) ->
-            val isCurrent = index == activeIndex
-            val isDone = index < activeIndex
+            val isCurrent = index == mappedActiveIndex
+            val isDone = index < mappedActiveIndex
+            val isPhase1 = hasThinkingMode && index == 1
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+            Column(modifier = Modifier.fillMaxWidth()) {
                 Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    val indicator = when {
-                        isDone -> "●"
-                        isCurrent -> "▶"
-                        else -> "○"
-                    }
-                    val color = when {
-                        isDone -> M3_Pos
-                        isCurrent -> Color(0xFFF2C94C)
-                        else -> M3_OnSurfaceVariant.copy(alpha = 0.3f)
-                    }
-
-                    Text(
-                        text = indicator,
-                        color = color,
-                        fontSize = 10.sp,
-                        fontFamily = FontFamily.Monospace,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        text = name,
-                        color = if (isCurrent) M3_OnSurface else if (isDone) M3_OnSurfaceVariant else M3_OnSurfaceVariant.copy(alpha = 0.4f),
-                        fontSize = 9.5.sp,
-                        fontFamily = FontFamily.Monospace,
-                        fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal
-                    )
-                }
-
-                val badgeText = when {
-                    isDone -> "done"
-                    isCurrent -> "running"
-                    else -> "idle"
-                }
-                val badgeBg = when {
-                    isDone -> M3_PosContainer.copy(alpha = 0.2f)
-                    isCurrent -> Color(0xFFF2C94C).copy(alpha = 0.15f)
-                    else -> Color.Transparent
-                }
-                val badgeTextClr = when {
-                    isDone -> M3_OnPosContainer
-                    isCurrent -> Color(0xFFF2C94C)
-                    else -> M3_OnSurfaceVariant.copy(alpha = 0.2f)
-                }
-
-                Text(
-                    text = badgeText.uppercase(),
-                    color = badgeTextClr,
-                    fontSize = 8.sp,
-                    fontWeight = FontWeight.Bold,
-                    fontFamily = FontFamily.Monospace,
                     modifier = Modifier
-                        .background(badgeBg, RoundedCornerShape(4.dp))
-                        .padding(horizontal = 4.dp, vertical = 1.dp)
-                )
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(4.dp))
+                        .then(
+                            if (isPhase1 && thinkingOutput.isNotEmpty()) {
+                                Modifier.clickable { isPhase1Expanded = !isPhase1Expanded }
+                            } else Modifier
+                        ),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        val indicator = when {
+                            isDone -> "●"
+                            isCurrent -> "▶"
+                            else -> "○"
+                        }
+                        val color = when {
+                            isDone -> M3_Pos
+                            isCurrent -> Color(0xFFF2C94C)
+                            else -> M3_OnSurfaceVariant.copy(alpha = 0.3f)
+                        }
+
+                        Text(
+                            text = indicator,
+                            color = color,
+                            fontSize = 10.sp,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Text(
+                                text = name,
+                                color = if (isCurrent) M3_OnSurface else if (isDone) M3_OnSurfaceVariant else M3_OnSurfaceVariant.copy(alpha = 0.4f),
+                                fontSize = 9.5.sp,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal
+                            )
+                            if (isPhase1 && thinkingOutput.isNotEmpty()) {
+                                Icon(
+                                    imageVector = if (isPhase1Expanded) Icons.Rounded.ArrowDropUp else Icons.Rounded.ArrowDropDown,
+                                    contentDescription = "Expand thinking output",
+                                    tint = M3_Primary,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                            }
+                        }
+                    }
+
+                    val badgeText = when {
+                        isDone -> "done"
+                        isCurrent -> "running"
+                        else -> "idle"
+                    }
+                    val badgeBg = when {
+                        isDone -> M3_PosContainer.copy(alpha = 0.2f)
+                        isCurrent -> Color(0xFFF2C94C).copy(alpha = 0.15f)
+                        else -> Color.Transparent
+                    }
+                    val badgeTextClr = when {
+                        isDone -> M3_OnPosContainer
+                        isCurrent -> Color(0xFFF2C94C)
+                        else -> M3_OnSurfaceVariant.copy(alpha = 0.2f)
+                    }
+
+                    Text(
+                        text = badgeText.uppercase(),
+                        color = badgeTextClr,
+                        fontSize = 8.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace,
+                        modifier = Modifier
+                            .background(badgeBg, RoundedCornerShape(4.dp))
+                            .padding(horizontal = 4.dp, vertical = 1.dp)
+                    )
+                }
+
+                if (isPhase1 && isPhase1Expanded) {
+                    val displayOutput = thinkingOutput.ifEmpty { "Waiting for thinking tokens..." }
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 120.dp)
+                            .background(M3_SurfaceContainerLow, RoundedCornerShape(6.dp))
+                            .border(BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.3f)), RoundedCornerShape(6.dp))
+                            .padding(6.dp)
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .verticalScroll(rememberScrollState())
+                        ) {
+                            Text(
+                                text = displayOutput,
+                                color = M3_OnSurfaceVariant,
+                                fontSize = 9.sp,
+                                fontFamily = FontFamily.Monospace,
+                                lineHeight = 12.sp
+                            )
+                        }
+                    }
+                }
             }
         }
     }

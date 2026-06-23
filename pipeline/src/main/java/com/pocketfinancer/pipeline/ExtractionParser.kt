@@ -76,7 +76,7 @@ class ExtractionParser @Inject constructor() {
  
             // ── Counterparty ──
             val counterparty = obj.optString("counterparty", "")
-                .takeIf { it.isNotBlank() }
+                .takeIf { it.isNotBlank() && !it.trim().equals("null", ignoreCase = true) }
  
             ExtractedTransaction(amount, counterparty, type, account)
         } catch (_: Exception) {
