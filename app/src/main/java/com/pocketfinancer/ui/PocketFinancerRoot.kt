@@ -27,6 +27,7 @@ import com.pocketfinancer.ui.settings.SettingsScreen
 import com.pocketfinancer.ui.transactions.TransactionsScreen
 import com.pocketfinancer.ui.onboarding.OnboardingScreen
 import com.pocketfinancer.ui.home.HomeScreen
+import com.pocketfinancer.ui.insights.InsightsScreen
 import com.pocketfinancer.ui.theme.M3_OnSecondaryContainer
 import com.pocketfinancer.ui.theme.M3_OnSurface
 import com.pocketfinancer.ui.theme.M3_OnSurfaceVariant
@@ -136,7 +137,7 @@ fun PocketFinancerRoot() {
                             }
                         }
                     }) }
-                    composable(Screen.Insights.route) { PlaceholderScreen("Insights") }
+                    composable(Screen.Insights.route) { InsightsScreen() }
                     composable(Screen.Settings.route) { SettingsScreen() }
                 }
             }
