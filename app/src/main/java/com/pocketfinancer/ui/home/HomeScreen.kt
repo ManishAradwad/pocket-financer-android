@@ -574,6 +574,8 @@ fun SyncStrip(
     onInspectSync: () -> Unit,
     onCheckForUnsynced: () -> Unit
 ) {
+    var isExpanded by remember { mutableStateOf(false) }
+
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -583,72 +585,182 @@ fun SyncStrip(
             HomeSyncState.Status.IDLE -> {
                 val pendingCount = syncState.queue.count { it.status == "pending" }
                 if (pendingCount > 0) {
-                    Row(
+                    Column(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(20.dp))
                             .background(M3_PrimaryContainer)
-                            .clickable {
-                                onStartSync()
-                                onInspectSync()
-                            }
-                            .padding(horizontal = 14.dp, vertical = 14.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            .border(BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.2f)), RoundedCornerShape(20.dp))
+                            .clickable { isExpanded = !isExpanded }
+                            .padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(40.dp)
-                                .background(M3_OnPrimaryContainer.copy(alpha = 0.1f), CircleShape),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.CloudDownload,
-                                contentDescription = null,
-                                tint = M3_Primary,
-                                modifier = Modifier.size(20.dp)
-                            )
-                        }
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "INCOMING MESSAGE STREAM",
-                                color = M3_OnPrimaryContainer.copy(alpha = 0.8f),
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text(
-                                text = "$pendingCount Unsynced SMS Found",
-                                color = M3_OnSurface,
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text(
-                                text = "Click to run Local Qwen SLM pipeline",
-                                color = M3_OnPrimaryContainer.copy(alpha = 0.75f),
-                                fontSize = 10.sp
-                            )
-                        }
+                        // Header Row
                         Row(
-                            modifier = Modifier
-                                .background(M3_Primary, RoundedCornerShape(100))
-                                .padding(horizontal = 10.dp, vertical = 6.dp),
+                            modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
-                            Icon(
-                                imageVector = Icons.Filled.PlayArrow,
-                                contentDescription = null,
-                                tint = M3_OnPrimary,
-                                modifier = Modifier.size(10.dp)
-                            )
-                            Text(
-                                text = "Process",
-                                color = M3_OnPrimary,
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Bold
-                            )
+                            Box(
+                                modifier = Modifier
+                                    .size(40.dp)
+                                    .background(M3_OnPrimaryContainer.copy(alpha = 0.1f), CircleShape),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.CloudDownload,
+                                    contentDescription = null,
+                                    tint = M3_Primary,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "INCOMING MESSAGE STREAM",
+                                    color = M3_OnPrimaryContainer.copy(alpha = 0.8f),
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = "$pendingCount Unsynced SMS Found",
+                                    color = M3_OnSurface,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = if (isExpanded) "Click to collapse" else "Click to view pending messages",
+                                    color = M3_OnPrimaryContainer.copy(alpha = 0.75f),
+                                    fontSize = 10.sp
+                                )
+                            }
+                            if (!isExpanded) {
+                                Row(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(100))
+                                        .background(M3_Primary)
+                                        .clickable { onStartSync() }
+                                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Filled.PlayArrow,
+                                        contentDescription = null,
+                                        tint = M3_OnPrimary,
+                                        modifier = Modifier.size(10.dp)
+                                    )
+                                    Text(
+                                        text = "Process",
+                                        color = M3_OnPrimary,
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Rounded.KeyboardArrowUp,
+                                    contentDescription = "Collapse",
+                                    tint = M3_OnPrimaryContainer.copy(alpha = 0.75f),
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                        }
+
+                        if (isExpanded) {
+                            HorizontalDivider(color = M3_OnPrimaryContainer.copy(alpha = 0.15f))
+                            
+                            // List of SMS yet to be synced
+                            val pendingSmsList = syncState.queue.filter { it.status == "pending" }
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(max = 220.dp)
+                                    .verticalScroll(rememberScrollState()),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                pendingSmsList.forEach { sms ->
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .background(M3_OnPrimaryContainer.copy(alpha = 0.05f))
+                                            .padding(10.dp),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        verticalAlignment = Alignment.Top
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(24.dp)
+                                                .background(M3_OnPrimaryContainer.copy(alpha = 0.1f), CircleShape),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Text(
+                                                text = getInitials(sms.sender),
+                                                color = M3_OnPrimaryContainer,
+                                                fontSize = 9.sp,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                        }
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                horizontalArrangement = Arrangement.SpaceBetween,
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Text(
+                                                    text = sms.sender,
+                                                    color = M3_OnSurface,
+                                                    fontSize = 11.sp,
+                                                    fontWeight = FontWeight.Bold
+                                                )
+                                                Text(
+                                                    text = formatTime(sms.date),
+                                                    color = M3_OnPrimaryContainer.copy(alpha = 0.6f),
+                                                    fontSize = 9.sp,
+                                                    fontFamily = FontFamily.Monospace
+                                                )
+                                            }
+                                            Spacer(modifier = Modifier.height(2.dp))
+                                            Text(
+                                                text = sms.body,
+                                                color = M3_OnSurfaceVariant,
+                                                fontSize = 10.sp,
+                                                fontFamily = FontFamily.Monospace,
+                                                maxLines = 2,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Start Syncing Button
+                            Button(
+                                onClick = {
+                                    onStartSync()
+                                    onInspectSync()
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = M3_Primary),
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(100),
+                                contentPadding = PaddingValues(vertical = 10.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Sync,
+                                    contentDescription = null,
+                                    tint = M3_OnPrimary,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "Start Syncing & Inspect",
+                                    color = M3_OnPrimary,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
                         }
                     }
                 } else {
@@ -988,45 +1100,66 @@ fun DrawerContent(
                             isComplete -> {
                                 Box(
                                     modifier = Modifier
-                                        .size(16.dp)
+                                        .size(20.dp)
                                         .background(M3_Pos, CircleShape),
                                     contentAlignment = Alignment.Center
                                 ) {
-                                    Text("✓", color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                                    Icon(
+                                        imageVector = Icons.Rounded.Check,
+                                        contentDescription = null,
+                                        tint = Color.White,
+                                        modifier = Modifier.size(11.dp)
+                                    )
                                 }
                             }
                             isFiltered -> {
                                 Box(
                                     modifier = Modifier
-                                        .size(16.dp)
+                                        .size(20.dp)
                                         .background(M3_OutlineVariant, CircleShape),
                                     contentAlignment = Alignment.Center
                                 ) {
-                                    Text("∅", color = M3_OnSurface, fontSize = 8.sp, fontWeight = FontWeight.Bold)
+                                    Icon(
+                                        imageVector = Icons.Rounded.Block,
+                                        contentDescription = null,
+                                        tint = M3_OnSurface,
+                                        modifier = Modifier.size(11.dp)
+                                    )
                                 }
                             }
                             isActive -> {
                                 Box(
                                     modifier = Modifier
-                                        .size(16.dp)
+                                        .size(20.dp)
                                         .background(Color(0xFFF2C94C).copy(alpha = 0.25f), CircleShape),
                                     contentAlignment = Alignment.Center
                                 ) {
-                                    Text("⚡", color = Color(0xFFF2C94C), fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                                    Icon(
+                                        imageVector = Icons.Rounded.FlashOn,
+                                        contentDescription = null,
+                                        tint = Color(0xFFF2C94C),
+                                        modifier = Modifier.size(12.dp)
+                                    )
                                 }
                             }
                             else -> {
                                 Box(
                                     modifier = Modifier
-                                        .size(16.dp)
+                                        .size(20.dp)
                                         .border(BorderStroke(1.dp, M3_OutlineVariant), CircleShape),
                                     contentAlignment = Alignment.Center
                                 ) {
                                     Text(
                                         text = (idx + 1).toString(),
                                         color = M3_OnSurfaceVariant,
-                                        fontSize = 9.sp,
-                                        fontFamily = FontFamily.Monospace
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        style = androidx.compose.ui.text.TextStyle(
+                                            platformStyle = androidx.compose.ui.text.PlatformTextStyle(
+                                                includeFontPadding = false
+                                            ),
+                                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                                        )
                                     )
                                 }
                             }
