@@ -252,4 +252,62 @@ class ExtractionParserTest {
         val result = ExtractionParser.normalizeAccount("INVALID")
         assertNull(result)
     }
+
+    @Test
+    fun `parse should coerce amount with INR and Rupee symbol prefixes`() {
+        val output1 = """{"amount": "INR 1500", "type": "debit", "account": "A/c XX6254"}"""
+        val result1 = parser.parse(output1)
+        assertNotNull(result1)
+        assertEquals(1500.0, result1.amount)
+
+        val output2 = """{"amount": "₹500.50", "type": "credit", "account": "A/c XX0000"}"""
+        val result2 = parser.parse(output2)
+        assertNotNull(result2)
+        assertEquals(500.50, result2.amount)
+    }
+
+    @Test
+    fun `parse should reject NaN or Infinity amounts`() {
+        val output1 = """{"amount": "NaN", "type": "debit", "account": "A/c XX6254"}"""
+        val result1 = parser.parse(output1)
+        assertNull(result1)
+
+        val output2 = """{"amount": "Infinity", "type": "debit", "account": "A/c XX6254"}"""
+        val result2 = parser.parse(output2)
+        assertNull(result2)
+
+        val output3 = """{"amount": "-Infinity", "type": "debit", "account": "A/c XX6254"}"""
+        val result3 = parser.parse(output3)
+        assertNull(result3)
+    }
+
+    @Test
+    fun `parse should handle JSON embedded inside other text`() {
+        val output = """Some prefix text before JSON {"amount": 100.0, "type": "debit", "account": "A/c XX6254"} and some suffix text after it."""
+        val result = parser.parse(output)
+        assertNotNull(result)
+        assertEquals(100.0, result.amount)
+        assertEquals(TransactionType.DEBIT, result.type)
+        assertEquals("A/c XX6254", result.account)
+    }
+
+    @Test
+    fun `normalizeAccount should extract correct last 4 digits from very long account numbers`() {
+        val result = ExtractionParser.normalizeAccount("A/C XXXXXXXX123456")
+        assertNotNull(result)
+        assertEquals("account", result.first)
+        assertEquals("3456", result.second)
+    }
+
+    @Test
+    fun `normalizeAccount should reject single or two digit runs`() {
+        val result1 = ExtractionParser.normalizeAccount("A/C XX12")
+        assertNull(result1)
+
+        val result2 = ExtractionParser.normalizeAccount("A/C XX9")
+        assertNull(result2)
+
+        val result3 = ExtractionParser.normalizeAccount("A/C 12 and card 34")
+        assertNull(result3)
+    }
 }

@@ -17,6 +17,8 @@ import java.util.UUID
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
+import kotlin.test.assertFalse
 
 @RunWith(RobolectricTestRunner::class)
 class TransactionDaoTest {
@@ -191,6 +193,84 @@ class TransactionDaoTest {
             assertEquals("M5", recent[0].merchant)
             assertEquals("M4", recent[1].merchant)
             assertEquals("M3", recent[2].merchant)
+        }
+    }
+
+    @Test
+    fun `exists should return true when a matching transaction is found`() {
+        runBlocking {
+            val tx = TransactionEntity(
+                id = "tx1", amount = 100.0, merchant = "M", date = 1000L,
+                type = "debit", accountId = "a1", rawMessage = "m", sender = "AX-BANK"
+            )
+            dao.insert(tx)
+
+            assertTrue(dao.exists("AX-BANK", 1000L))
+            assertFalse(dao.exists("AX-BANK", 2000L))
+            assertFalse(dao.exists("AX-OTHER", 1000L))
+        }
+    }
+
+    @Test
+    fun `sumByTypeSince should return sum of matching transactions`() {
+        runBlocking {
+            val now = 5000L
+            val tx1 = TransactionEntity(
+                id = "t1", amount = 100.0, merchant = "M1", date = now - 1000,
+                type = "debit", accountId = "a1", rawMessage = "m1", sender = "AX-BANK"
+            )
+            val tx2 = TransactionEntity(
+                id = "t2", amount = 200.0, merchant = "M2", date = now - 500,
+                type = "debit", accountId = "a1", rawMessage = "m2", sender = "AX-BANK"
+            )
+            val tx3 = TransactionEntity(
+                id = "t3", amount = 300.0, merchant = "M3", date = now - 2000,
+                type = "debit", accountId = "a1", rawMessage = "m3", sender = "AX-BANK"
+            )
+            val creditTx = TransactionEntity(
+                id = "t4", amount = 500.0, merchant = "M4", date = now - 1000,
+                type = "credit", accountId = "a1", rawMessage = "m4", sender = "AX-BANK"
+            )
+            dao.insertAll(listOf(tx1, tx2, tx3, creditTx))
+
+            val sumDebit = dao.sumByTypeSince("debit", now - 1500)
+            assertEquals(300.0, sumDebit)
+            
+            val sumCredit = dao.sumByTypeSince("credit", now - 1500)
+            assertEquals(500.0, sumCredit)
+            
+            val sumNone = dao.sumByTypeSince("debit", now + 1000)
+            assertNull(sumNone)
+        }
+    }
+
+    @Test
+    fun `updateTransactionsAccount should reassign account ID of transactions`() {
+        runBlocking {
+            val tx1 = TransactionEntity(
+                id = "t1", amount = 100.0, merchant = "M1", date = 1000L,
+                type = "debit", accountId = "old_acct", rawMessage = "m1", sender = "AX-BANK"
+            )
+            val tx2 = TransactionEntity(
+                id = "t2", amount = 200.0, merchant = "M2", date = 2000L,
+                type = "debit", accountId = "old_acct", rawMessage = "m2", sender = "AX-BANK"
+            )
+            val tx3 = TransactionEntity(
+                id = "t3", amount = 300.0, merchant = "M3", date = 3000L,
+                type = "debit", accountId = "other_acct", rawMessage = "m3", sender = "AX-BANK"
+            )
+            dao.insertAll(listOf(tx1, tx2, tx3))
+
+            dao.updateTransactionsAccount("old_acct", "new_acct")
+
+            val tx1Updated = dao.getById("t1")
+            assertEquals("new_acct", tx1Updated?.accountId)
+
+            val tx2Updated = dao.getById("t2")
+            assertEquals("new_acct", tx2Updated?.accountId)
+
+            val tx3Updated = dao.getById("t3")
+            assertEquals("other_acct", tx3Updated?.accountId)
         }
     }
 }

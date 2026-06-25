@@ -191,4 +191,47 @@ class SlmSelectorUnitTest {
     fun `sizeGb should convert MB to GB`() {
         assertEquals(700.0f / 1024.0f, SlmTier.QWEN3_0_6B_Q8_0.sizeGb, 0.001f)
     }
+
+    @Test
+    fun `selectSlmForDevice should pick Qwen3-1_7B Q8_0 with 4GB RAM and high performance`() {
+        val device = deviceWith(ramGb = 4.0f, highPerf = true)
+        assertEquals(SlmTier.QWEN3_1_7B_Q8_0, selectSlmForDevice(device))
+    }
+
+    @Test
+    fun `selectSlmForDevice should pick Qwen3-1_7B Q4_K_M at exactly 3_5GB RAM boundary`() {
+        val device = deviceWith(ramGb = 3.5f, highPerf = false)
+        assertEquals(SlmTier.QWEN3_1_7B_Q4_K_M, selectSlmForDevice(device))
+    }
+
+    @Test
+    fun `selectSlmForDevice should pick Qwen3-1_7B Q4_K_M at exactly 4_0GB RAM boundary without high performance`() {
+        val device = deviceWith(ramGb = 4.0f, highPerf = false)
+        assertEquals(SlmTier.QWEN3_1_7B_Q4_K_M, selectSlmForDevice(device))
+    }
+
+    @Test
+    fun `explainTierSelection should say Selected for Gemma Q4_K_M`() {
+        val device = deviceWith(ramGb = 6.0f, highPerf = false)
+        val explanation = explainTierSelection(SlmTier.GEMMA4_E2B_Q4_K_M, device, isSelected = true)
+        assertTrue(explanation.contains("Selected") && explanation.contains("no i8mm+dotprod"))
+    }
+
+    @Test
+    fun `explainTierSelection should say Selected with CPU info for Gemma Q4_K_M with CPU features`() {
+        val device = deviceWith(ramGb = 6.0f, highPerf = true)
+        val explanation = explainTierSelection(SlmTier.GEMMA4_E2B_Q4_K_M, device, isSelected = true)
+        assertTrue(explanation.contains("Selected") && explanation.contains("CPU features (i8mm+dotprod) detected"))
+    }
+
+    @Test
+    fun `SlmTier properties should match configuration specifications`() {
+        val tier = SlmTier.GEMMA4_E2B_Q8_0
+        assertEquals("gemma4-e2b-q8_0", tier.id)
+        assertEquals("gemma-4-E2B-it-Q8_0.gguf", tier.modelFile)
+        assertEquals(5170, tier.sizeMb)
+        assertEquals(8.0f, tier.minRamGb)
+        assertEquals("https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q8_0.gguf", tier.downloadUrl)
+        assertEquals("gemma4", tier.family)
+    }
 }

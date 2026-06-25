@@ -128,4 +128,21 @@ class PromptBuilderTest {
         val result = promptBuilder.buildChatPrompt("Sender: AX-TEST\nSMS: Rs.500\nOutput:", enableThinking = false)
         assertTrue(result.contains("Sender: AX-TEST\nSMS: Rs.500\nOutput:"))
     }
+
+    @Test
+    fun `getStaticPrefix should return non-empty prompt containing system prompt and examples`() {
+        val prefix = promptBuilder.getStaticPrefix()
+        assertNotNull(prefix)
+        assertTrue(prefix.isNotEmpty())
+        assertTrue(prefix.contains("You are a financial SMS extraction assistant."))
+        assertTrue(prefix.contains("### EXAMPLES"))
+        assertTrue(prefix.contains("AX-HDFCBK"))
+    }
+
+    @Test
+    fun `getStaticPrefix should be stable across multiple calls`() {
+        val prefix1 = promptBuilder.getStaticPrefix()
+        val prefix2 = promptBuilder.getStaticPrefix()
+        assertEquals(prefix1, prefix2)
+    }
 }

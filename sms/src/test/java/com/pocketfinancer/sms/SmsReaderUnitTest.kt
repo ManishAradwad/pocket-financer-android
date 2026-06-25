@@ -181,4 +181,59 @@ class SmsReaderUnitTest {
 
         reader.fetchInbox()
     }
+
+    @Test
+    fun `fetchInbox should skip rows according to offset`() {
+        val cursor = MatrixCursor(arrayOf("_id", "address", "body", "date", "type"))
+        for (i in 1..5) {
+            cursor.addRow(arrayOf(i, "AX-BANK-$i", "SMS $i", i * 1000L, 1))
+        }
+
+        every {
+            mockContentResolver.query(
+                Uri.parse("content://sms/inbox"),
+                any(), any(), any(), any()
+            )
+        } returns cursor
+
+        val results = reader.fetchInbox(SmsReader.SmsFilter(offset = 2, limit = 2))
+        assertEquals(2, results.size)
+        assertEquals("AX-BANK-3", results[0].address)
+        assertEquals("AX-BANK-4", results[1].address)
+    }
+
+    @Test
+    fun `fetchInbox should skip address filter when addressPattern is invalid regex`() {
+        val cursor = MatrixCursor(arrayOf("_id", "address", "body", "date", "type"))
+        cursor.addRow(arrayOf(1, "AX-HDFCBK", "HDFC SMS", 1000L, 1))
+
+        every {
+            mockContentResolver.query(
+                Uri.parse("content://sms/inbox"),
+                any(), any(), any(), any()
+            )
+        } returns cursor
+
+        val results = reader.fetchInbox(SmsReader.SmsFilter(addressPattern = "[", limit = 10))
+        assertEquals(1, results.size)
+        assertEquals("AX-HDFCBK", results[0].address)
+    }
+
+    @Test
+    fun `fetchInbox should handle null values in cursor columns gracefully`() {
+        val cursor = MatrixCursor(arrayOf("_id", "address", "body", "date", "type"))
+        cursor.addRow(arrayOf(1, null, null, 1000L, 1))
+
+        every {
+            mockContentResolver.query(
+                Uri.parse("content://sms/inbox"),
+                any(), any(), any(), any()
+            )
+        } returns cursor
+
+        val results = reader.fetchInbox()
+        assertEquals(1, results.size)
+        assertEquals("", results[0].address)
+        assertEquals("", results[0].body)
+    }
 }

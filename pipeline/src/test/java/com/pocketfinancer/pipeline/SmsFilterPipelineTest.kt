@@ -1,6 +1,7 @@
 package com.pocketfinancer.pipeline
 
 import org.junit.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -132,6 +133,81 @@ class SmsFilterPipelineTest {
                 filterPipeline.isTransactional(sender, body),
                 "Failed to reject collect/mandate request: $body"
             )
+        }
+    }
+
+    @Test
+    fun `should correctly populate FilterResult logs on success`() {
+        val sender = "AX-HDFCBK"
+        val body = "Rs.500.00 credited to a/c XXXXXX0000"
+        val result = filterPipeline.filterWithDetails(sender, body)
+        assertTrue(result.isTransactional)
+        assertEquals(6, result.logs.size)
+        assertTrue(result.logs[0].contains("Stage 0 (Sender Check)"))
+        assertTrue(result.logs[1].contains("Stage 1 (Amount Check)"))
+        assertTrue(result.logs[2].contains("Stage 2 (Account/Card Check)"))
+        assertTrue(result.logs[3].contains("Stage 3 (Verb Check)"))
+        assertTrue(result.logs[4].contains("Stage 4 (OTP Exclusion)"))
+        assertTrue(result.logs[5].contains("Stage 5 (Collect Request Exclusion)"))
+        assertTrue(result.logs.all { it.contains("PASSED") })
+    }
+
+    @Test
+    fun `should halt logging and fail early at Stage 0`() {
+        val result = filterPipeline.filterWithDetails("9876543210", "Rs.500.00 credited to a/c XXXXXX0000")
+        assertFalse(result.isTransactional)
+        assertEquals(1, result.logs.size)
+        assertTrue(result.logs[0].contains("Stage 0 (Sender Check): sender='9876543210', isMobile=true -> REJECTED"))
+    }
+
+    @Test
+    fun `should halt logging and fail early at Stage 1`() {
+        val result = filterPipeline.filterWithDetails("AX-HDFCBK", "No money mention in account XXXXXX0000 credited")
+        assertFalse(result.isTransactional)
+        assertEquals(2, result.logs.size)
+        assertTrue(result.logs[0].contains("PASSED"))
+        assertTrue(result.logs[1].contains("Stage 1 (Amount Check): hasAmount=false -> REJECTED"))
+    }
+
+    @Test
+    fun `should handle empty, blank, or extremely long senders and bodies`() {
+        // empty sender (does not match mobile number regex, so it passes Stage 0 and is processed normally)
+        assertTrue(filterPipeline.isTransactional("", "Rs.500.00 credited to a/c XXXXXX0000"))
+        // blank sender (passes Stage 0 and is processed normally)
+        assertTrue(filterPipeline.isTransactional("   ", "Rs.500.00 credited to a/c XXXXXX0000"))
+        // empty body
+        assertFalse(filterPipeline.isTransactional("AX-HDFCBK", ""))
+        // blank body
+        assertFalse(filterPipeline.isTransactional("AX-HDFCBK", "    "))
+        // extremely long body
+        val longBody = "Rs.500.00 credited to a/c XXXXXX0000 " + "a".repeat(10000)
+        assertTrue(filterPipeline.isTransactional("AX-HDFCBK", longBody))
+    }
+
+    @Test
+    fun `should accept UPI and other specific action verbs`() {
+        val bodies = listOf(
+            "Txn of Rs.100.00 via UPI in a/c XX1234",
+            "Redemption payout of Rs 5000 to a/c XXXXXX9876",
+            "money transfer of Rs.1000 from a/c XXXXXX1111",
+            "Amt sent Rs 250 from a/c XX1234",
+            "Amt received Rs 350 to a/c XX5678"
+        )
+        for (body in bodies) {
+            assertTrue(filterPipeline.isTransactional("AX-HDFCBK", body), "Failed on: $body")
+        }
+    }
+
+    @Test
+    fun `should accept different card formats`() {
+        val bodies = listOf(
+            "Rs.500 debited on card ending XX1234",
+            "Rs.500 debited on card 4567",
+            "Rs.500 debited on card no X1234",
+            "Rs.500 debited on card ending 9999"
+        )
+        for (body in bodies) {
+            assertTrue(filterPipeline.isTransactional("AX-HDFCBK", body), "Failed on card: $body")
         }
     }
 }

@@ -16,6 +16,8 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertNotEquals
+import kotlin.test.assertTrue
+import kotlin.test.assertFalse
 
 @RunWith(RobolectricTestRunner::class)
 class AccountRepositoryTest {
@@ -137,6 +139,70 @@ class AccountRepositoryTest {
             assertNull(result)
         }
     }
+
+    @Test
+    fun `consolidateAccounts should merge duplicates and delete stale even if no known-bank accounts exist`() {
+        runBlocking {
+            val acc1 = com.pocketfinancer.data.db.entity.AccountEntity("id1", "Unknown Bank A/c XX9141", "Unknown Bank", "auto-extracted")
+            val acc2 = com.pocketfinancer.data.db.entity.AccountEntity("id2", "A/C **9141", "Unknown Bank", "auto-extracted")
+            
+            db.accountDao().insert(acc1)
+            db.accountDao().insert(acc2)
+
+            val tx1 = com.pocketfinancer.data.db.entity.TransactionEntity("tx1", 100.0, "M1", 1000L, "DEBIT", "id2", "raw1", "sender1", false)
+            db.transactionDao().insert(tx1)
+
+            repo.consolidateAccounts()
+
+            val allAccs = repo.getAllOnce()
+            assertEquals(1, allAccs.size)
+            assertEquals("id1", allAccs[0].id)
+
+            val tx1Updated = db.transactionDao().getById("tx1")
+            assertEquals("id1", tx1Updated?.accountId)
+        }
+    }
+
+    @Test
+    fun `consolidateAccounts should merge multiple known accounts of same bank`() {
+        runBlocking {
+            val acc1 = com.pocketfinancer.data.db.entity.AccountEntity("id1", "HDFC Bank A/c XX9141", "HDFC Bank", "auto-extracted")
+            val acc2 = com.pocketfinancer.data.db.entity.AccountEntity("id2", "HDFC A/c XX9141", "HDFC Bank", "auto-extracted")
+            
+            db.accountDao().insert(acc1)
+            db.accountDao().insert(acc2)
+
+            val tx1 = com.pocketfinancer.data.db.entity.TransactionEntity("tx1", 100.0, "M1", 1000L, "DEBIT", "id2", "raw1", "sender1", false)
+            db.transactionDao().insert(tx1)
+
+            repo.consolidateAccounts()
+
+            val allAccs = repo.getAllOnce()
+            assertEquals(1, allAccs.size)
+            assertEquals("id1", allAccs[0].id)
+
+            val tx1Updated = db.transactionDao().getById("tx1")
+            assertEquals("id1", tx1Updated?.accountId)
+        }
+    }
+
+    @Test
+    fun `getOrCreate should infer bank name from account name`() {
+        runBlocking {
+            val account = repo.getOrCreate("HDFC Card XX1234", "Unknown Bank", "auto-extracted")
+            assertEquals("HDFC Bank", account.bank)
+            assertEquals("HDFC Bank Card XX1234", account.name)
+        }
+    }
+
+    @Test
+    fun `getOrCreate should handle account name with no normalizable digits`() {
+        runBlocking {
+            val account = repo.getOrCreate("MyCash", "HDFC Bank", "auto-extracted")
+            assertEquals("MyCash", account.name)
+            assertEquals("HDFC Bank", account.bank)
+        }
+    }
 }
 
 @RunWith(RobolectricTestRunner::class)
@@ -217,6 +283,117 @@ class TransactionRepositoryTest {
             repo.insert(TransactionRepository.NewTransaction(500.0, "C1", now - 1000, TransactionType.CREDIT, account.id, "c1", "AX-BANK"))
             assertEquals(150.0, repo.sumDebitsSince(now - 5000))
             assertEquals(500.0, repo.sumCreditsSince(now - 5000))
+        }
+    }
+
+    @Test
+    fun `updateTransaction should modify existing transaction fields and set isEdited to true`() {
+        runBlocking {
+            val account = mockAccountRepo.ensureDefault()
+            val tx = repo.insert(
+                TransactionRepository.NewTransaction(
+                    amount = 100.0,
+                    merchant = "Merchant Old",
+                    date = 1000L,
+                    type = TransactionType.DEBIT,
+                    accountId = account.id,
+                    rawMessage = "Rs 100 spent",
+                    sender = "AX-HDFCBK"
+                )
+            )
+            
+            val updated = repo.updateTransaction(
+                id = tx.id,
+                amount = 200.0,
+                merchant = "Merchant New",
+                type = TransactionType.CREDIT,
+                accountId = account.id
+            )
+            
+            assertNotNull(updated)
+            assertEquals(200.0, updated.amount)
+            assertEquals("Merchant New", updated.merchant)
+            assertEquals(TransactionType.CREDIT, updated.type)
+            assertEquals(true, updated.isEdited)
+        }
+    }
+
+    @Test
+    fun `updateTransaction should return null when transaction ID is not found`() {
+        runBlocking {
+            val updated = repo.updateTransaction(
+                id = "nonexistent_id",
+                amount = 200.0,
+                merchant = "Merchant New",
+                type = TransactionType.CREDIT,
+                accountId = "some_account_id"
+            )
+            assertNull(updated)
+        }
+    }
+
+    @Test
+    fun `exists should return true when transaction with sender and date exists`() {
+        runBlocking {
+            val account = mockAccountRepo.ensureDefault()
+            repo.insert(
+                TransactionRepository.NewTransaction(
+                    amount = 100.0,
+                    merchant = "M1",
+                    date = 5000L,
+                    type = TransactionType.DEBIT,
+                    accountId = account.id,
+                    rawMessage = "Rs 100 spent",
+                    sender = "AX-HDFCBK"
+                )
+            )
+            
+            assertTrue(repo.exists("AX-HDFCBK", 5000L))
+            assertFalse(repo.exists("AX-HDFCBK", 6000L))
+            assertFalse(repo.exists("AX-OTHER", 5000L))
+        }
+    }
+
+    @Test
+    fun `clearDatabase should delete all tables`() {
+        runBlocking {
+            val account = mockAccountRepo.ensureDefault()
+            repo.insert(TransactionRepository.NewTransaction(100.0, "M1", 1000L, TransactionType.DEBIT, account.id, "m1", "AX-BANK"))
+            assertEquals(1, repo.count())
+            
+            repo.clearDatabase()
+            assertEquals(0, repo.count())
+        }
+    }
+
+    @Test
+    fun `getByType should filter transactions correctly`() {
+        runBlocking {
+            val account = mockAccountRepo.ensureDefault()
+            repo.insert(TransactionRepository.NewTransaction(100.0, "M1", 1000L, TransactionType.DEBIT, account.id, "m1", "AX-BANK"))
+            repo.insert(TransactionRepository.NewTransaction(200.0, "M2", 2000L, TransactionType.CREDIT, account.id, "m2", "AX-BANK"))
+            
+            val debits = repo.getByType(TransactionType.DEBIT).first()
+            assertEquals(1, debits.size)
+            assertEquals(100.0, debits[0].amount)
+
+            val credits = repo.getByType(TransactionType.CREDIT).first()
+            assertEquals(1, credits.size)
+            assertEquals(200.0, credits[0].amount)
+        }
+    }
+
+    @Test
+    fun `getByDateRange should return transactions within range`() {
+        runBlocking {
+            val account = mockAccountRepo.ensureDefault()
+            repo.insert(TransactionRepository.NewTransaction(100.0, "M1", 1000L, TransactionType.DEBIT, account.id, "m1", "AX-BANK"))
+            repo.insert(TransactionRepository.NewTransaction(200.0, "M2", 2000L, TransactionType.CREDIT, account.id, "m2", "AX-BANK"))
+            repo.insert(TransactionRepository.NewTransaction(300.0, "M3", 3000L, TransactionType.DEBIT, account.id, "m3", "AX-BANK"))
+            
+            val range = repo.getByDateRange(1500L, 2500L).first()
+            assertEquals(1, range.size)
+            assertEquals(200.0, range[0].amount)
         }
     }
 }

@@ -217,4 +217,107 @@ Output:
             assertEquals(0, pipeline.queueSize)
         }
     }
+
+    @Test
+    fun `enqueue should emit ERROR when inference is stopped`() {
+        runBlocking {
+            coEvery { llamaEngine.inferForExtraction(any(), any(), any(), any(), any(), any()) } returns
+                LlamaEngine.InferenceResult.Stopped
+            pipeline.enqueue(SmsReader.SmsMessage(testSender, testBody, 1000L, 1))
+            pipeline.drain(timeoutMs = 5000)
+            val finalState = pipeline.pipelineState.first()
+            assertNotNull(finalState)
+            assertEquals(PipelineService.Stage.ERROR, finalState.stage)
+            assertEquals("Inference stopped", finalState.message)
+        }
+    }
+
+    @Test
+    fun `enqueue should emit SKIPPED when parsing returns null after success`() {
+        runBlocking {
+            every { extractionParser.parse(any()) } returns null
+            coEvery { llamaEngine.inferForExtraction(any(), any(), any(), any(), any(), any()) } returns
+                LlamaEngine.InferenceResult.Success(
+                    json = """{"amount": null}""",
+                    perf = null
+                )
+            pipeline.enqueue(SmsReader.SmsMessage(testSender, testBody, 1000L, 1))
+            pipeline.drain(timeoutMs = 5000)
+            val finalState = pipeline.pipelineState.first()
+            assertNotNull(finalState)
+            assertEquals(PipelineService.Stage.SKIPPED, finalState.stage)
+            assertEquals("Nonnull filter rejected extraction", finalState.message)
+        }
+    }
+
+    @Test
+    fun `enqueue should silently drop non-transactional SMS`() {
+        runBlocking {
+            val nonTxnSms = SmsReader.SmsMessage("+919999999999", "Hello there, Rs. 500", 1000L, 1)
+            pipeline.enqueue(nonTxnSms)
+            pipeline.drain(timeoutMs = 1000)
+            assertEquals(0, pipeline.queueSize)
+            coVerify(exactly = 0) { llamaEngine.inferForExtraction(any(), any(), any(), any(), any(), any()) }
+        }
+    }
+
+    @Test
+    fun `enqueue should fallback to inferred bank merchant name when counterparty is missing`() {
+        runBlocking {
+            every { extractionParser.parse(any()) } returns ExtractionParser.ExtractedTransaction(
+                amount = 1500.0,
+                counterparty = null,
+                type = TransactionType.DEBIT,
+                account = "A/c XX6254"
+            )
+            coEvery { llamaEngine.inferForExtraction(any(), any(), any(), any(), any(), any()) } returns
+                LlamaEngine.InferenceResult.Success(
+                    json = """{"amount": 1500.0, "type": "debit", "account": "A/c XX6254"}""",
+                    perf = null
+                )
+            pipeline.enqueue(SmsReader.SmsMessage("AX-HDFCBK", testBody, 1000L, 1))
+            pipeline.drain(timeoutMs = 5000)
+            coVerify {
+                transactionRepository.insert(match {
+                    it.merchant == "Transaction (HDFC Bank)"
+                })
+            }
+        }
+    }
+
+    @Test
+    fun `enqueue should fallback to Unknown Merchant when counterparty and bank are unknown`() {
+        runBlocking {
+            every { extractionParser.parse(any()) } returns ExtractionParser.ExtractedTransaction(
+                amount = 1500.0,
+                counterparty = null,
+                type = TransactionType.DEBIT,
+                account = "A/c XX6254"
+            )
+            coEvery { llamaEngine.inferForExtraction(any(), any(), any(), any(), any(), any()) } returns
+                LlamaEngine.InferenceResult.Success(
+                    json = """{"amount": 1500.0, "type": "debit", "account": "A/c XX6254"}""",
+                    perf = null
+                )
+            pipeline.enqueue(SmsReader.SmsMessage("UNKNOWN_SENDER", testBody, 1000L, 1))
+            pipeline.drain(timeoutMs = 5000)
+            coVerify {
+                transactionRepository.insert(match {
+                    it.merchant == "Unknown Merchant"
+                })
+            }
+        }
+    }
+
+    @Test
+    fun `pipeline should use manual Qwen3 chat template if applyChatTemplate returns null`() {
+        runBlocking {
+            every { llamaEngine.applyChatTemplate(any(), any()) } returns null
+            coEvery { llamaEngine.inferForExtraction(any(), any(), any(), any(), any(), any()) } returns
+                LlamaEngine.InferenceResult.Null
+            pipeline.enqueue(SmsReader.SmsMessage(testSender, testBody, 1000L, 1))
+            pipeline.drain(timeoutMs = 5000)
+            verify(atLeast = 1) { promptBuilder.buildChatPrompt(any(), any()) }
+        }
+    }
 }
