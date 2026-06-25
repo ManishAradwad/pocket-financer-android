@@ -79,7 +79,7 @@ class OnboardingViewModel @Inject constructor(
             syncManager.syncState.collect { syncState ->
                 val slm = _state.value.selectedSlm
                 val file = slm?.let { getModelFile(it) }
-                val isDone = file != null && file.exists() && file.length() > 0
+                val isDone = file != null && file.exists() && slm != null && file.length() >= (slm.sizeMb.toLong() * 1024L * 1024L * 95L / 100L)
 
                 val finalDs = if (!syncState.isDownloading && !syncState.downloadState.isComplete && isDone) {
                     syncState.downloadState.copy(
@@ -168,7 +168,7 @@ class OnboardingViewModel @Inject constructor(
     private fun checkModelDownloadStatus() {
         val slm = _state.value.selectedSlm ?: return
         val file = getModelFile(slm)
-        if (file.exists() && file.length() > 0) {
+        if (file.exists() && file.length() >= (slm.sizeMb.toLong() * 1024L * 1024L * 95L / 100L)) {
             _state.value = _state.value.copy(
                 downloadState = ModelDownloader.DownloadState(
                     isDownloading = false,

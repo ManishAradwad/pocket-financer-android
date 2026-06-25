@@ -90,7 +90,7 @@ class SettingsViewModel @Inject constructor(
                 val finalDs = if (!ds.isDownloading && !ds.isComplete) {
                     val slm = _state.value.selectedSlm
                     val file = slm?.let { getModelFile(it) }
-                    if (file != null && file.exists() && file.length() > 0) {
+                    if (file != null && file.exists() && slm != null && file.length() >= (slm.sizeMb.toLong() * 1024L * 1024L * 95L / 100L)) {
                         ds.copy(
                             isComplete = true,
                             progress = 1f,
@@ -247,7 +247,7 @@ class SettingsViewModel @Inject constructor(
         val slm = _state.value.selectedSlm
         if (slm != null) {
             val file = getModelFile(slm)
-            if (file.exists() && file.length() > 0) {
+            if (file.exists() && file.length() >= (slm.sizeMb.toLong() * 1024L * 1024L * 95L / 100L)) {
                 val currentDs = _state.value.downloadState
                 if (!currentDs.isDownloading && !currentDs.isComplete) {
                     _state.value = _state.value.copy(

@@ -213,7 +213,8 @@ class OnboardingService : Service() {
         val destFile = getModelFile(slm)
 
         // 1. Check if model is downloaded. If not, download it.
-        val isDone = destFile.exists() && destFile.length() > 0
+        val expectedMinBytes = slm.sizeMb.toLong() * 1024 * 1024 * 95 / 100
+        val isDone = destFile.exists() && destFile.length() >= expectedMinBytes
         if (!isDone) {
             Log.i(TAG, "Model not cached. Launching download...")
             syncManager.updateState {
