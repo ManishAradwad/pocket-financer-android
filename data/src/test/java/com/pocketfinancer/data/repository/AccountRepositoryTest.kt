@@ -115,7 +115,7 @@ class AccountRepositoryTest {
 
             repo.consolidateAccounts()
 
-            val allAccs = repo.getAll().first()
+            val allAccs = repo.getAllOnce()
             assertEquals(1, allAccs.size)
             assertEquals("id3", allAccs[0].id)
             assertEquals("HDFC Bank A/c XX9141", allAccs[0].name)
