@@ -19,6 +19,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -75,8 +76,7 @@ fun InsightsScreen(
                     Text(
                         text = "financialInsights",
                         color = M3_OnSurface,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 18.sp
+                        style = MaterialTheme.typography.titleLarge
                     )
                 }
             }
@@ -173,8 +173,9 @@ private fun TimeframeSelector(
                 Text(
                     text = label,
                     color = if (isSelected) M3_OnSecondaryContainer else M3_OnSurfaceVariant,
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                    style = MaterialTheme.typography.labelLarge.copy(
+                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                    )
                 )
             }
         }
@@ -218,9 +219,8 @@ private fun CashFlowCard(
                     )
                     Text(
                         text = formatRupees(totalCredit),
-                        style = MaterialTheme.typography.titleMedium,
-                        color = M3_Pos,
-                        fontWeight = FontWeight.Bold
+                        style = MaterialTheme.typography.titleMedium.copy(fontFamily = FontFamily.Monospace),
+                        color = M3_Pos
                     )
                 }
 
@@ -232,9 +232,8 @@ private fun CashFlowCard(
                     )
                     Text(
                         text = formatRupees(totalDebit),
-                        style = MaterialTheme.typography.titleMedium,
-                        color = M3_Error,
-                        fontWeight = FontWeight.Bold
+                        style = MaterialTheme.typography.titleMedium.copy(fontFamily = FontFamily.Monospace),
+                        color = M3_Error
                     )
                 }
             }
@@ -258,9 +257,8 @@ private fun CashFlowCard(
                     )
                     Text(
                         text = formatRupees(netSavings),
-                        style = MaterialTheme.typography.titleLarge,
-                        color = if (netSavings >= 0) M3_OnSurface else M3_Error,
-                        fontWeight = FontWeight.Bold
+                        style = MaterialTheme.typography.titleLarge.copy(fontFamily = FontFamily.Monospace),
+                        color = if (netSavings >= 0) M3_OnSurface else M3_Error
                     )
                 }
 
@@ -346,13 +344,12 @@ private fun MicroSpendsCard(
                 Column(horizontalAlignment = Alignment.End) {
                     Text(
                         text = formatRupees(sum),
-                        style = MaterialTheme.typography.titleLarge,
-                        color = M3_Tertiary,
-                        fontWeight = FontWeight.Bold
+                        style = MaterialTheme.typography.titleLarge.copy(fontFamily = FontFamily.Monospace),
+                        color = M3_Tertiary
                     )
                     Text(
                         text = "${String.format("%.1f", percentage)}% of debits",
-                        style = MaterialTheme.typography.bodySmall,
+                        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
                         color = M3_OnSurfaceVariant
                     )
                 }
@@ -438,9 +435,11 @@ private fun TopMerchantsCard(
                                 )
                                 Text(
                                     text = formatRupees(merchantSpend.totalAmount),
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = M3_OnSurface,
-                                    fontWeight = FontWeight.Bold
+                                    style = MaterialTheme.typography.bodyMedium.copy(
+                                        fontFamily = FontFamily.Monospace,
+                                        fontWeight = FontWeight.Bold
+                                    ),
+                                    color = M3_OnSurface
                                 )
                             }
                             Spacer(modifier = Modifier.height(4.dp))
@@ -517,9 +516,11 @@ private fun AccountSplitCard(
                                 )
                                 Text(
                                     text = formatRupees(accountSpend.totalAmount),
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = M3_OnSurface,
-                                    fontWeight = FontWeight.Bold
+                                    style = MaterialTheme.typography.bodyMedium.copy(
+                                        fontFamily = FontFamily.Monospace,
+                                        fontWeight = FontWeight.Bold
+                                    ),
+                                    color = M3_OnSurface
                                 )
                             }
                             Spacer(modifier = Modifier.height(4.dp))
@@ -572,9 +573,8 @@ private fun SpendingPatternsCard(
 
             Text(
                 text = "Spends by Day",
-                style = MaterialTheme.typography.labelMedium,
-                color = M3_OnSurface,
-                fontWeight = FontWeight.Bold
+                style = MaterialTheme.typography.titleMedium,
+                color = M3_OnSurface
             )
 
             Spacer(modifier = Modifier.height(8.dp))
@@ -597,7 +597,6 @@ private fun SpendingPatternsCard(
                         Text(
                             text = if (amount > 0) "₹${String.format("%.0f", amount)}" else "",
                             style = MaterialTheme.typography.labelSmall,
-                            fontSize = 9.sp,
                             color = M3_OnSurfaceVariant,
                             maxLines = 1
                         )
@@ -623,9 +622,8 @@ private fun SpendingPatternsCard(
 
             Text(
                 text = "Spends by Time of Day",
-                style = MaterialTheme.typography.labelMedium,
-                color = M3_OnSurface,
-                fontWeight = FontWeight.Bold
+                style = MaterialTheme.typography.titleMedium,
+                color = M3_OnSurface
             )
 
             Spacer(modifier = Modifier.height(12.dp))

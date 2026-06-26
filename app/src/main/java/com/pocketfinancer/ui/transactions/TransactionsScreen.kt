@@ -93,8 +93,7 @@ fun TransactionsScreen(
                     Text(
                         text = "transactionLedger",
                         color = M3_OnSurface,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 18.sp
+                        style = MaterialTheme.typography.titleLarge
                     )
                 }
                 Row(
@@ -131,28 +130,31 @@ fun TransactionsScreen(
 
             // ── Segmented Control ──
             val segments = listOf("All", "Debits", "Credits")
-            SingleChoiceSegmentedButtonRow(
+            Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp, vertical = 8.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(M3_SurfaceContainerLow)
+                    .padding(4.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
             ) {
-                segments.forEachIndexed { index, label ->
-                    val selected = state.activeSegment == label
-                    SegmentedButton(
-                        selected = selected,
-                        onClick = { viewModel.updateSegment(label) },
-                        shape = SegmentedButtonDefaults.itemShape(index = index, count = segments.size),
-                        colors = SegmentedButtonDefaults.colors(
-                            activeContainerColor = M3_SecondaryContainer,
-                            activeContentColor = M3_OnSecondaryContainer,
-                            inactiveContainerColor = M3_SurfaceContainerLowest,
-                            inactiveContentColor = M3_OnSurfaceVariant
-                        )
+                segments.forEach { label ->
+                    val isSelected = state.activeSegment == label
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(if (isSelected) M3_SecondaryContainer else Color.Transparent)
+                            .clickable { viewModel.updateSegment(label) }
+                            .padding(vertical = 8.dp),
+                        contentAlignment = Alignment.Center
                     ) {
                         Text(
                             text = label,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Medium
+                            color = if (isSelected) M3_OnSecondaryContainer else M3_OnSurfaceVariant,
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
                         )
                     }
                 }
@@ -173,7 +175,7 @@ fun TransactionsScreen(
                 FilterChip(
                     selected = isAllSelected,
                     onClick = { viewModel.selectAccount("All") },
-                    label = { Text("All Accounts", fontSize = 11.sp, fontWeight = FontWeight.SemiBold) },
+                    label = { Text("All Accounts", style = MaterialTheme.typography.labelMedium) },
                     colors = FilterChipDefaults.filterChipColors(
                         selectedContainerColor = M3_Primary,
                         selectedLabelColor = M3_OnPrimary,
@@ -198,7 +200,7 @@ fun TransactionsScreen(
                                         .size(8.dp)
                                         .background(getAccountColor(acc.name), CircleShape)
                                 )
-                                Text(shortName, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                                Text(shortName, style = MaterialTheme.typography.labelMedium)
                             }
                         },
                         colors = FilterChipDefaults.filterChipColors(
@@ -229,15 +231,15 @@ fun TransactionsScreen(
                 Text(
                     text = "Current View Outbound",
                     color = M3_OnSurfaceVariant,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Medium
+                    style = MaterialTheme.typography.bodyMedium
                 )
                 Text(
                     text = "OUT  ₹${String.format("%,.2f", debitsSum)}",
                     color = M3_OnSurface,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.Bold,
-                    fontFamily = FontFamily.Monospace
+                    style = MaterialTheme.typography.bodyMedium.copy(
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold
+                    )
                 )
             }
 
@@ -258,7 +260,7 @@ fun TransactionsScreen(
                     Text(
                         text = "No transactions found",
                         color = M3_OnSurfaceVariant,
-                        fontSize = 14.sp
+                        style = MaterialTheme.typography.bodyMedium
                     )
                 }
             } else {
@@ -302,7 +304,7 @@ fun TransactionsScreen(
                                 Text(
                                     text = "No transactions found",
                                     color = M3_OnSurfaceVariant,
-                                    fontSize = 14.sp
+                                    style = MaterialTheme.typography.bodyMedium
                                 )
                             }
                         }
@@ -426,8 +428,7 @@ fun TransactionsScreen(
                             Text(
                                 text = tx.merchant,
                                 color = M3_OnSurface,
-                                fontSize = 20.sp,
-                                fontWeight = FontWeight.Bold,
+                                style = MaterialTheme.typography.titleLarge.copy(fontSize = 20.sp),
                                 maxLines = 2,
                                 overflow = TextOverflow.Ellipsis,
                                 textAlign = androidx.compose.ui.text.style.TextAlign.Center,
@@ -437,7 +438,7 @@ fun TransactionsScreen(
                             Text(
                                 text = "${formatFullDate(tx.date)} · ${formatTime(tx.date)}",
                                 color = M3_OnSurfaceVariant,
-                                fontSize = 13.sp
+                                style = MaterialTheme.typography.bodySmall.copy(fontSize = 13.sp)
                             )
                             if (tx.isEdited) {
                                 Spacer(modifier = Modifier.height(6.dp))
@@ -457,8 +458,7 @@ fun TransactionsScreen(
                                     Text(
                                         text = "Corrected by User",
                                         color = M3_OnPrimaryContainer,
-                                        fontSize = 10.sp,
-                                        fontWeight = FontWeight.Bold
+                                        style = MaterialTheme.typography.labelSmall
                                     )
                                 }
                             }
@@ -466,9 +466,7 @@ fun TransactionsScreen(
                             Text(
                                 text = (if (tx.type == TransactionType.CREDIT) "+" else "−") + "₹${String.format("%,.2f", tx.amount)}",
                                 color = if (tx.type == TransactionType.CREDIT) M3_Pos else M3_OnSurface,
-                                fontSize = 32.sp,
-                                fontWeight = FontWeight.Bold,
-                                fontFamily = FontFamily.Monospace
+                                style = MaterialTheme.typography.displayLarge
                             )
                         }
 
@@ -986,9 +984,7 @@ fun DayHeaderRow(
         Text(
             text = dateText.uppercase(),
             color = M3_OnSurfaceVariant,
-            fontSize = 10.sp,
-            fontWeight = FontWeight.Bold,
-            letterSpacing = 1.sp
+            style = MaterialTheme.typography.labelSmall
         )
         Row(
             horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -997,9 +993,7 @@ fun DayHeaderRow(
                 Text(
                     text = "↓ ₹${String.format("%,.0f", debitTotal)}",
                     color = M3_OnErrorContainer,
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.Bold,
-                    fontFamily = FontFamily.Monospace,
+                    style = MaterialTheme.typography.labelSmall,
                     modifier = Modifier
                         .background(M3_ErrorContainer, RoundedCornerShape(4.dp))
                         .padding(horizontal = 6.dp, vertical = 2.dp)
@@ -1009,9 +1003,7 @@ fun DayHeaderRow(
                 Text(
                     text = "↑ ₹${String.format("%,.0f", creditTotal)}",
                     color = M3_OnPosContainer,
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.Bold,
-                    fontFamily = FontFamily.Monospace,
+                    style = MaterialTheme.typography.labelSmall,
                     modifier = Modifier
                         .background(M3_PosContainer, RoundedCornerShape(4.dp))
                         .padding(horizontal = 6.dp, vertical = 2.dp)
@@ -1078,8 +1070,7 @@ fun TransactionItem(
                     Text(
                         text = transaction.merchant,
                         color = M3_OnSurface,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Medium,
+                        style = MaterialTheme.typography.bodyMedium,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
@@ -1091,8 +1082,7 @@ fun TransactionItem(
                         Text(
                             text = transaction.accountLabel ?: "Unknown Card",
                             color = M3_OnSurfaceVariant,
-                            fontSize = 9.sp,
-                            fontFamily = FontFamily.Monospace,
+                            style = MaterialTheme.typography.labelMedium.copy(fontSize = 10.sp),
                             modifier = Modifier
                                 .background(M3_SurfaceContainerHigh, RoundedCornerShape(4.dp))
                                 .padding(horizontal = 6.dp, vertical = 1.dp)
@@ -1101,8 +1091,7 @@ fun TransactionItem(
                             Text(
                                 text = "Corrected",
                                 color = M3_OnPrimaryContainer,
-                                fontSize = 8.sp,
-                                fontWeight = FontWeight.Bold,
+                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp),
                                 modifier = Modifier
                                     .background(M3_PrimaryContainer, RoundedCornerShape(4.dp))
                                     .padding(horizontal = 4.dp, vertical = 1.dp)
@@ -1118,15 +1107,16 @@ fun TransactionItem(
                 Text(
                     text = (if (transaction.type == TransactionType.CREDIT) "+" else "−") + "₹${String.format("%,.2f", transaction.amount)}",
                     color = if (transaction.type == TransactionType.CREDIT) M3_Pos else M3_OnSurface,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    fontFamily = FontFamily.Monospace
+                    style = MaterialTheme.typography.bodyMedium.copy(
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.SemiBold
+                    )
                 )
                 Spacer(modifier = Modifier.height(2.dp))
                 Text(
                     text = formatTime(transaction.date),
                     color = M3_OnSurfaceVariant,
-                    fontSize = 10.sp
+                    style = MaterialTheme.typography.labelSmall
                 )
             }
         }

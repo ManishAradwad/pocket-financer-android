@@ -112,8 +112,7 @@ fun HomeScreen(
                     Text(
                         text = "pocketFinancer",
                         color = M3_OnSurface,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 18.sp
+                        style = MaterialTheme.typography.titleLarge
                     )
                 }
 
@@ -159,8 +158,7 @@ fun HomeScreen(
                                 Text(
                                     text = dateEyebrow,
                                     color = M3_OnSurfaceVariant,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.SemiBold
+                                    style = MaterialTheme.typography.labelSmall
                                 )
                             }
                             Spacer(modifier = Modifier.height(8.dp))
@@ -171,15 +169,15 @@ fun HomeScreen(
                                 Text(
                                     text = "₹",
                                     color = M3_OnSurfaceVariant.copy(alpha = 0.6f),
-                                    fontSize = 20.sp,
-                                    fontWeight = FontWeight.Light
+                                    style = MaterialTheme.typography.displayLarge.copy(
+                                        fontSize = 20.sp,
+                                        fontWeight = FontWeight.Light
+                                    )
                                 )
                                 Text(
                                     text = String.format("%,.2f", pData.amount),
                                     color = M3_OnSurface,
-                                    fontSize = 32.sp,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    fontFamily = FontFamily.SansSerif
+                                    style = MaterialTheme.typography.displayLarge
                                 )
                             }
                             Spacer(modifier = Modifier.height(12.dp))
@@ -191,8 +189,7 @@ fun HomeScreen(
                                 Text(
                                     text = "${pData.txnCount} transactions",
                                     color = M3_OnSurfaceVariant,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Medium
+                                    style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Medium)
                                 )
                                 val isLess = pData.deltaDir == "less"
                                 val containerColor = if (isLess) M3_PosContainer else M3_ErrorContainer
@@ -215,8 +212,7 @@ fun HomeScreen(
                                     Text(
                                         text = pData.deltaLabel,
                                         color = textColor,
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold
+                                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold)
                                     )
                                 }
                             }
@@ -241,8 +237,8 @@ fun HomeScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = 16.dp)
-                            .background(M3_SurfaceContainerLowest, RoundedCornerShape(100))
-                            .border(BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.3f)), RoundedCornerShape(100))
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(M3_SurfaceContainerLow)
                             .padding(4.dp),
                         horizontalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
@@ -256,7 +252,7 @@ fun HomeScreen(
                             Column(
                                 modifier = Modifier
                                     .weight(1f)
-                                    .clip(RoundedCornerShape(100))
+                                    .clip(RoundedCornerShape(8.dp))
                                     .background(btnBg)
                                     .clickable { viewModel.selectPeriod(period) }
                                     .padding(vertical = 8.dp),
@@ -265,15 +261,15 @@ fun HomeScreen(
                                 Text(
                                     text = period,
                                     color = btnText,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Medium
+                                    style = MaterialTheme.typography.labelLarge.copy(
+                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                                    )
                                 )
                                 Spacer(modifier = Modifier.height(2.dp))
                                 Text(
                                     text = "₹${String.format("%,.0f", periodInfo.amount)}",
                                     color = valText,
-                                    fontSize = 10.sp,
-                                    fontFamily = FontFamily.Monospace
+                                    style = MaterialTheme.typography.labelSmall
                                 )
                             }
                         }
@@ -301,8 +297,7 @@ fun HomeScreen(
                                 Text(
                                     text = "Recent synced transactions",
                                     color = M3_OnSurface,
-                                    fontSize = 14.sp,
-                                    fontWeight = FontWeight.Bold
+                                    style = MaterialTheme.typography.titleMedium
                                 )
                                 Row(
                                     modifier = Modifier
@@ -315,8 +310,7 @@ fun HomeScreen(
                                     Text(
                                         text = "All",
                                         color = M3_Primary,
-                                        fontSize = 12.sp,
-                                        fontWeight = FontWeight.Bold
+                                        style = MaterialTheme.typography.labelLarge
                                     )
                                     Icon(
                                         imageVector = Icons.Default.ChevronRight,
@@ -338,7 +332,7 @@ fun HomeScreen(
                                     Text(
                                         text = "No transactions for this period",
                                         color = M3_OnSurfaceVariant,
-                                        fontSize = 12.sp
+                                        style = MaterialTheme.typography.bodySmall
                                     )
                                 }
                             } else {
@@ -386,8 +380,7 @@ fun HomeScreen(
                                                 Text(
                                                     text = tx.merchant,
                                                     color = M3_OnSurface,
-                                                    fontSize = 14.sp,
-                                                    fontWeight = FontWeight.Medium,
+                                                    style = MaterialTheme.typography.bodyMedium,
                                                     maxLines = 1,
                                                     overflow = TextOverflow.Ellipsis
                                                 )
@@ -395,8 +388,7 @@ fun HomeScreen(
                                                 Text(
                                                     text = tx.accountLabel ?: "Unknown Account",
                                                     color = M3_OnSurfaceVariant,
-                                                    fontSize = 9.sp,
-                                                    fontFamily = FontFamily.Monospace,
+                                                    style = MaterialTheme.typography.labelMedium.copy(fontSize = 10.sp),
                                                     modifier = Modifier
                                                         .background(M3_SurfaceContainerHigh, RoundedCornerShape(4.dp))
                                                         .padding(horizontal = 6.dp, vertical = 1.dp)
@@ -407,15 +399,16 @@ fun HomeScreen(
                                             Text(
                                                 text = (if (tx.type == TransactionType.CREDIT) "+" else "−") + "₹${String.format("%,.2f", tx.amount)}",
                                                 color = if (tx.type == TransactionType.CREDIT) M3_Pos else M3_OnSurface,
-                                                fontSize = 14.sp,
-                                                fontWeight = FontWeight.SemiBold,
-                                                fontFamily = FontFamily.Monospace
+                                                style = MaterialTheme.typography.bodyMedium.copy(
+                                                    fontFamily = FontFamily.Monospace,
+                                                    fontWeight = FontWeight.SemiBold
+                                                )
                                             )
                                             Spacer(modifier = Modifier.height(2.dp))
                                             Text(
                                                 text = formatTime(tx.date),
                                                 color = M3_OnSurfaceVariant,
-                                                fontSize = 10.sp
+                                                style = MaterialTheme.typography.labelSmall
                                             )
                                         }
                                     }
@@ -796,26 +789,22 @@ fun SyncStrip(
                         }
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "MESSAGE STREAM SYNCED",
-                                color = M3_OnSurfaceVariant.copy(alpha = 0.8f),
-                                fontSize = 9.sp,
-                                fontWeight = FontWeight.Bold,
-                                letterSpacing = 1.sp,
-                                fontFamily = FontFamily.Monospace
-                            )
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text(
-                                text = "Up to Date (Last 7 Days)",
-                                color = M3_OnSurface,
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text(
-                                text = "Click to re-scan local device messages",
-                                color = M3_OnSurfaceVariant,
-                                fontSize = 10.sp
-                            )
+                                 text = "MESSAGE STREAM SYNCED",
+                                 color = M3_OnSurfaceVariant.copy(alpha = 0.8f),
+                                 style = MaterialTheme.typography.labelSmall
+                             )
+                             Spacer(modifier = Modifier.height(2.dp))
+                             Text(
+                                 text = "Up to Date (Last 7 Days)",
+                                 color = M3_OnSurface,
+                                 style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold)
+                             )
+                             Spacer(modifier = Modifier.height(2.dp))
+                             Text(
+                                 text = "Click to re-scan local device messages",
+                                 color = M3_OnSurfaceVariant,
+                                 style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp)
+                             )
                         }
                         Row(
                             modifier = Modifier
@@ -835,8 +824,7 @@ fun SyncStrip(
                             Text(
                                 text = "Scan",
                                 color = M3_Primary,
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Bold
+                                style = MaterialTheme.typography.labelLarge.copy(fontSize = 11.sp)
                             )
                         }
                     }

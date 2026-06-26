@@ -43,6 +43,7 @@ fun PocketFinancerTheme(
 ) {
     MaterialTheme(
         colorScheme = DarkColorScheme,
+        typography = PocketFinancerTypography,
         content = content
     )
 }
