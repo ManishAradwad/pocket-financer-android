@@ -42,7 +42,8 @@ data class HomeSyncState(
     val thinkingOutput: String = "",
     val jsonOutput: String = "",
     val activeSmsPerformance: String? = null,
-    val hasThinkingMode: Boolean = false
+    val hasThinkingMode: Boolean = false,
+    val activeModelName: String? = null
 ) {
     enum class Status {
         IDLE, SYNCING, DONE
@@ -99,7 +100,8 @@ class HomeSyncManager @Inject constructor(
                 queue = mergedQueue,
                 currentIndex = null,
                 currentStageIndex = null,
-                hasThinkingMode = llamaEngine.hasThinkingMode
+                hasThinkingMode = llamaEngine.hasThinkingMode,
+                activeModelName = llamaEngine.getModelPath()?.let { File(it).name }
             )
         } catch (e: Exception) {
             Log.e(TAG, "Failed checking for unsynced SMS", e)
@@ -126,7 +128,8 @@ class HomeSyncManager @Inject constructor(
             thinkingOutput = "",
             jsonOutput = "",
             activeSmsPerformance = null,
-            hasThinkingMode = llamaEngine.hasThinkingMode
+            hasThinkingMode = llamaEngine.hasThinkingMode,
+            activeModelName = llamaEngine.getModelPath()?.let { File(it).name }
         )
 
         var loadedModelHere = false
@@ -158,7 +161,8 @@ class HomeSyncManager @Inject constructor(
                 }
                 loadedModelHere = true
                 _syncState.value = _syncState.value.copy(
-                    hasThinkingMode = llamaEngine.hasThinkingMode
+                    hasThinkingMode = llamaEngine.hasThinkingMode,
+                    activeModelName = slm.modelFile
                 )
             }
 

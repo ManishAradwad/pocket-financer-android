@@ -550,6 +550,7 @@ fun HomeScreen(
                     slmPrompt = viewModel.getSlmPrompt(telemetrySms.sender, telemetrySms.body),
                     parsedOutput = finalParsedOutput,
                     performanceText = performanceText,
+                    activeModelName = state.syncState.activeModelName,
                     onClose = { selectedTelemetrySms = null }
                 )
             }

@@ -88,7 +88,7 @@ class SlmSelectorUnitTest {
         // The test helper sets all CPU features to false when highPerf=false.
         val device = deviceWith(ramGb = 4.0f, highPerf = false)
         assertNotEquals(SlmTier.QWEN3_1_7B_Q8_0, selectSlmForDevice(device))
-        assertEquals(SlmTier.QWEN3_1_7B_Q4_K_M, selectSlmForDevice(device))
+        assertEquals(SlmTier.QWEN3_0_6B_Q8_0, selectSlmForDevice(device))
     }
 
     // ── Tier 2: Gemma 4 E2B Q4_K_M with 6GB RAM ────────────────────
@@ -199,15 +199,21 @@ class SlmSelectorUnitTest {
     }
 
     @Test
-    fun `selectSlmForDevice should pick Qwen3-1_7B Q4_K_M at exactly 3_5GB RAM boundary`() {
+    fun `selectSlmForDevice should pick Qwen3-0_6B Q8_0 at 3_5GB RAM without high performance`() {
         val device = deviceWith(ramGb = 3.5f, highPerf = false)
+        assertEquals(SlmTier.QWEN3_0_6B_Q8_0, selectSlmForDevice(device))
+    }
+
+    @Test
+    fun `selectSlmForDevice should pick Qwen3-1_7B Q4_K_M at exactly 3_5GB RAM boundary with high performance`() {
+        val device = deviceWith(ramGb = 3.5f, highPerf = true)
         assertEquals(SlmTier.QWEN3_1_7B_Q4_K_M, selectSlmForDevice(device))
     }
 
     @Test
-    fun `selectSlmForDevice should pick Qwen3-1_7B Q4_K_M at exactly 4_0GB RAM boundary without high performance`() {
+    fun `selectSlmForDevice should pick Qwen3-0_6B Q8_0 at exactly 4_0GB RAM boundary without high performance`() {
         val device = deviceWith(ramGb = 4.0f, highPerf = false)
-        assertEquals(SlmTier.QWEN3_1_7B_Q4_K_M, selectSlmForDevice(device))
+        assertEquals(SlmTier.QWEN3_0_6B_Q8_0, selectSlmForDevice(device))
     }
 
     @Test

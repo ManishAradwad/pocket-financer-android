@@ -41,6 +41,7 @@ fun TelemetryLogsViewer(
     slmPrompt: String,
     parsedOutput: String,
     performanceText: String?,
+    activeModelName: String? = null,
     onClose: () -> Unit
 ) {
     var expandedStage by remember { mutableStateOf<Int?>(null) }
@@ -133,7 +134,7 @@ fun TelemetryLogsViewer(
                             style = AppTypography.eyebrowBold
                         )
                         Text(
-                            text = "Qwen-1.7B-Chat-Int4.gguf",
+                            text = activeModelName ?: "Qwen-1.7B-Chat-Int4.gguf",
                             color = M3_OnSurfaceVariant,
                             style = AppTypography.timestamp
                         )

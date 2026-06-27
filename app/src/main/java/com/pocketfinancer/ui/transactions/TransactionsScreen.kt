@@ -934,6 +934,7 @@ fun TransactionsScreen(
                     slmPrompt = viewModel.getSlmPrompt(sms.sender, sms.body),
                     parsedOutput = finalParsedOutput,
                     performanceText = performanceText,
+                    activeModelName = state.syncState.activeModelName,
                     onClose = { selectedProcessingSms = null }
                 )
             }

@@ -149,8 +149,8 @@ fun selectSlmForDevice(device: DeviceCapabilities.DeviceInfo): SlmTier? {
         // Tier 3: Qwen3-1.7B Q8_0 (4GB+ RAM & high-perf CPU)
         ram >= 4.0f && highPerf -> SlmTier.QWEN3_1_7B_Q8_0
 
-        // Tier 4: Qwen3-1.7B Q4_K_M (3.5GB+ RAM)
-        ram >= 3.5f -> SlmTier.QWEN3_1_7B_Q4_K_M
+        // Tier 4: Qwen3-1.7B Q4_K_M (3.5GB+ RAM & high-perf CPU)
+        ram >= 3.5f && highPerf -> SlmTier.QWEN3_1_7B_Q4_K_M
 
         // Tier 5: Qwen3-0.6B Q8_0 (2.5GB+ RAM)
         ram >= 2.5f -> SlmTier.QWEN3_0_6B_Q8_0
@@ -196,10 +196,9 @@ fun explainTierSelection(
     }
 
     when (tier) {
-        SlmTier.GEMMA4_E2B_Q8_0 -> {
-            if (!highPerf) blockers.add("needs i8mm+dotprod CPU instructions (not detected)")
-        }
-        SlmTier.QWEN3_1_7B_Q8_0 -> {
+        SlmTier.GEMMA4_E2B_Q8_0,
+        SlmTier.QWEN3_1_7B_Q8_0,
+        SlmTier.QWEN3_1_7B_Q4_K_M -> {
             if (!highPerf) blockers.add("needs i8mm+dotprod CPU instructions (not detected)")
         }
         else -> {}
