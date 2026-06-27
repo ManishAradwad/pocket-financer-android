@@ -31,7 +31,7 @@ class AccountRepositoryTest {
         db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java)
             .allowMainThreadQueries()
             .build()
-        repo = AccountRepository(db.accountDao(), db.transactionDao())
+        repo = AccountRepository(db.accountDao(), db.transactionDao(), runConsolidationOnInit = false)
     }
 
     @After
@@ -218,7 +218,7 @@ class TransactionRepositoryTest {
         db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java)
             .allowMainThreadQueries()
             .build()
-        mockAccountRepo = AccountRepository(db.accountDao(), db.transactionDao())
+        mockAccountRepo = AccountRepository(db.accountDao(), db.transactionDao(), runConsolidationOnInit = false)
         repo = TransactionRepository(db, db.transactionDao(), mockAccountRepo)
     }
 

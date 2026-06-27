@@ -14,19 +14,28 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 @Singleton
-class AccountRepository @Inject constructor(
+class AccountRepository (
     private val accountDao: AccountDao,
-    private val transactionDao: TransactionDao
+    private val transactionDao: TransactionDao,
+    runConsolidationOnInit: Boolean = true
 ) {
     init {
-        CoroutineScope(Dispatchers.IO).launch {
-            try {
-                consolidateAccounts()
-            } catch (e: Exception) {
-                // Safe-guard logging
+        if (runConsolidationOnInit) {
+            CoroutineScope(Dispatchers.IO).launch {
+                try {
+                    consolidateAccounts()
+                } catch (e: Exception) {
+                    // Safe-guard logging
+                }
             }
         }
     }
+
+    @Inject
+    constructor(
+        accountDao: AccountDao,
+        transactionDao: TransactionDao
+    ) : this(accountDao, transactionDao, runConsolidationOnInit = true)
 
     suspend fun consolidateAccounts() {
         val allAccounts = accountDao.getAllOnce()
