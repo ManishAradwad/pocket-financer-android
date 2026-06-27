@@ -236,9 +236,7 @@ fun TransactionsScreen(
                 Text(
                     text = "OUT  ₹${String.format("%,.2f", debitsSum)}",
                     color = M3_OnSurface,
-                    style = AppTypography.amountCompact.copy(
-                        fontWeight = FontWeight.Bold
-                    )
+                    style = AppTypography.amountCompact
                 )
             }
 
@@ -418,7 +416,7 @@ fun TransactionsScreen(
                                     Text(
                                         text = getInitials(tx.merchant),
                                         color = textColor,
-                                        style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold)
+                                        style = AppTypography.screenHeader
                                     )
                                 }
                             }
@@ -498,7 +496,7 @@ fun TransactionsScreen(
                                     Text(
                                         text = if (tx.type == TransactionType.CREDIT) "Credit" else "Debit",
                                         color = badgeText,
-                                        style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold)
+                                        style = AppTypography.bodySmallBold
                                     )
                                 }
 
@@ -606,7 +604,7 @@ fun TransactionsScreen(
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
                                 text = "Correct Extraction Details",
-                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
+                                style = AppTypography.titleSmallBold
                             )
                         }
 
@@ -623,7 +621,7 @@ fun TransactionsScreen(
                             Text(
                                 text = "Correct Extracted Info",
                                 color = M3_OnSurface,
-                                style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold)
+                                style = AppTypography.screenHeader
                             )
                             Text(
                                 text = "EDIT MODE",
@@ -1084,9 +1082,7 @@ fun TransactionItem(
                 Text(
                     text = (if (transaction.type == TransactionType.CREDIT) "+" else "−") + "₹${String.format("%,.2f", transaction.amount)}",
                     color = if (transaction.type == TransactionType.CREDIT) M3_Pos else M3_OnSurface,
-                    style = AppTypography.amountCompact.copy(
-                        fontWeight = FontWeight.SemiBold
-                    )
+                    style = AppTypography.amountCompact
                 )
                 Spacer(modifier = Modifier.height(2.dp))
                 Text(

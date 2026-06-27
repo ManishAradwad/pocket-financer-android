@@ -105,7 +105,7 @@ fun HomeScreen(
                         Text(
                             text = "₹",
                             color = M3_OnPrimary,
-                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
+                            style = AppTypography.sectionHeadingBold
                         )
                     }
                     Text(
@@ -210,7 +210,7 @@ fun HomeScreen(
                                     Text(
                                         text = pData.deltaLabel,
                                         color = textColor,
-                                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold)
+                                        style = AppTypography.bodySmallBold
                                     )
                                 }
                             }
@@ -396,9 +396,7 @@ fun HomeScreen(
                                             Text(
                                                 text = (if (tx.type == TransactionType.CREDIT) "+" else "−") + "₹${String.format("%,.2f", tx.amount)}",
                                                 color = if (tx.type == TransactionType.CREDIT) M3_Pos else M3_OnSurface,
-                                                style = AppTypography.amountCompact.copy(
-                                                    fontWeight = FontWeight.SemiBold
-                                                )
+                                                style = AppTypography.amountCompact
                                             )
                                             Spacer(modifier = Modifier.height(2.dp))
                                             Text(
@@ -785,7 +783,7 @@ fun SyncStrip(
                              Text(
                                  text = "Up to Date (Last 7 Days)",
                                  color = M3_OnSurface,
-                                 style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold)
+                                 style = AppTypography.bodyMediumBold
                              )
                              Spacer(modifier = Modifier.height(2.dp))
                              Text(
@@ -997,13 +995,13 @@ fun DrawerContent(
                 Text(
                     text = "On-Device Local SLM Monitor",
                     color = M3_OnSurface,
-                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
+                    style = AppTypography.titleSmallBold
                 )
             }
             Text(
                 text = "Close",
                 color = M3_OnSurfaceVariant,
-                style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold),
+                style = AppTypography.bodySmallBold,
                 modifier = Modifier
                     .background(M3_SurfaceContainerHigh, RoundedCornerShape(100))
                     .border(BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.3f)), RoundedCornerShape(100))
@@ -1137,7 +1135,7 @@ fun DrawerContent(
                             Text(
                                 text = item.sender,
                                 color = M3_OnSurface,
-                                style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold)
+                                style = AppTypography.bodySmallBold
                             )
                             Text(
                                 text = formatTime(item.date),
@@ -1194,7 +1192,7 @@ fun DrawerContent(
                                 Text(
                                     text = "₹${item.parsedAmount}",
                                     color = M3_OnPosContainer,
-                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold)
+                                    style = AppTypography.eyebrowBold
                                 )
                             }
                         }
@@ -1214,7 +1212,7 @@ fun DrawerContent(
                 Text(
                     text = "Inspect Active SLM Token Logs",
                     color = M3_OnPrimary,
-                    style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold)
+                    style = AppTypography.bodySmallBold
                 )
                 Spacer(modifier = Modifier.width(4.dp))
                 Icon(
@@ -1248,7 +1246,7 @@ fun DrawerContent(
                 Text(
                     text = "Done",
                     color = Color.White,
-                    style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold)
+                    style = AppTypography.bodySmallBold
                 )
             }
         }

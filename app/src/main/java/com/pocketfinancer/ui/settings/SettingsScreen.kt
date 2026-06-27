@@ -310,7 +310,7 @@ private fun EngineCard(state: SettingsUiState, viewModel: SettingsViewModel) {
             Text(
                 text = progress,
                 color = M3_OnSurfaceVariant,
-                style = AppTypography.monoBody.copy(fontWeight = FontWeight.Bold),
+                style = AppTypography.monoBodyBold,
                 modifier = Modifier.padding(top = 8.dp)
             )
         }
@@ -402,7 +402,7 @@ private fun InfoRow(
                 Text(
                     text = text,
                     color = color,
-                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                    style = AppTypography.eyebrowBold,
                     modifier = Modifier
                         .background(color.copy(alpha = 0.15f), MaterialTheme.shapes.extraSmall)
                         .padding(horizontal = 6.dp, vertical = 2.dp)

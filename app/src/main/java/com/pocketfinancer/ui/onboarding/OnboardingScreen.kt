@@ -196,7 +196,7 @@ private fun WelcomeStepScreen(onNext: () -> Unit) {
                 Text(
                     text = "₹",
                     color = M3_OnPrimary,
-                    style = MaterialTheme.typography.headlineLarge.copy(fontWeight = FontWeight.Bold)
+                    style = AppTypography.headlineLargeBold
                 )
             }
 
@@ -205,7 +205,7 @@ private fun WelcomeStepScreen(onNext: () -> Unit) {
             Text(
                 text = "Your money,\nyour business. Period.",
                 color = M3_OnSurface,
-                style = MaterialTheme.typography.headlineMedium.copy(fontWeight = FontWeight.Bold),
+                style = AppTypography.headlineMediumBold,
                 textAlign = TextAlign.Center
             )
 
@@ -253,7 +253,7 @@ private fun WelcomeStepScreen(onNext: () -> Unit) {
             ) {
                 Text(
                     text = "Get Started",
-                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
+                    style = AppTypography.titleSmallBold
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Icon(
@@ -363,7 +363,7 @@ private fun PermissionsStepScreen(
             Text(
                 text = "Grant App Permissions",
                 color = M3_OnSurface,
-                style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.Bold)
+                style = AppTypography.headlineSmallBold
             )
 
             Spacer(modifier = Modifier.height(8.dp))
@@ -397,7 +397,7 @@ private fun PermissionsStepScreen(
                     )
                     Spacer(modifier = Modifier.width(12.dp))
                     Column {
-                        Text("SMS Access (Required)", color = M3_OnSurface, style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold))
+                        Text("SMS Access (Required)", color = M3_OnSurface, style = AppTypography.sectionHeadingBold)
                         Text("Used to read and parse your bank's transactional alerts locally on-device.", color = M3_OnSurfaceVariant, style = MaterialTheme.typography.labelSmall)
                     }
                 }
@@ -421,7 +421,7 @@ private fun PermissionsStepScreen(
                     )
                     Spacer(modifier = Modifier.width(12.dp))
                     Column {
-                        Text("Notifications (Optional)", color = M3_OnSurface, style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold))
+                        Text("Notifications (Optional)", color = M3_OnSurface, style = AppTypography.sectionHeadingBold)
                         Text("Shows persistent background updates during the local model download and SMS sync stages.", color = M3_OnSurfaceVariant, style = MaterialTheme.typography.labelSmall)
                     }
                 }
@@ -452,7 +452,7 @@ private fun PermissionsStepScreen(
                         Text(
                             text = "Notification Permission Denied",
                             color = M3_OnErrorContainer,
-                            style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold)
+                            style = AppTypography.bodySmallBold
                         )
                         Text(
                             text = "Model download and SMS parsing progress updates won't be available through system notifications. We promise this app never spams you with promotional alerts.",
@@ -485,7 +485,7 @@ private fun PermissionsStepScreen(
                         Text(
                             text = "SMS Permission Required",
                             color = M3_OnErrorContainer,
-                            style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold)
+                            style = AppTypography.bodySmallBold
                         )
                         Text(
                             text = "The app cannot function without SMS access. Please allow it to proceed.",
@@ -519,7 +519,7 @@ private fun PermissionsStepScreen(
                 Text(
                     text = "100% On-Device. No data ever leaves your device. We do not use cloud servers or trackers.",
                     color = M3_OnPosContainer,
-                    style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold)
+                    style = AppTypography.bodySmallBold
                 )
             }
         }
@@ -541,7 +541,7 @@ private fun PermissionsStepScreen(
             ) {
                 Text(
                     text = if (showNotificationWarning) "Proceed Anyway" else "Allow Permissions",
-                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
+                    style = AppTypography.titleSmallBold
                 )
             }
             Spacer(modifier = Modifier.height(8.dp))
@@ -605,7 +605,7 @@ private fun DownloadSlmStepScreen(
             Text(
                 text = "Build Your Private Engine",
                 color = M3_OnSurface,
-                style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.Bold)
+                style = AppTypography.headlineSmallBold
             )
 
             Spacer(modifier = Modifier.height(8.dp))
@@ -720,7 +720,7 @@ private fun DownloadSlmStepScreen(
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
                         text = "Download",
-                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
+                        style = AppTypography.titleSmallBold
                     )
                 }
             } else {
@@ -738,7 +738,7 @@ private fun DownloadSlmStepScreen(
                     Text(
                         text = "Downloading model...",
                         color = M3_OnSurface,
-                        style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold)
+                        style = AppTypography.bodySmallBold
                     )
                     Text(
                         text = if (downloadState.progress >= 0.98f) "Finalizing..." else "${"%.0f".format(downloadState.downloadedMb)} / ${"%.0f".format(downloadState.totalMb)} MB",
@@ -778,7 +778,7 @@ private fun DownloadSlmStepScreen(
                     Text(
                         text = "$progressPercent%$speedText$etaText",
                         color = M3_OnSurfaceVariant,
-                        style = AppTypography.timestamp.copy(fontWeight = FontWeight.Bold)
+                        style = AppTypography.eyebrowBold
                     )
                     Text(
                         text = "Do not close the app",
@@ -966,7 +966,7 @@ private fun ExtractionDemoGraphic() {
                                     Text(
                                         text = "SQLCipher Local Storage",
                                         color = M3_OnSurface,
-                                        style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold)
+                                        style = AppTypography.bodySmallBold
                                     )
                                     Spacer(modifier = Modifier.height(2.dp))
                                     Text(
@@ -1011,7 +1011,7 @@ private fun ExtractionDemoGraphic() {
                                         modifier = Modifier.fillMaxWidth(),
                                         horizontalArrangement = Arrangement.SpaceBetween
                                     ) {
-                                        Text("Monthly Shopping Spend", color = M3_OnSurface, style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold))
+                                        Text("Monthly Shopping Spend", color = M3_OnSurface, style = AppTypography.eyebrowBold)
                                         Text("₹5,000 / ₹40,000", color = M3_OnSurfaceVariant, style = AppTypography.accountCode)
                                     }
                                     Spacer(modifier = Modifier.height(4.dp))
@@ -1065,7 +1065,7 @@ private fun JsonLine(key: String, value: String, isNumber: Boolean = false, isLa
         Text(
             text = value + (if (isLast) "" else ","),
             color = if (isNumber) M3_Error else M3_OnSurface,
-            style = AppTypography.monoBody.copy(fontWeight = FontWeight.Bold)
+            style = AppTypography.monoBodyBold
         )
     }
 }
@@ -1189,7 +1189,7 @@ private fun SyncingStepScreen(
             Text(
                 text = "Sync Failed",
                 color = M3_OnSurface,
-                style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold)
+                style = AppTypography.screenHeader
             )
             Spacer(modifier = Modifier.height(8.dp))
             Text(
@@ -1238,7 +1238,7 @@ private fun SyncingStepScreen(
                     Text(
                         text = "${(progress * 100).toInt()}%",
                         color = Color.White,
-                        style = MaterialTheme.typography.headlineMedium.copy(fontWeight = FontWeight.Bold)
+                        style = AppTypography.headlineMediumBold
                     )
                     Spacer(modifier = Modifier.height(2.dp))
                     
@@ -1315,7 +1315,7 @@ private fun SyncingStepScreen(
                     Text(
                         text = "₹${"%,.2f".format(spendsTotal)}",
                         color = Color.White,
-                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
+                        style = AppTypography.sectionHeadingBold
                     )
                 }
 
@@ -1348,7 +1348,7 @@ private fun SyncingStepScreen(
                     Text(
                         text = "$parsedCount / ${if (transactionalCount > 0) transactionalCount else "-"}",
                         color = Color.White,
-                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
+                        style = AppTypography.sectionHeadingBold
                     )
                 }
             }
@@ -1408,7 +1408,7 @@ private fun SyncingStepScreen(
                                         Text(
                                             text = tx.merchant,
                                             color = M3_OnSurface,
-                                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                            style = AppTypography.eyebrowBold,
                                             maxLines = 1,
                                             overflow = TextOverflow.Ellipsis
                                         )
@@ -1421,7 +1421,7 @@ private fun SyncingStepScreen(
                                     Text(
                                         text = "₹${"%,.2f".format(tx.amount)}",
                                         color = if (tx.type == "debit") M3_OnSurface else M3_Pos,
-                                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold)
+                                        style = AppTypography.eyebrowBold
                                     )
                                 }
                             }

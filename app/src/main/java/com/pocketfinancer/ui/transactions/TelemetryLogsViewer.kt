@@ -88,13 +88,13 @@ fun TelemetryLogsViewer(
                 Text(
                     text = "ON-DEVICE EXTRACTION LOGS",
                     color = M3_OnSurface,
-                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                    style = AppTypography.titleSmallBold
                 )
             }
             Text(
                 text = "Close Logs",
                 color = M3_OnSurfaceVariant,
-                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                style = AppTypography.eyebrowBold,
                 modifier = Modifier
                     .background(M3_SurfaceContainerHigh, RoundedCornerShape(100))
                     .border(BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.3f)), RoundedCornerShape(100))
@@ -130,7 +130,7 @@ fun TelemetryLogsViewer(
                         Text(
                             text = "Local Device CPU Runtime",
                             color = M3_OnSurface,
-                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold)
+                            style = AppTypography.eyebrowBold
                         )
                         Text(
                             text = "Qwen-1.7B-Chat-Int4.gguf",
@@ -143,7 +143,7 @@ fun TelemetryLogsViewer(
                     Text(
                         text = performanceText ?: "Evaluating...",
                         color = M3_Primary,
-                        style = AppTypography.monoBody.copy(fontWeight = FontWeight.Bold)
+                        style = AppTypography.monoBodyBold
                     )
                     Text(
                         text = "llama.cpp JNI",
@@ -290,7 +290,7 @@ fun TelemetryLogsViewer(
                     Text(
                         text = "Zero Data Left Your Screen",
                         color = M3_OnSurface,
-                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold)
+                        style = AppTypography.eyebrowBold
                     )
                     Spacer(modifier = Modifier.height(2.dp))
                     Text(
@@ -354,12 +354,12 @@ private fun TimelineStage(
                         Text(
                             text = title,
                             color = M3_OnSurface,
-                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold)
+                            style = AppTypography.eyebrowBold
                         )
                         Text(
                             text = statusLabel,
                             color = statusColor,
-                            style = AppTypography.eyebrow.copy(fontWeight = FontWeight.SemiBold)
+                            style = AppTypography.eyebrow
                         )
                     }
                 }
