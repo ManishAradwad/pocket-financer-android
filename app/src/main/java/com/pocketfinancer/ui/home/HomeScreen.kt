@@ -105,8 +105,7 @@ fun HomeScreen(
                         Text(
                             text = "₹",
                             color = M3_OnPrimary,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 16.sp
+                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
                         )
                     }
                     Text(
@@ -169,15 +168,14 @@ fun HomeScreen(
                                 Text(
                                     text = "₹",
                                     color = M3_OnSurfaceVariant.copy(alpha = 0.6f),
-                                    style = MaterialTheme.typography.displayLarge.copy(
-                                        fontSize = 20.sp,
+                                    style = AppTypography.amountMedium.copy(
                                         fontWeight = FontWeight.Light
                                     )
                                 )
                                 Text(
                                     text = String.format("%,.2f", pData.amount),
                                     color = M3_OnSurface,
-                                    style = MaterialTheme.typography.displayLarge
+                                    style = AppTypography.amountHero
                                 )
                             }
                             Spacer(modifier = Modifier.height(12.dp))
@@ -371,8 +369,7 @@ fun HomeScreen(
                                                     Text(
                                                         text = getInitials(tx.merchant),
                                                         color = textColor,
-                                                        fontSize = 14.sp,
-                                                        fontWeight = FontWeight.Bold
+                                                        style = MaterialTheme.typography.titleMedium
                                                     )
                                                 }
                                             }
@@ -388,7 +385,7 @@ fun HomeScreen(
                                                 Text(
                                                     text = tx.accountLabel ?: "Unknown Account",
                                                     color = M3_OnSurfaceVariant,
-                                                    style = MaterialTheme.typography.labelMedium.copy(fontSize = 10.sp),
+                                                    style = AppTypography.accountCode,
                                                     modifier = Modifier
                                                         .background(M3_SurfaceContainerHigh, RoundedCornerShape(4.dp))
                                                         .padding(horizontal = 6.dp, vertical = 1.dp)
@@ -399,8 +396,7 @@ fun HomeScreen(
                                             Text(
                                                 text = (if (tx.type == TransactionType.CREDIT) "+" else "−") + "₹${String.format("%,.2f", tx.amount)}",
                                                 color = if (tx.type == TransactionType.CREDIT) M3_Pos else M3_OnSurface,
-                                                style = MaterialTheme.typography.bodyMedium.copy(
-                                                    fontFamily = FontFamily.Monospace,
+                                                style = AppTypography.amountCompact.copy(
                                                     fontWeight = FontWeight.SemiBold
                                                 )
                                             )
@@ -611,21 +607,19 @@ fun SyncStrip(
                                 Text(
                                     text = "INCOMING MESSAGE STREAM",
                                     color = M3_OnPrimaryContainer.copy(alpha = 0.8f),
-                                    fontSize = 10.sp,
-                                    fontWeight = FontWeight.Bold
+                                    style = AppTypography.eyebrow
                                 )
                                 Spacer(modifier = Modifier.height(2.dp))
                                 Text(
                                     text = "$pendingCount Unsynced SMS Found",
                                     color = M3_OnSurface,
-                                    fontSize = 13.sp,
-                                    fontWeight = FontWeight.Bold
+                                    style = MaterialTheme.typography.titleSmall
                                 )
                                 Spacer(modifier = Modifier.height(2.dp))
                                 Text(
                                     text = if (isExpanded) "Click to collapse" else "Click to view pending messages",
                                     color = M3_OnPrimaryContainer.copy(alpha = 0.75f),
-                                    fontSize = 10.sp
+                                    style = MaterialTheme.typography.bodySmall
                                 )
                             }
                             if (!isExpanded) {
@@ -647,8 +641,7 @@ fun SyncStrip(
                                     Text(
                                         text = "Process",
                                         color = M3_OnPrimary,
-                                        fontSize = 10.sp,
-                                        fontWeight = FontWeight.Bold
+                                        style = AppTypography.eyebrow
                                     )
                                 }
                             } else {
@@ -692,8 +685,7 @@ fun SyncStrip(
                                             Text(
                                                 text = getInitials(sms.sender),
                                                 color = M3_OnPrimaryContainer,
-                                                fontSize = 9.sp,
-                                                fontWeight = FontWeight.Bold
+                                                style = AppTypography.eyebrow
                                             )
                                         }
                                         Column(modifier = Modifier.weight(1f)) {
@@ -705,22 +697,19 @@ fun SyncStrip(
                                                 Text(
                                                     text = sms.sender,
                                                     color = M3_OnSurface,
-                                                    fontSize = 11.sp,
-                                                    fontWeight = FontWeight.Bold
+                                                    style = MaterialTheme.typography.labelSmall
                                                 )
                                                 Text(
                                                     text = formatTime(sms.date),
                                                     color = M3_OnPrimaryContainer.copy(alpha = 0.6f),
-                                                    fontSize = 9.sp,
-                                                    fontFamily = FontFamily.Monospace
+                                                    style = AppTypography.timestamp
                                                 )
                                             }
                                             Spacer(modifier = Modifier.height(2.dp))
                                             Text(
                                                 text = sms.body,
                                                 color = M3_OnSurfaceVariant,
-                                                fontSize = 10.sp,
-                                                fontFamily = FontFamily.Monospace,
+                                                style = AppTypography.monoBody,
                                                 maxLines = 2,
                                                 overflow = TextOverflow.Ellipsis
                                             )
@@ -750,8 +739,7 @@ fun SyncStrip(
                                 Text(
                                     text = "Start Syncing & Inspect",
                                     color = M3_OnPrimary,
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold
+                                    style = MaterialTheme.typography.labelSmall
                                 )
                             }
                         }
@@ -803,7 +791,7 @@ fun SyncStrip(
                              Text(
                                  text = "Click to re-scan local device messages",
                                  color = M3_OnSurfaceVariant,
-                                 style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp)
+                                 style = MaterialTheme.typography.bodySmall
                              )
                         }
                         Row(
@@ -824,7 +812,7 @@ fun SyncStrip(
                             Text(
                                 text = "Scan",
                                 color = M3_Primary,
-                                style = MaterialTheme.typography.labelLarge.copy(fontSize = 11.sp)
+                                style = AppTypography.eyebrow
                             )
                         }
                     }
@@ -869,9 +857,7 @@ fun SyncStrip(
                             Text(
                                 text = "RUNNING LOCAL QWEN SLM",
                                 color = Color(0xFFF2C94C),
-                                fontSize = 9.sp,
-                                fontFamily = FontFamily.Monospace,
-                                fontWeight = FontWeight.Bold
+                                style = AppTypography.eyebrow
                             )
                             Box(
                                 modifier = Modifier
@@ -883,15 +869,13 @@ fun SyncStrip(
                         Text(
                             text = if (activeSms != null) "Analyzing ${activeSms.sender}..." else "Processing SMS stream...",
                             color = M3_OnSurface,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Bold
+                            style = MaterialTheme.typography.titleSmall
                         )
                         Spacer(modifier = Modifier.height(2.dp))
                         Text(
                             text = "Message $current of $total",
                             color = M3_OnSurfaceVariant,
-                            fontSize = 10.sp,
-                            fontFamily = FontFamily.Monospace
+                            style = AppTypography.eyebrow
                         )
                     }
                     Row(
@@ -911,8 +895,7 @@ fun SyncStrip(
                         Text(
                             text = "Inspect",
                             color = M3_Primary,
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Bold
+                            style = AppTypography.eyebrow
                         )
                     }
                 }
@@ -946,21 +929,19 @@ fun SyncStrip(
                         Text(
                             text = "EXTRACTION COMPLETE",
                             color = M3_Pos.copy(alpha = 0.9f),
-                            fontSize = 9.sp,
-                            fontWeight = FontWeight.Bold
+                            style = AppTypography.eyebrow
                         )
                         Spacer(modifier = Modifier.height(2.dp))
                         Text(
                             text = "All local messages matched",
                             color = M3_OnSurface,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Bold
+                            style = MaterialTheme.typography.titleSmall
                         )
                         Spacer(modifier = Modifier.height(2.dp))
                         Text(
                             text = "Balances updated offline successfully",
                             color = M3_OnPosContainer.copy(alpha = 0.85f),
-                            fontSize = 10.sp
+                            style = MaterialTheme.typography.bodySmall
                         )
                     }
                     Box(
@@ -972,8 +953,7 @@ fun SyncStrip(
                         Text(
                             text = "View Logs",
                             color = Color.White,
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Bold
+                            style = AppTypography.eyebrow
                         )
                     }
                 }
@@ -1017,15 +997,13 @@ fun DrawerContent(
                 Text(
                     text = "On-Device Local SLM Monitor",
                     color = M3_OnSurface,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.Bold
+                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
                 )
             }
             Text(
                 text = "Close",
                 color = M3_OnSurfaceVariant,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Bold,
+                style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold),
                 modifier = Modifier
                     .background(M3_SurfaceContainerHigh, RoundedCornerShape(100))
                     .border(BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.3f)), RoundedCornerShape(100))
@@ -1040,9 +1018,7 @@ fun DrawerContent(
         Text(
             text = "TARGET EXTRACTION QUEUE",
             color = M3_OnSurfaceVariant,
-            fontSize = 10.sp,
-            fontWeight = FontWeight.Bold,
-            letterSpacing = 1.sp
+            style = AppTypography.eyebrow
         )
         Spacer(modifier = Modifier.height(10.dp))
 
@@ -1140,9 +1116,7 @@ fun DrawerContent(
                                     Text(
                                         text = (idx + 1).toString(),
                                         color = M3_OnSurfaceVariant,
-                                        fontSize = 10.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        style = androidx.compose.ui.text.TextStyle(
+                                        style = AppTypography.eyebrow.copy(
                                             platformStyle = androidx.compose.ui.text.PlatformTextStyle(
                                                 includeFontPadding = false
                                             ),
@@ -1163,22 +1137,19 @@ fun DrawerContent(
                             Text(
                                 text = item.sender,
                                 color = M3_OnSurface,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold
+                                style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold)
                             )
                             Text(
                                 text = formatTime(item.date),
                                 color = M3_OnSurfaceVariant,
-                                fontSize = 10.sp,
-                                fontFamily = FontFamily.Monospace
+                                style = AppTypography.timestamp
                             )
                         }
                         Spacer(modifier = Modifier.height(2.dp))
                         Text(
                             text = item.body,
                             color = M3_OnSurfaceVariant,
-                            fontSize = 11.sp,
-                            fontFamily = FontFamily.Monospace,
+                            style = AppTypography.monoBody,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
@@ -1197,8 +1168,7 @@ fun DrawerContent(
                             Text(
                                 text = "Filtered: non-transactional metadata matched",
                                 color = M3_Error,
-                                fontSize = 9.sp,
-                                fontFamily = FontFamily.Monospace,
+                                style = AppTypography.eyebrow,
                                 modifier = Modifier
                                     .background(M3_ErrorContainer.copy(alpha = 0.1f), RoundedCornerShape(4.dp))
                                     .padding(horizontal = 6.dp, vertical = 2.dp)
@@ -1219,15 +1189,12 @@ fun DrawerContent(
                                 Text(
                                     text = "Extracted: ${item.parsedMerchant}",
                                     color = M3_OnPosContainer,
-                                    fontSize = 10.sp,
-                                    fontFamily = FontFamily.Monospace
+                                    style = AppTypography.eyebrow
                                 )
                                 Text(
                                     text = "₹${item.parsedAmount}",
                                     color = M3_OnPosContainer,
-                                    fontSize = 10.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    fontFamily = FontFamily.SansSerif
+                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold)
                                 )
                             }
                         }
@@ -1247,8 +1214,7 @@ fun DrawerContent(
                 Text(
                     text = "Inspect Active SLM Token Logs",
                     color = M3_OnPrimary,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold
+                    style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold)
                 )
                 Spacer(modifier = Modifier.width(4.dp))
                 Icon(
@@ -1262,8 +1228,7 @@ fun DrawerContent(
             Text(
                 text = "Observe compiler attention vectors & parsed JSON in realtime.",
                 color = M3_OnSurfaceVariant.copy(alpha = 0.7f),
-                fontSize = 9.sp,
-                fontFamily = FontFamily.Monospace,
+                style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.fillMaxWidth(),
                 textAlign = androidx.compose.ui.text.style.TextAlign.Center
             )
@@ -1283,8 +1248,7 @@ fun DrawerContent(
                 Text(
                     text = "Done",
                     color = Color.White,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold
+                    style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold)
                 )
             }
         }
@@ -1347,9 +1311,7 @@ fun PipelineStagesView(
             Text(
                 text = "QWEN.SLM PIPELINE STAGES:",
                 color = M3_Primary,
-                fontSize = 9.sp,
-                fontWeight = FontWeight.Bold,
-                fontFamily = FontFamily.Monospace
+                style = AppTypography.eyebrow
             )
         }
 
@@ -1389,9 +1351,7 @@ fun PipelineStagesView(
                         Text(
                             text = indicator,
                             color = color,
-                            fontSize = 10.sp,
-                            fontFamily = FontFamily.Monospace,
-                            fontWeight = FontWeight.Bold
+                            style = AppTypography.eyebrow
                         )
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
@@ -1400,9 +1360,7 @@ fun PipelineStagesView(
                             Text(
                                 text = name,
                                 color = if (isCurrent) M3_OnSurface else if (isDone) M3_OnSurfaceVariant else M3_OnSurfaceVariant.copy(alpha = 0.4f),
-                                fontSize = 9.5.sp,
-                                fontFamily = FontFamily.Monospace,
-                                fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal
+                                style = AppTypography.eyebrow.copy(fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal)
                             )
                             if (isPhase1 && thinkingOutput.isNotEmpty()) {
                                 Icon(
@@ -1434,9 +1392,7 @@ fun PipelineStagesView(
                     Text(
                         text = badgeText.uppercase(),
                         color = badgeTextClr,
-                        fontSize = 8.sp,
-                        fontWeight = FontWeight.Bold,
-                        fontFamily = FontFamily.Monospace,
+                        style = AppTypography.eyebrow,
                         modifier = Modifier
                             .background(badgeBg, RoundedCornerShape(4.dp))
                             .padding(horizontal = 4.dp, vertical = 1.dp)
@@ -1462,9 +1418,7 @@ fun PipelineStagesView(
                             Text(
                                 text = displayOutput,
                                 color = M3_OnSurfaceVariant,
-                                fontSize = 9.sp,
-                                fontFamily = FontFamily.Monospace,
-                                lineHeight = 12.sp
+                                style = AppTypography.monoBody
                             )
                         }
                     }

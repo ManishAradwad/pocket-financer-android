@@ -88,16 +88,13 @@ fun TelemetryLogsViewer(
                 Text(
                     text = "ON-DEVICE EXTRACTION LOGS",
                     color = M3_OnSurface,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Bold,
-                    fontFamily = FontFamily.Monospace
+                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
                 )
             }
             Text(
                 text = "Close Logs",
                 color = M3_OnSurfaceVariant,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Bold,
+                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
                 modifier = Modifier
                     .background(M3_SurfaceContainerHigh, RoundedCornerShape(100))
                     .border(BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.3f)), RoundedCornerShape(100))
@@ -133,14 +130,12 @@ fun TelemetryLogsViewer(
                         Text(
                             text = "Local Device CPU Runtime",
                             color = M3_OnSurface,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold)
                         )
                         Text(
                             text = "Qwen-1.7B-Chat-Int4.gguf",
                             color = M3_OnSurfaceVariant,
-                            fontSize = 9.sp,
-                            fontFamily = FontFamily.Monospace
+                            style = AppTypography.timestamp
                         )
                     }
                 }
@@ -148,15 +143,12 @@ fun TelemetryLogsViewer(
                     Text(
                         text = performanceText ?: "Evaluating...",
                         color = M3_Primary,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        fontFamily = FontFamily.Monospace
+                        style = AppTypography.monoBody.copy(fontWeight = FontWeight.Bold)
                     )
                     Text(
                         text = "llama.cpp JNI",
                         color = M3_OnSurfaceVariant,
-                        fontSize = 9.sp,
-                        fontFamily = FontFamily.Monospace
+                        style = AppTypography.timestamp
                     )
                 }
             }
@@ -186,15 +178,12 @@ fun TelemetryLogsViewer(
                     Text(
                         text = "ORIGINAL RAW MESSAGE BODY",
                         color = M3_OnSurfaceVariant,
-                        fontSize = 9.sp,
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 1.sp
+                        style = AppTypography.eyebrow
                     )
                     Text(
                         text = "\"$body\"",
                         color = M3_OnSurfaceVariant,
-                        fontSize = 10.sp,
-                        fontFamily = FontFamily.Monospace,
+                        style = AppTypography.monoBody,
                         modifier = Modifier
                             .fillMaxWidth()
                             .background(M3_Surface, RoundedCornerShape(8.dp))
@@ -301,15 +290,13 @@ fun TelemetryLogsViewer(
                     Text(
                         text = "Zero Data Left Your Screen",
                         color = M3_OnSurface,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold
+                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold)
                     )
                     Spacer(modifier = Modifier.height(2.dp))
                     Text(
                         text = "Parameters run natively using llama.cpp within local native boundaries (JNI/NDK). Internet permission was not requested nor required.",
                         color = M3_OnSurfaceVariant,
-                        fontSize = 9.sp,
-                        lineHeight = 13.sp
+                        style = MaterialTheme.typography.labelSmall
                     )
                 }
             }
@@ -367,15 +354,12 @@ private fun TimelineStage(
                         Text(
                             text = title,
                             color = M3_OnSurface,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold)
                         )
                         Text(
                             text = statusLabel,
                             color = statusColor,
-                            fontSize = 9.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            fontFamily = FontFamily.Monospace
+                            style = AppTypography.eyebrow.copy(fontWeight = FontWeight.SemiBold)
                         )
                     }
                 }
@@ -411,10 +395,7 @@ private fun OutputBox(title: String, content: String) {
     Text(
         text = title,
         color = M3_OnSurfaceVariant,
-        fontSize = 10.sp,
-        fontWeight = FontWeight.Bold,
-        letterSpacing = 1.sp,
-        fontFamily = FontFamily.Monospace
+        style = AppTypography.eyebrow
     )
     Surface(
         color = M3_SurfaceContainerLowest,
@@ -427,8 +408,7 @@ private fun OutputBox(title: String, content: String) {
         Text(
             text = content,
             color = M3_OnSurface,
-            fontSize = 10.sp,
-            fontFamily = FontFamily.Monospace,
+            style = AppTypography.monoBody,
             modifier = Modifier.padding(10.dp)
         )
     }

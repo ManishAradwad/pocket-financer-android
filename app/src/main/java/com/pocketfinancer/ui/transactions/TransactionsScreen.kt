@@ -236,8 +236,7 @@ fun TransactionsScreen(
                 Text(
                     text = "OUT  ₹${String.format("%,.2f", debitsSum)}",
                     color = M3_OnSurface,
-                    style = MaterialTheme.typography.bodyMedium.copy(
-                        fontFamily = FontFamily.Monospace,
+                    style = AppTypography.amountCompact.copy(
                         fontWeight = FontWeight.Bold
                     )
                 )
@@ -419,8 +418,7 @@ fun TransactionsScreen(
                                     Text(
                                         text = getInitials(tx.merchant),
                                         color = textColor,
-                                        fontSize = 22.sp,
-                                        fontWeight = FontWeight.Bold
+                                        style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold)
                                     )
                                 }
                             }
@@ -428,7 +426,7 @@ fun TransactionsScreen(
                             Text(
                                 text = tx.merchant,
                                 color = M3_OnSurface,
-                                style = MaterialTheme.typography.titleLarge.copy(fontSize = 20.sp),
+                                style = AppTypography.screenHeader,
                                 maxLines = 2,
                                 overflow = TextOverflow.Ellipsis,
                                 textAlign = androidx.compose.ui.text.style.TextAlign.Center,
@@ -438,7 +436,7 @@ fun TransactionsScreen(
                             Text(
                                 text = "${formatFullDate(tx.date)} · ${formatTime(tx.date)}",
                                 color = M3_OnSurfaceVariant,
-                                style = MaterialTheme.typography.bodySmall.copy(fontSize = 13.sp)
+                                style = MaterialTheme.typography.bodyMedium
                             )
                             if (tx.isEdited) {
                                 Spacer(modifier = Modifier.height(6.dp))
@@ -466,7 +464,7 @@ fun TransactionsScreen(
                             Text(
                                 text = (if (tx.type == TransactionType.CREDIT) "+" else "−") + "₹${String.format("%,.2f", tx.amount)}",
                                 color = if (tx.type == TransactionType.CREDIT) M3_Pos else M3_OnSurface,
-                                style = MaterialTheme.typography.displayLarge
+                                style = AppTypography.amountHero
                             )
                         }
 
@@ -500,8 +498,7 @@ fun TransactionsScreen(
                                     Text(
                                         text = if (tx.type == TransactionType.CREDIT) "Credit" else "Debit",
                                         color = badgeText,
-                                        fontSize = 12.sp,
-                                        fontWeight = FontWeight.Bold
+                                        style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold)
                                     )
                                 }
 
@@ -522,8 +519,7 @@ fun TransactionsScreen(
                                     Text(
                                         text = tx.accountLabel ?: "Unknown Account",
                                         color = M3_OnSurface,
-                                        fontSize = 12.sp,
-                                        fontFamily = FontFamily.Monospace
+                                        style = AppTypography.accountCode
                                     )
                                 }
                             }
@@ -547,10 +543,7 @@ fun TransactionsScreen(
                             Text(
                                 text = "SLM OUTPUT",
                                 color = M3_OnSurfaceVariant,
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Bold,
-                                letterSpacing = 1.sp,
-                                fontFamily = FontFamily.Monospace
+                                style = AppTypography.eyebrow
                             )
                         }
                         Spacer(modifier = Modifier.height(8.dp))
@@ -575,22 +568,19 @@ fun TransactionsScreen(
                                     Text(
                                         text = key,
                                         color = M3_OnSurfaceVariant,
-                                        fontSize = 12.sp,
-                                        fontFamily = FontFamily.Monospace,
+                                        style = AppTypography.monoBody,
                                         modifier = Modifier.width(100.dp)
                                     )
                                     Text(
                                         text = ":",
                                         color = M3_OnSurfaceVariant,
-                                        fontSize = 12.sp,
-                                        fontFamily = FontFamily.Monospace,
+                                        style = AppTypography.monoBody,
                                         modifier = Modifier.padding(horizontal = 4.dp)
                                     )
                                     Text(
                                         text = value,
                                         color = if (value.startsWith("\"")) Color(0xFF98C379) else Color(0xFF61AFEF),
-                                        fontSize = 12.sp,
-                                        fontFamily = FontFamily.Monospace,
+                                        style = AppTypography.monoBody,
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis
                                     )
@@ -616,8 +606,7 @@ fun TransactionsScreen(
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
                                 text = "Correct Extraction Details",
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.Bold
+                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
                             )
                         }
 
@@ -634,16 +623,12 @@ fun TransactionsScreen(
                             Text(
                                 text = "Correct Extracted Info",
                                 color = M3_OnSurface,
-                                fontSize = 18.sp,
-                                fontWeight = FontWeight.Bold
+                                style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold)
                             )
                             Text(
                                 text = "EDIT MODE",
                                 color = M3_Primary,
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Bold,
-                                letterSpacing = 1.sp,
-                                fontFamily = FontFamily.Monospace,
+                                style = AppTypography.eyebrow,
                                 modifier = Modifier
                                     .background(M3_PrimaryContainer.copy(alpha = 0.3f), RoundedCornerShape(4.dp))
                                     .padding(horizontal = 6.dp, vertical = 2.dp)
@@ -812,10 +797,7 @@ fun TransactionsScreen(
                         Text(
                             text = "SOURCE SMS",
                             color = M3_OnSurfaceVariant,
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Bold,
-                            letterSpacing = 1.sp,
-                            fontFamily = FontFamily.Monospace
+                            style = AppTypography.eyebrow
                         )
                     }
                     Spacer(modifier = Modifier.height(8.dp))
@@ -836,14 +818,12 @@ fun TransactionsScreen(
                             Text(
                                 text = "from  ",
                                 color = M3_OnSurfaceVariant,
-                                fontSize = 10.sp
+                                style = MaterialTheme.typography.bodySmall
                             )
                             Text(
                                 text = tx.sender,
                                 color = M3_OnPrimaryContainer,
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Bold,
-                                fontFamily = FontFamily.Monospace,
+                                style = AppTypography.accountCode,
                                 modifier = Modifier
                                     .background(M3_PrimaryContainer, RoundedCornerShape(4.dp))
                                     .padding(horizontal = 6.dp, vertical = 2.dp)
@@ -852,9 +832,7 @@ fun TransactionsScreen(
                         Text(
                             text = tx.rawMessage,
                             color = M3_OnSurfaceVariant,
-                            fontSize = 12.sp,
-                            fontFamily = FontFamily.Monospace,
-                            lineHeight = 18.sp,
+                            style = AppTypography.monoBody,
                             modifier = Modifier.padding(12.dp)
                         )
                     }
@@ -1059,8 +1037,7 @@ fun TransactionItem(
                         Text(
                             text = getInitials(transaction.merchant),
                             color = textColor,
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Bold
+                            style = MaterialTheme.typography.titleMedium
                         )
                     }
                 }
@@ -1082,7 +1059,7 @@ fun TransactionItem(
                         Text(
                             text = transaction.accountLabel ?: "Unknown Card",
                             color = M3_OnSurfaceVariant,
-                            style = MaterialTheme.typography.labelMedium.copy(fontSize = 10.sp),
+                            style = AppTypography.accountCode,
                             modifier = Modifier
                                 .background(M3_SurfaceContainerHigh, RoundedCornerShape(4.dp))
                                 .padding(horizontal = 6.dp, vertical = 1.dp)
@@ -1091,7 +1068,7 @@ fun TransactionItem(
                             Text(
                                 text = "Corrected",
                                 color = M3_OnPrimaryContainer,
-                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp),
+                                style = AppTypography.eyebrow,
                                 modifier = Modifier
                                     .background(M3_PrimaryContainer, RoundedCornerShape(4.dp))
                                     .padding(horizontal = 4.dp, vertical = 1.dp)
@@ -1107,8 +1084,7 @@ fun TransactionItem(
                 Text(
                     text = (if (transaction.type == TransactionType.CREDIT) "+" else "−") + "₹${String.format("%,.2f", transaction.amount)}",
                     color = if (transaction.type == TransactionType.CREDIT) M3_Pos else M3_OnSurface,
-                    style = MaterialTheme.typography.bodyMedium.copy(
-                        fontFamily = FontFamily.Monospace,
+                    style = AppTypography.amountCompact.copy(
                         fontWeight = FontWeight.SemiBold
                     )
                 )
@@ -1276,24 +1252,19 @@ fun ActiveSyncCard(
                         Text(
                             text = if (isComplete) "LOCAL PIPELINE COMPLETED" else "LOCAL PIPELINE ENGINE RUNNING",
                             color = indicatorColor,
-                            fontSize = 9.sp,
-                            fontWeight = FontWeight.Bold,
-                            fontFamily = FontFamily.Monospace
+                            style = AppTypography.eyebrow
                         )
                         Text(
                             text = if (isComplete) "Finished sync" else "Pending from ${activeSms.sender}",
                             color = M3_OnSurface,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Bold
+                            style = MaterialTheme.typography.titleSmall
                         )
                     }
                 }
                 Text(
                     text = if (isComplete) "COMPLETE" else "PROCESSING",
                     color = indicatorColor,
-                    fontSize = 8.sp,
-                    fontWeight = FontWeight.Bold,
-                    fontFamily = FontFamily.Monospace,
+                    style = AppTypography.eyebrow,
                     modifier = Modifier
                         .background(indicatorColor.copy(alpha = 0.15f), RoundedCornerShape(4.dp))
                         .padding(horizontal = 6.dp, vertical = 2.dp)
@@ -1303,8 +1274,7 @@ fun ActiveSyncCard(
             Text(
                 text = activeSms.body,
                 color = M3_OnSurfaceVariant,
-                fontSize = 11.sp,
-                fontFamily = FontFamily.Monospace,
+                style = AppTypography.monoBody,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
@@ -1325,14 +1295,12 @@ fun ActiveSyncCard(
                 Text(
                     text = "SLM Stage: $stageName",
                     color = M3_OnSurfaceVariant,
-                    fontSize = 10.sp,
-                    fontFamily = FontFamily.Monospace
+                    style = AppTypography.eyebrow
                 )
                 Text(
                     text = "View extraction logs",
                     color = M3_Primary,
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.Bold
+                    style = AppTypography.eyebrow
                 )
             }
         }

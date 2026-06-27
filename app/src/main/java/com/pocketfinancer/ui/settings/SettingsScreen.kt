@@ -195,8 +195,7 @@ private fun EngineCard(state: SettingsUiState, viewModel: SettingsViewModel) {
             Text(
                 text = error,
                 color = M3_Error,
-                style = MaterialTheme.typography.bodySmall,
-                fontFamily = FontFamily.Monospace,
+                style = AppTypography.monoBody,
                 modifier = Modifier.padding(top = 8.dp)
             )
         }
@@ -311,8 +310,7 @@ private fun EngineCard(state: SettingsUiState, viewModel: SettingsViewModel) {
             Text(
                 text = progress,
                 color = M3_OnSurfaceVariant,
-                style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold),
-                fontFamily = FontFamily.Monospace,
+                style = AppTypography.monoBody.copy(fontWeight = FontWeight.Bold),
                 modifier = Modifier.padding(top = 8.dp)
             )
         }
@@ -338,8 +336,7 @@ private fun EngineCard(state: SettingsUiState, viewModel: SettingsViewModel) {
             Text(
                 text = error,
                 color = M3_Error,
-                style = MaterialTheme.typography.bodySmall,
-                fontFamily = FontFamily.Monospace,
+                style = AppTypography.monoBody,
                 modifier = Modifier.padding(top = 8.dp)
             )
         }
@@ -367,10 +364,7 @@ private fun SectionCard(title: String, content: @Composable ColumnScope.() -> Un
             Text(
                 text = title,
                 color = M3_OnSurfaceVariant,
-                style = MaterialTheme.typography.labelSmall.copy(
-                    letterSpacing = 1.sp,
-                    fontWeight = FontWeight.Medium
-                )
+                style = MaterialTheme.typography.labelSmall
             )
             Spacer(modifier = Modifier.height(12.dp))
             content()
@@ -436,8 +430,7 @@ private fun LabelValue(label: String, value: String) {
         Text(
             text = value,
             color = M3_OnSurfaceVariant,
-            style = MaterialTheme.typography.bodySmall,
-            fontFamily = FontFamily.Monospace
+            style = AppTypography.monoBody
         )
     }
 }
@@ -460,8 +453,7 @@ private fun OutputBox(title: String, content: String) {
         Text(
             text = content,
             color = M3_OnSurface,
-            style = MaterialTheme.typography.bodySmall,
-            fontFamily = FontFamily.Monospace,
+            style = AppTypography.monoBody,
             modifier = Modifier.padding(10.dp)
         )
     }
