@@ -76,7 +76,7 @@ class InsightsViewModel @Inject constructor(
         val totalCredit = credits.sumOf { it.amount }
         val netSavings = totalCredit - totalDebit
         val savingsRate = if (totalCredit > 0) {
-            ((totalCredit - totalDebit) / totalCredit * 100.0).coerceIn(-100.0, 100.0)
+            ((totalCredit - totalDebit) / totalCredit * 100.0)
         } else {
             0.0
         }

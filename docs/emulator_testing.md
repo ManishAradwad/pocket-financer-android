@@ -1,75 +1,107 @@
 # Android Emulator Testing Commands Reference
 
-This document compiles the exact commands used to build, install, debug, and interact with the application on the Android emulator from the command line (PowerShell/CMD).
+This document compiles the exact commands, scripts, coordinates, and navigation targets used to build, install, debug, and interact with the application on the Android emulator (`emulator-5554`).
+
+> [!NOTE]
+> Android SDK `platform-tools` (containing `adb`) and Miniconda Python are added to the user's global `PATH`. You can run `adb` and `python` directly from any command line session.
 
 ---
 
-## 1. Build the APK
-Compiles the project and generates the debug APK using the embedded Java environment in Android Studio:
+## 1. Build and Install via Gradle
+You can compile and manage the app packages using the project Gradle wrapper directly:
 ```powershell
-& "C:\Program Files\Android\Android Studio\jbr\bin\java.exe" -cp gradle/wrapper/gradle-wrapper.jar org.gradle.wrapper.GradleWrapperMain :app:assembleDebug
+# Compile Kotlin source code
+.\gradlew.bat compileDebugKotlin
+
+# Run unit tests
+.\gradlew.bat testDebugUnitTest
+
+# Build and install the debug APK
+.\gradlew.bat installDebug
 ```
 
-## 2. Install the APK
-Installs/re-installs the compiled APK on the active emulator instance (`emulator-5554`):
-```powershell
-& "C:\Users\manis\AppData\Local\Android\Sdk\platform-tools\adb.exe" -s emulator-5554 install -r app/build/outputs/apk/debug/app-debug.apk
-```
+---
 
-## 3. Control the App Process
+## 2. Launching the App
 Force-stops and restarts the application by invoking its primary launcher activity:
 ```powershell
 # Force-stop the application
-& "C:\Users\manis\AppData\Local\Android\Sdk\platform-tools\adb.exe" -s emulator-5554 shell am force-stop com.pocketfinancer
+adb -s emulator-5554 shell am force-stop com.pocketfinancer
 
 # Start MainActivity
-& "C:\Users\manis\AppData\Local\Android\Sdk\platform-tools\adb.exe" -s emulator-5554 shell am start -n com.pocketfinancer/com.pocketfinancer.MainActivity
+adb -s emulator-5554 shell am start -n com.pocketfinancer/com.pocketfinancer.MainActivity
 ```
 
-## 4. UI Interaction & Navigation
+---
+
+## 3. SMS Pipeline Injection & Processing
+To test the JNI local SLM parsing, you can inject sample SMS messages into the emulator's inbox:
+```powershell
+# Inject a preset dataset of transactional and promotional SMS
+python inject_sms.py
+```
+*After injection:*
+1. Open the app on the emulator.
+2. Under the **Home** tab, tap the **Process** button on the "Unsynced Messages" banner.
+3. Tap **Inspect** to open the "On-Device Local SLM Monitor" bottom sheet to track progress in real-time.
+
+---
+
+## 4. UI Navigation & Bottom Tab Coordinates
+The app uses a bottom navigation bar. Below are the exact tap coordinates for navigating between screens on a standard screen dimension (e.g., `1080x2400`):
+
+| Target Screen | Tap Coordinates | Action / Description |
+| :--- | :--- | :--- |
+| **Home** | `adb shell input tap 127 2256` | Dashboard, period spend card, recent spends ledger. |
+| **Transactions** | `adb shell input tap 403 2256` | Ledger list, account filters, inline pipeline status. |
+| **Insights** | `adb shell input tap 678 2256` | Cash Flow, Chai index, merchant charts, distribution graphs. |
+| **Settings** | `adb shell input tap 953 2256` | Hardware capabilities, active SLM manager, developer reset. |
+
+---
+
+## 5. UI Interaction & Sheet Controls
 Simulates tap and swipe gestures directly on the emulator.
 
 ### A. Dump Screen Hierarchy (To find element coordinates)
 To inspect what is currently on the screen and locate clickable bounds:
 ```powershell
 # 1. Dump UI hierarchy XML to emulator storage
-& "C:\Users\manis\AppData\Local\Android\Sdk\platform-tools\adb.exe" -s emulator-5554 shell uiautomator dump /sdcard/window_dump.xml
+adb -s emulator-5554 shell uiautomator dump /sdcard/window_dump.xml
 
 # 2. Pull the XML file to the local machine to read it
-& "C:\Users\manis\AppData\Local\Android\Sdk\platform-tools\adb.exe" -s emulator-5554 pull /sdcard/window_dump.xml .\window_dump.xml
+adb -s emulator-5554 pull /sdcard/window_dump.xml .\window_dump.xml
 ```
 
-### B. Simulate Tap
-Simulates a touch at a specific `(x, y)` coordinate:
-```powershell
-# Tap coordinates for Settings Tab (Center of [896,2277][1009,2319] -> 952, 2298)
-& "C:\Users\manis\AppData\Local\Android\Sdk\platform-tools\adb.exe" -s emulator-5554 shell input tap 952 2298
+### B. Dismissing the Telemetry Logs Bottom Sheet
+If the extraction logs sheet or sync monitor overlay is expanded and you need to dismiss it:
+* **Tap Outside:** Tap a coordinate above the sheet (e.g., `adb shell input tap 500 500`).
+* **Close Logs Button:** Tap the "Close Logs" button at the top-right of the sheet: `adb shell input tap 909 108`.
+* **Hardware Back Key:** Send the Android back button input event: `adb shell input keyevent 4`.
 
-# Tap coordinates for RUN TEST SMS Button (Center of [423,1931][657,1973] -> 540, 1952)
-& "C:\Users\manis\AppData\Local\Android\Sdk\platform-tools\adb.exe" -s emulator-5554 shell input tap 540 1952
-```
-
-### C. Simulate Swipe (Scroll)
-Performs a swipe gesture from `(start_x, start_y)` to `(end_x, end_y)` over a duration:
+### C. Scrolling the Screen
+Performs a swipe gesture from `(start_x, start_y)` to `(end_x, end_y)` to scroll the content:
 ```powershell
-# Swipe from bottom-middle upwards to scroll down
-& "C:\Users\manis\AppData\Local\Android\Sdk\platform-tools\adb.exe" -s emulator-5554 shell input swipe 500 1500 500 500
+# Scroll down: Swipe from bottom-middle upwards
+adb -s emulator-5554 shell input swipe 500 1500 500 500
+
+# Scroll up: Swipe from top-middle downwards
+adb -s emulator-5554 shell input swipe 500 500 500 1500
 ```
 
 ---
 
-## 5. Verify App Files (Sandbox Access)
-Executes file listing within the application's secure storage using `run-as`:
+## 6. Accessing Sandbox Data
+Executes secure directory file listing within the application's private storage directory using Android's `run-as`:
 ```powershell
 # List the downloaded model file details
-& "C:\Users\manis\AppData\Local\Android\Sdk\platform-tools\adb.exe" -s emulator-5554 shell run-as com.pocketfinancer ls -la files/models/Qwen3-1.7B-Q4_K_M.gguf
+adb -s emulator-5554 shell run-as com.pocketfinancer ls -la files/models/
 ```
 
 ---
 
-## 6. Monitoring Logs
+## 7. Monitoring Logs
 Dumps the device logs to inspect warnings, runtime errors, or crash traces:
 ```powershell
-# Read current log dump
-& "C:\Users\manis\AppData\Local\Android\Sdk\platform-tools\adb.exe" -s emulator-5554 logcat -d
+# Read current logcat buffer
+adb -s emulator-5554 logcat -d
 ```

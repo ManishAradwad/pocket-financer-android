@@ -273,7 +273,11 @@ private fun CashFlowCard(
                             .padding(horizontal = 8.dp, vertical = 4.dp)
                     ) {
                         Text(
-                            text = "${if (savingsRate >= 0) "+" else ""}${String.format("%.1f", savingsRate)}% saved",
+                            text = if (savingsRate >= 0) {
+                                "+${String.format("%.1f", savingsRate)}% saved"
+                            } else {
+                                "${String.format("%.1f", Math.abs(savingsRate))}% overspent"
+                            },
                             color = if (savingsRate >= 0) M3_OnPosContainer else M3_OnErrorContainer,
                             style = MaterialTheme.typography.labelSmall,
                             fontWeight = FontWeight.Bold
@@ -347,8 +351,13 @@ private fun MicroSpendsCard(
                         style = MaterialTheme.typography.titleLarge.copy(fontFamily = FontFamily.Monospace),
                         color = M3_Tertiary
                     )
+                    val percentText = when {
+                        percentage == 0.0 -> "0.0%"
+                        percentage < 0.1 -> "< 0.1%"
+                        else -> "${String.format("%.1f", percentage)}%"
+                    }
                     Text(
-                        text = "${String.format("%.1f", percentage)}% of debits",
+                        text = "$percentText of debits",
                         style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
                         color = M3_OnSurfaceVariant
                     )
@@ -584,7 +593,7 @@ private fun SpendingPatternsCard(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(80.dp),
+                    .height(100.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.Bottom
             ) {
@@ -603,11 +612,18 @@ private fun SpendingPatternsCard(
                         Spacer(modifier = Modifier.height(4.dp))
                         Box(
                             modifier = Modifier
-                                .width(16.dp)
-                                .fillMaxHeight(ratio)
-                                .clip(RoundedCornerShape(topStart = 4.dp, topEnd = 4.dp))
-                                .background(M3_Tertiary)
-                        )
+                                .height(56.dp)
+                                .width(16.dp),
+                            contentAlignment = Alignment.BottomCenter
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .width(16.dp)
+                                    .fillMaxHeight(ratio)
+                                    .clip(RoundedCornerShape(topStart = 4.dp, topEnd = 4.dp))
+                                    .background(M3_Tertiary)
+                            )
+                        }
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
                             text = day,

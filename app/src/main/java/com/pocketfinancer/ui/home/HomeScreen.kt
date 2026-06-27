@@ -152,10 +152,10 @@ fun HomeScreen(
                                 Box(
                                     modifier = Modifier
                                         .size(6.dp)
-                                        .background(M3_Pos, CircleShape)
+                                        .background(M3_Error, CircleShape)
                                 )
                                 Text(
-                                    text = dateEyebrow,
+                                    text = "$dateEyebrow • Spends",
                                     color = M3_OnSurfaceVariant,
                                     style = MaterialTheme.typography.labelSmall
                                 )
@@ -392,7 +392,10 @@ fun HomeScreen(
                                                 )
                                             }
                                         }
-                                        Column(horizontalAlignment = Alignment.End) {
+                                        Column(
+                                            horizontalAlignment = Alignment.End,
+                                            modifier = Modifier.padding(start = 8.dp)
+                                        ) {
                                             Text(
                                                 text = (if (tx.type == TransactionType.CREDIT) "+" else "−") + "₹${String.format("%,.2f", tx.amount)}",
                                                 color = if (tx.type == TransactionType.CREDIT) M3_Pos else M3_OnSurface,

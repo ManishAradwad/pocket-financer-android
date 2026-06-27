@@ -81,10 +81,10 @@ private fun HardwareCard(
         // GPU row
         device.gpu?.let { gpu ->
             InfoRow(label = "GPU", value = gpu.gpuType)
-            if (gpu.renderer.isNotEmpty()) {
-                LabelValue("", gpu.renderer)
-                LabelValue("", "OpenGL ${gpu.version}")
+            if (gpu.renderer.isNotEmpty() && gpu.gpuType != gpu.renderer) {
+                LabelValue("Renderer", gpu.renderer)
             }
+            LabelValue("OpenGL Version", gpu.version)
         } ?: InfoRow(label = "GPU", value = "Could not detect")
 
         // CPU row
@@ -182,12 +182,13 @@ private fun EngineCard(state: SettingsUiState, viewModel: SettingsViewModel) {
             LabelValue("Selected", "${slm.name} — ${slm.description}")
             LabelValue("File", slm.modelFile)
             LabelValue("Size", "${"%.0f".format(slm.sizeMb.toFloat())} MB")
-            LabelValue("Path", viewModel.getModelFilePath())
-        }
-
-        // Model path when loaded
-        if (state.modelPath != null) {
-            LabelValue("Loaded from", state.modelPath)
+            val fullPath = viewModel.getModelFilePath()
+            val shortPath = if (fullPath.contains("/files/models/")) {
+                ".../models/" + fullPath.substringAfter("/files/models/")
+            } else {
+                fullPath
+            }
+            LabelValue("Path", shortPath)
         }
 
         // Error
