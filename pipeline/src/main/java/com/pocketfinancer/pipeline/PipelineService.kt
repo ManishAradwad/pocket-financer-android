@@ -35,6 +35,7 @@ class PipelineService @Inject constructor(
     private val maxQueueLen = 200
 
     /** Whether the pipeline is currently processing an SMS. */
+    @Volatile
     private var isProcessing = false
 
     private val smsQueue = ArrayDeque<SmsReader.SmsMessage>()
@@ -67,10 +68,12 @@ class PipelineService @Inject constructor(
         if (!smsFilterPipeline.isTransactional(sms.address, sms.body)) {
             return
         }
-        if (smsQueue.size >= maxQueueLen) {
-            return
+        synchronized(smsQueue) {
+            if (smsQueue.size >= maxQueueLen) {
+                return
+            }
+            smsQueue.addLast(sms)
         }
-        smsQueue.addLast(sms)
         processQueue()
     }
 
@@ -78,12 +81,14 @@ class PipelineService @Inject constructor(
      * Enqueue multiple SMS messages (e.g., from history sync).
      */
     fun enqueueBatch(messages: List<SmsReader.SmsMessage>) {
-        for (sms in messages) {
-            if (!smsFilterPipeline.isTransactional(sms.address, sms.body)) {
-                continue
+        synchronized(smsQueue) {
+            for (sms in messages) {
+                if (!smsFilterPipeline.isTransactional(sms.address, sms.body)) {
+                    continue
+                }
+                if (smsQueue.size >= maxQueueLen) break
+                smsQueue.addLast(sms)
             }
-            if (smsQueue.size >= maxQueueLen) break
-            smsQueue.addLast(sms)
         }
         processQueue()
     }
@@ -93,29 +98,42 @@ class PipelineService @Inject constructor(
      */
     suspend fun drain(timeoutMs: Long = 30_000) {
         val deadline = System.currentTimeMillis() + timeoutMs
-        while (smsQueue.isNotEmpty() && System.currentTimeMillis() < deadline) {
+        while (System.currentTimeMillis() < deadline) {
+            val shouldWait = synchronized(smsQueue) {
+                smsQueue.isNotEmpty() || isProcessing
+            }
+            if (!shouldWait) {
+                break
+            }
             delay(100)
         }
     }
 
-    val queueSize: Int get() = smsQueue.size
+    val queueSize: Int get() = synchronized(smsQueue) { smsQueue.size }
 
     // ── Internal ─────────────────────────────────────────────────────────
 
     private fun processQueue() {
-        if (isProcessing || smsQueue.isEmpty()) return
-        isProcessing = true
+        synchronized(smsQueue) {
+            if (isProcessing || smsQueue.isEmpty()) return
+            isProcessing = true
+        }
 
         CoroutineScope(Dispatchers.IO).launch {
-            while (smsQueue.isNotEmpty()) {
-                val sms = smsQueue.removeFirst()
+            while (true) {
+                val sms = synchronized(smsQueue) {
+                    if (smsQueue.isEmpty()) {
+                        isProcessing = false
+                        return@launch
+                    }
+                    smsQueue.removeFirst()
+                }
                 try {
                     processSingle(sms)
                 } catch (e: Exception) {
                     emit(Stage.ERROR, "Pipeline error: ${e.message}")
                 }
             }
-            isProcessing = false
         }
     }
 
