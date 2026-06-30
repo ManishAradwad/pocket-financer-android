@@ -261,7 +261,7 @@ class HomeSyncManager @Inject constructor(
                             if (parsed != null) {
                                 val inferredBank = inferBankFromSender(processedItem.sender)
                                 val merchantName = parsed.counterparty?.takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
-                                    ?: if (inferredBank != "Unknown Bank") "Transaction ($inferredBank)" else "Unknown Merchant"
+                                    ?: if (inferredBank != "Unknown Account") "Transaction ($inferredBank)" else "Unknown Merchant"
 
                                 val parsedAcc = parsed.account
                                 val account = if (parsedAcc != null) {
@@ -373,7 +373,7 @@ class HomeSyncManager @Inject constructor(
             upper.contains("ICICI") -> "ICICI Bank"
             upper.contains("SBI") -> "State Bank of India"
             upper.contains("KOTAK") -> "Kotak Bank"
-            else -> "Unknown Bank"
+            else -> "Unknown Account"
         }
     }
 

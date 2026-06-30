@@ -58,7 +58,7 @@ Output:
         val defaultAccount = Account(
             id = UUID.randomUUID().toString(),
             name = "__UNKNOWN__",
-            bank = "Unknown Bank",
+            bank = "Unknown Account",
             type = "auto-extracted"
         )
         coEvery { accountRepository.ensureDefault() } returns defaultAccount

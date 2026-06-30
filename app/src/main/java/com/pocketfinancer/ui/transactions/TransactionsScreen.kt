@@ -1306,7 +1306,7 @@ fun ActiveSyncCard(
 }
 
 private fun getAccountShortName(acc: Account): String {
-    val bank = acc.bank.replace(" Bank", "")
+    val bank = if (acc.bank == "Unknown Bank" || acc.bank == "Unknown") "Unknown Account" else acc.bank
     val name = acc.name
     val runs = Regex("\\d+").findAll(name).toList()
     val digits = if (runs.isNotEmpty()) runs.last().value.takeLast(4) else ""

@@ -72,7 +72,7 @@ class AccountRepositoryTest {
         runBlocking {
             val account = repo.ensureDefault()
             assertEquals("__UNKNOWN__", account.name)
-            assertEquals("Unknown Bank", account.bank)
+            assertEquals("Unknown Account", account.bank)
             assertEquals("auto-extracted", account.type)
         }
     }
@@ -99,8 +99,8 @@ class AccountRepositoryTest {
     @Test
     fun `consolidateAccounts should merge duplicate accounts and update transaction references`() {
         runBlocking {
-            val acc1 = com.pocketfinancer.data.db.entity.AccountEntity("id1", "Unknown Bank A/c XX9141", "Unknown Bank", "auto-extracted")
-            val acc2 = com.pocketfinancer.data.db.entity.AccountEntity("id2", "A/C **9141", "Unknown Bank", "auto-extracted")
+            val acc1 = com.pocketfinancer.data.db.entity.AccountEntity("id1", "Unknown Account A/c XX9141", "Unknown Account", "auto-extracted")
+            val acc2 = com.pocketfinancer.data.db.entity.AccountEntity("id2", "A/C **9141", "Unknown Account", "auto-extracted")
             val acc3 = com.pocketfinancer.data.db.entity.AccountEntity("id3", "HDFC Bank A/c XX9141", "HDFC Bank", "auto-extracted")
             
             db.accountDao().insert(acc1)
@@ -143,8 +143,8 @@ class AccountRepositoryTest {
     @Test
     fun `consolidateAccounts should merge duplicates and delete stale even if no known-bank accounts exist`() {
         runBlocking {
-            val acc1 = com.pocketfinancer.data.db.entity.AccountEntity("id1", "Unknown Bank A/c XX9141", "Unknown Bank", "auto-extracted")
-            val acc2 = com.pocketfinancer.data.db.entity.AccountEntity("id2", "A/C **9141", "Unknown Bank", "auto-extracted")
+            val acc1 = com.pocketfinancer.data.db.entity.AccountEntity("id1", "Unknown Account A/c XX9141", "Unknown Account", "auto-extracted")
+            val acc2 = com.pocketfinancer.data.db.entity.AccountEntity("id2", "A/C **9141", "Unknown Account", "auto-extracted")
             
             db.accountDao().insert(acc1)
             db.accountDao().insert(acc2)
@@ -189,7 +189,7 @@ class AccountRepositoryTest {
     @Test
     fun `getOrCreate should infer bank name from account name`() {
         runBlocking {
-            val account = repo.getOrCreate("HDFC Card XX1234", "Unknown Bank", "auto-extracted")
+            val account = repo.getOrCreate("HDFC Card XX1234", "Unknown Account", "auto-extracted")
             assertEquals("HDFC Bank", account.bank)
             assertEquals("HDFC Bank Card XX1234", account.name)
         }

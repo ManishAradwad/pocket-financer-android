@@ -45,7 +45,7 @@ class AccountRepository (
         for ((digits, list) in digitsGroups) {
             if (list.size <= 1) continue
 
-            val (unknowns, knowns) = list.partition { it.bank == "Unknown Bank" || it.bank == "Unknown" }
+            val (unknowns, knowns) = list.partition { it.bank == "Unknown Bank" || it.bank == "Unknown Account" || it.bank == "Unknown" }
 
             if (knowns.isNotEmpty()) {
                 val canonical = knowns.first()
@@ -91,7 +91,7 @@ class AccountRepository (
      * Normalizes the name and matches by last 4 digits.
      */
     suspend fun getOrCreate(name: String, bank: String, type: String): Account {
-        val finalBank = if (bank == "Unknown Bank" || bank.isBlank()) {
+        val finalBank = if (bank == "Unknown Bank" || bank == "Unknown Account" || bank.isBlank()) {
             inferBankFromName(name)
         } else {
             bank
@@ -102,14 +102,14 @@ class AccountRepository (
         if (normalizedPair != null) {
             val (category, digits) = normalizedPair
             val capCategory = if (category == "card") "Card" else "A/c"
-            val bankPrefix = if (finalBank != "Unknown Bank") "$finalBank " else ""
+            val bankPrefix = if (finalBank != "Unknown Bank" && finalBank != "Unknown Account") "$finalBank " else ""
             val normalizedName = "$bankPrefix$capCategory XX$digits"
 
             // Look for existing account with the same digits and bank
             val allAccounts = accountDao.getAllOnce()
             val existing = allAccounts.find { acc ->
                 val pair = normalizeAccountName(acc.name)
-                pair != null && pair.second == digits && (acc.bank == finalBank || finalBank == "Unknown Bank")
+                pair != null && pair.second == digits && (acc.bank == finalBank || finalBank == "Unknown Bank" || finalBank == "Unknown Account" || acc.bank == "Unknown Bank" || acc.bank == "Unknown Account")
             }
             if (existing != null) {
                 return existing.toDomain()
@@ -157,7 +157,7 @@ class AccountRepository (
             upper.contains("ICICI") -> "ICICI Bank"
             upper.contains("SBI") -> "State Bank of India"
             upper.contains("KOTAK") -> "Kotak Bank"
-            else -> "Unknown Bank"
+            else -> "Unknown Account"
         }
     }
 
@@ -167,10 +167,11 @@ class AccountRepository (
      */
     suspend fun ensureDefault(): Account {
         val name = "__UNKNOWN__"
-        val bank = "Unknown Bank"
+        val bank = "Unknown Account"
         val type = "auto-extracted"
 
         val existing = accountDao.findByNameAndBank(name, bank)
+            ?: accountDao.findByNameAndBank(name, "Unknown Bank")
         if (existing != null) return existing.toDomain()
 
         return getOrCreate(name, bank, type)

@@ -60,7 +60,7 @@ export const TransactionsScreen = ({
   const getAccountShortName = (accId: string, accList: any[]) => {
     const found = accList.find(a => a.id === accId);
     if (!found) return accId.replace('Credit Card ', '').replace('Debit Card ', '').replace('A/c ', '');
-    const bank = found.bank.replace(' Bank', '');
+    const bank = found.bank;
     return `${bank} ${found.number}`;
   };
 

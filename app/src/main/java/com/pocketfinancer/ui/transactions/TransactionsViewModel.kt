@@ -119,7 +119,7 @@ class TransactionsViewModel @Inject constructor(
         viewModelScope.launch {
             val account = accountRepository.getOrCreate(
                 name = accountName.trim(),
-                bank = "Unknown Bank",
+                bank = "Unknown Account",
                 type = "auto-extracted"
             )
             val updated = transactionRepository.updateTransaction(

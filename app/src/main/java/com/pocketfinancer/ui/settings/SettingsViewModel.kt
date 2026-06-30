@@ -386,7 +386,7 @@ class SettingsViewModel @Inject constructor(
                         parsed?.let { p ->
                             val accountName = p.account
                             val account = if (accountName != null) {
-                                accountRepository.getOrCreate(accountName, "Unknown Bank", "auto-extracted")
+                                accountRepository.getOrCreate(accountName, "Unknown Account", "auto-extracted")
                             } else {
                                 accountRepository.ensureDefault()
                             }
