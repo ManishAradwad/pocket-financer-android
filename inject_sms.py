@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import time
+import random
 
 def detect_devices():
     """Run `adb devices` and parse connected device serial numbers."""
@@ -66,18 +67,20 @@ def main():
     selected_entries = transactional[:10] + promotional[:10]
     if len(selected_entries) < 20:
         selected_entries = sms_entries[:20]
+    
+    random.shuffle(selected_entries)
     sms_entries = selected_entries
         
     print(f"Selected {len(sms_entries)} SMS messages for injection (10 transactional, 10 promotional).")
     
-    # We want to distribute these SMS messages across the last 7 days
-    # so they fall inside the onboarding 7-day sync window.
+    # We want to distribute these SMS messages across the last 14 days
+    # so they fall inside the onboarding 14-day sync window.
     now_ms = int(time.time() * 1000)
-    seven_days_ms = 7 * 24 * 60 * 60 * 1000
-    start_time_ms = now_ms - seven_days_ms
+    fourteen_days_ms = 14 * 24 * 60 * 60 * 1000
+    start_time_ms = now_ms - fourteen_days_ms
     
     # Distribute uniformly
-    interval = seven_days_ms // len(sms_entries)
+    interval = fourteen_days_ms // len(sms_entries)
     
     # Iterate and inject per device
     for device in devices:

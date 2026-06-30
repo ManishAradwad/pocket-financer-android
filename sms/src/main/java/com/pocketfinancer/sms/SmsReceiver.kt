@@ -38,11 +38,16 @@ class SmsReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action == Telephony.Sms.Intents.SMS_RECEIVED_ACTION) {
             val messages = Telephony.Sms.Intents.getMessagesFromIntent(intent)
-            for (sms in messages) {
+            if (!messages.isNullOrEmpty()) {
+                val firstMsg = messages[0]
+                val address = firstMsg.originatingAddress ?: ""
+                val date = firstMsg.timestampMillis
+                val body = messages.joinToString("") { it.messageBody ?: "" }
+
                 val msg = SmsReader.SmsMessage(
-                    address = sms.originatingAddress ?: "",
-                    body = sms.messageBody ?: "",
-                    date = sms.timestampMillis,
+                    address = address,
+                    body = body,
+                    date = date,
                     type = 1  // Inbox
                 )
                 // 1. Emits SMS via channel (for UI)
