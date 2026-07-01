@@ -4,9 +4,10 @@ import { HomeScreen } from './components/HomeScreen';
 import { TransactionsScreen } from './components/TransactionsScreen';
 import { InsightsScreen } from './components/InsightsScreen';
 import { OnboardingFlow } from './components/OnboardingFlow';
-import { AccountsScreen, Account } from './components/AccountsScreen';
+import { SettingsScreen } from './components/SettingsScreen';
+import { TelemetryLogsViewer } from './components/TelemetryLogsViewer';
+import { Account } from './components/AccountsScreen';
 import { TXNS } from './data';
-
 export interface UnsyncedSms {
   id: string;
   sender: string;
@@ -138,22 +139,21 @@ export default function App() {
   const [autoSync, setAutoSync] = useState(true);
   const [developerLogs, setDeveloperLogs] = useState(false);
 
+  // Navigation states
+  const [showTelemetryLogs, setShowTelemetryLogs] = useState(false);
+
   const handleOnboardingComplete = () => {
     setShowOnboarding(false);
   };
 
   const goToTxns = () => {
     setSelectedAccountFilter('All');
-    setTab(2); // Shuffled transactions to tab index 2
-  };
-
-  const handleAddAccount = (newAcc: Account) => {
-    setAccounts(prev => [newAcc, ...prev]);
+    setTab(1); // Shuffled transactions to tab index 1
   };
 
   const handleFilterAndGoToTxns = (accountId: string) => {
     setSelectedAccountFilter(accountId);
-    setTab(2); // Transition to Transactions Screen
+    setTab(1); // Transition to Transactions Screen
   };
 
   // Run structured mock processing
@@ -288,12 +288,6 @@ export default function App() {
       currentStageIndex={currentStageIndex}
       onNavigateToTab={(idx) => setTab(idx)}
     />,
-    <AccountsScreen 
-      accounts={accounts} 
-      onAddAccount={handleAddAccount}
-      onFilterAndGoToTxns={handleFilterAndGoToTxns}
-      transactionsCountByAccount={transactionsCountByAccount}
-    />,
     <TransactionsScreen 
       selectedAccountFilter={selectedAccountFilter} 
       setSelectedAccountFilter={setSelectedAccountFilter}
@@ -305,79 +299,22 @@ export default function App() {
       currentStageIndex={currentStageIndex}
     />,
     <InsightsScreen />,
-    
-    // Polished on-device Settings Screen
-    <div className="flex-1 overflow-y-auto hide-scrollbar bg-m3-surface text-m3-on-surface p-4 flex flex-col pb-[72px]">
-      <div className="text-lg font-bold tracking-tight text-m3-on-surface font-display mb-4">Settings</div>
-      
-      {/* On-device status badge */}
-      <div className="p-3.5 rounded-2xl bg-m3-surface-container border border-m3-outline-variant/35 mb-5 flex items-start gap-3">
-        <Shield size={20} className="text-m3-pos shrink-0 mt-0.5" />
-        <div>
-          <h4 className="text-xs font-bold text-m3-on-surface font-display">Local Parsing Activated</h4>
-          <p className="text-[10px] text-m3-on-surface-variant leading-relaxed mt-1">pocketFinancer utilizes a local Qwen 1.7B parameter deep network using a customized tf-lite/llama.cpp binary compiling natively directly on your device CPU. No queries are forwarded to servers.</p>
-        </div>
-      </div>
-
-      <div className="space-y-4">
-        {/* Sync Controls */}
-        <div className="bg-m3-surface-container-low rounded-[20px] p-4 border border-m3-outline-variant/20">
-          <h4 className="text-xs font-bold uppercase tracking-wider text-m3-on-surface-variant font-display mb-3">Background Extraction</h4>
-          
-          <div className="flex justify-between items-center py-2.5 border-b border-m3-outline-variant/10">
-            <div>
-              <div className="text-xs font-semibold text-m3-on-surface">Auto-Sync on incoming SMS</div>
-              <div className="text-[10px] text-m3-on-surface-variant mt-0.5">Launches parsing engine silently on receipt</div>
-            </div>
-            <input 
-              type="checkbox" 
-              checked={autoSync}
-              onChange={(e) => setAutoSync(e.target.checked)}
-              className="w-8 h-4 rounded-full bg-m3-surface-container-highest border-none focus:ring-0 accent-m3-primary cursor-pointer"
-            />
-          </div>
-
-          <div className="flex justify-between items-center py-2.5">
-            <div>
-              <div className="text-xs font-semibold text-m3-on-surface">Offline Dev Logs</div>
-              <div className="text-[10px] text-m3-on-surface-variant mt-0.5">Save compiler raw logs to on-disk buffer</div>
-            </div>
-            <input 
-              type="checkbox" 
-              checked={developerLogs}
-              onChange={(e) => setDeveloperLogs(e.target.checked)}
-              className="w-8 h-4 rounded-full bg-m3-surface-container-highest border-none focus:ring-0 accent-m3-primary cursor-pointer"
-            />
-          </div>
-        </div>
-
-        {/* Engine reset */}
-        <div className="bg-m3-surface-container-low rounded-[20px] p-4 border border-m3-outline-variant/20">
-          <h4 className="text-xs font-bold uppercase tracking-wider text-m3-on-surface-variant font-display mb-3">Storage & Memory</h4>
-          
-          <button 
-            type="button"
-            onClick={() => {
-              setAccounts(INITIAL_ACCOUNTS);
-              setTransactionsHistory(TXNS);
-              setSyncState('pending');
-              setUnsyncedSmsList(INITIAL_UNSYNCED_SMS);
-              setCurrentSmsIndex(null);
-              setCurrentStageIndex(null);
-              alert("Mock local state and on-device transaction caches restored!");
-            }}
-            className="w-full py-2.5 bg-m3-surface-container hover:bg-m3-surface-container-high text-xs font-semibold rounded-xl border border-m3-outline-variant/40 flex items-center justify-center gap-1.5 transition-colors"
-          >
-            <RefreshCw size={14} /> Factory Reset Local State
-          </button>
-        </div>
-
-        {/* Info label */}
-        <div className="flex items-center justify-center gap-1 text-[10px] text-m3-on-surface-variant/70 text-center font-mono py-4">
-          <Info size={11} /> pocketFinancer v0.8.2-A (beta-local)
-        </div>
-      </div>
-    </div>,
+    <SettingsScreen 
+      autoSync={autoSync}
+      setAutoSync={setAutoSync}
+      developerLogs={developerLogs}
+      setDeveloperLogs={setDeveloperLogs}
+      onFactoryReset={() => {
+        setAccounts(INITIAL_ACCOUNTS);
+        setTransactionsHistory(TXNS);
+        setSyncState('pending');
+        setUnsyncedSmsList(INITIAL_UNSYNCED_SMS);
+        setCurrentSmsIndex(null);
+        setCurrentStageIndex(null);
+        alert("Mock local state and on-device transaction caches restored!");
+      }}
+      onOpenLogs={() => setShowTelemetryLogs(true)}
+    />,
   ];
 
   const getScreenClass = (i: number) => {
@@ -412,11 +349,10 @@ export default function App() {
               ))}
             </div>
 
-            {/* Bottom Navigation (MD3 Navigation Bar expanded to 5 tabs with Accounts) */}
+            {/* Bottom Navigation (MD3 Navigation Bar) */}
             <div className="absolute bottom-0 left-0 right-0 h-[72px] bg-m3-surface-container flex items-center justify-around px-2 z-40 pb-2 pt-1">
               {[
                 { icon: Home, label: 'Home' },
-                { icon: CreditCard, label: 'Accounts' },
                 { icon: List, label: 'Txns' },
                 { icon: PieChart, label: 'Insights' },
                 { icon: Settings, label: 'Settings' },
@@ -446,6 +382,11 @@ export default function App() {
                 );
               })}
             </div>
+
+            {/* Modals */}
+            {showTelemetryLogs && (
+              <TelemetryLogsViewer onBack={() => setShowTelemetryLogs(false)} />
+            )}
           </>
         )}
       </div>

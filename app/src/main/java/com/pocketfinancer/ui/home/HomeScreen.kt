@@ -383,14 +383,24 @@ fun HomeScreen(
                                                     overflow = TextOverflow.Ellipsis
                                                 )
                                                 Spacer(modifier = Modifier.height(2.dp))
-                                                Text(
-                                                    text = tx.accountLabel ?: "Unknown Account",
-                                                    color = M3_OnSurfaceVariant,
-                                                    style = AppTypography.accountCode,
-                                                    modifier = Modifier
-                                                        .background(M3_SurfaceContainerHigh, RoundedCornerShape(4.dp))
-                                                        .padding(horizontal = 6.dp, vertical = 1.dp)
-                                                )
+                                                Row(
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Rounded.CreditCard,
+                                                        contentDescription = null,
+                                                        tint = M3_OnSurfaceVariant.copy(alpha = 0.6f),
+                                                        modifier = Modifier.size(12.dp)
+                                                    )
+                                                    Text(
+                                                        text = getAccountShortLabel(tx.accountLabel),
+                                                        color = M3_OnSurfaceVariant,
+                                                        style = MaterialTheme.typography.bodySmall,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis
+                                                    )
+                                                }
                                             }
                                         }
                                         Column(
@@ -1493,4 +1503,36 @@ private fun formatTime(timestampMs: Long): String {
 
 private fun Modifier.maxHeight(max: androidx.compose.ui.unit.Dp): Modifier {
     return this.heightIn(max = max)
+}
+
+private fun getAccountShortLabel(label: String?): String {
+    if (label == null || label == "__UNKNOWN__") return "Unknown"
+    
+    val runs = Regex("\\d+").findAll(label).toList()
+    val digits = if (runs.isNotEmpty()) runs.last().value.takeLast(4) else ""
+    
+    val cleanLabel = label
+        .replace(Regex("A/c|Card|Account", RegexOption.IGNORE_CASE), "")
+        .replace(Regex("XX\\d*", RegexOption.IGNORE_CASE), "")
+        .replace(Regex("\\s+"), " ")
+        .trim()
+        
+    val shortBank = when {
+        cleanLabel.contains("State Bank of India", ignoreCase = true) || cleanLabel.contains("SBI", ignoreCase = true) -> "SBI"
+        cleanLabel.contains("HDFC", ignoreCase = true) -> "HDFC"
+        cleanLabel.contains("ICICI", ignoreCase = true) -> "ICICI"
+        cleanLabel.contains("Axis", ignoreCase = true) -> "Axis"
+        cleanLabel.contains("Kotak", ignoreCase = true) -> "Kotak"
+        cleanLabel.contains("Standard Chartered", ignoreCase = true) -> "SCB"
+        cleanLabel.contains("Federal", ignoreCase = true) -> "Federal"
+        cleanLabel.contains("Paytm", ignoreCase = true) -> "Paytm"
+        cleanLabel.contains("PhonePe", ignoreCase = true) -> "PhonePe"
+        cleanLabel.isBlank() -> "Bank"
+        else -> {
+            val firstWord = cleanLabel.split(" ").firstOrNull() ?: "Bank"
+            if (firstWord.length > 8) firstWord.take(8) else firstWord
+        }
+    }
+    
+    return if (digits.isNotEmpty()) "$shortBank ••$digits" else shortBank
 }

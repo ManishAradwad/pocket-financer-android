@@ -26,16 +26,16 @@ The visual identity of **pocketFinancer** sits at the intersection of profession
 
 To eliminate inline styling discrepancies (e.g., arbitrary sizes like `9.sp` or `13.sp` next to `10.sp`), we establish the following standard scale:
 
-| Typography Token | Size (SP) | Weight | Line Height | Font Family | Typical Use Cases |
+| Typography Token / Alias | Size (SP) | Weight | Line Height | Font Family | Typical Use Cases |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Display Large (Hero Amount)** | `32.sp` | `Bold` | `40.sp` | `Monospace` | Primary screen amounts (e.g. Home card balance, Ledger transaction detail amount) |
-| **Title Large (Screen Header)** | `18.sp` | `Bold` | `24.sp` | `SansSerif` | Screen title headers in lowercase camelCase (e.g. `pocketFinancer`, `transactionLedger`) |
-| **Title Medium (Card Heading)** | `14.sp` | `Bold` | `20.sp` | `SansSerif` | Main section headings (e.g. "Recent synced transactions", "Cash Flow Summary") |
-| **Body Medium (List Item Primary)** | `14.sp` | `Medium` | `20.sp` | `SansSerif` | Merchant name, tab names (e.g. "SBI ATM, MUMBAI BRANCH", "This Month") |
-| **Body Small (List Item Secondary)** | `12.sp` | `Regular` | `16.sp` | `SansSerif` | Descriptions, supporting body details, sub-information |
-| **Label Large (CTA / Actions)** | `12.sp` | `Bold` | `16.sp` | `SansSerif` | Pill button texts, dialog actions (e.g. "Scan" button, "Debits/Credits" filters) |
-| **Label Medium (Tech Metadata)** | `11.sp` | `SemiBold` | `14.sp` | `Monospace` | Account cards/tags (e.g., `HDFC A/c XX1234`), numerical summaries (e.g. `₹22,500` in tabs) |
-| **Label Small (Eyebrows & Dates)** | `10.sp` | `Bold` | `12.sp` | `Monospace` | Small metadata text, uppercase tech tags (e.g. `MESSAGE STREAM SYNCED`, `20:59` timestamp) |
+| **amountHero** (backed by `headlineLarge`) | `32.sp` | `Bold` | `40.sp` | `Monospace` | Primary screen amounts (e.g. Home card balance, Ledger transaction detail amount) |
+| **screenHeader** (backed by `titleLarge`) | `22.sp` | `Bold` | `28.sp` | `SansSerif` | Screen title headers in lowercase camelCase (e.g. `pocketFinancer`, `transactionLedger`) |
+| **MaterialTheme.typography.titleMedium** | `16.sp` | `Medium` | `24.sp` | `SansSerif` | Main section headings (e.g. "Recent synced transactions", "Cash Flow Summary") |
+| **MaterialTheme.typography.bodyMedium** | `14.sp` | `Normal` | `20.sp` | `SansSerif` | Merchant name, generic body text |
+| **MaterialTheme.typography.bodySmall** | `12.sp` | `Normal` | `16.sp` | `SansSerif` | Descriptions, supporting body details, sub-information |
+| **MaterialTheme.typography.labelLarge** | `14.sp` | `Medium` | `20.sp` | `SansSerif` | Pill button texts, CTA/actions (e.g. "Scan" button, "All" filter chip) |
+| **accountCode** (backed by `labelMedium`) | `12.sp` | `Medium` | `16.sp` | `Monospace` | Account cards/tags (e.g., `HDFC ••1234`), numerical summaries in tabs |
+| **timestamp** (backed by `labelSmall`) | `11.sp` | `Medium` | `16.sp` | `Monospace` | Small metadata text, timestamps, dates (e.g. `MESSAGE STREAM SYNCED`, `20:59`) |
 
 ---
 
@@ -57,11 +57,11 @@ Visual harmony relies heavily on "negative space" or "breathing room." We employ
 
 ### A. Large Currency Discrepancies
 * **Current Issue**: On the **Home** screen, the main balance uses a `32.sp` `SansSerif` extra-bold font, while the transaction detail screen uses `32.sp` `Monospace` bold for the amount.
-* **Remediation**: Standardize all large currency balances to `32.sp`, `Bold`, `Monospace` (**Display Large**) for visual consistency. Monospace numbers align beautifully on decimal points and currency symbols.
+* **Remediation**: Standardize all large currency balances to `32.sp`, `Bold`, `Monospace` (via `AppTypography.amountHero`) for visual consistency. Monospace numbers align beautifully on decimal points and currency symbols.
 
 ### B. Micro Metadata Sizes
 * **Current Issue**: Inline text uses random sizes such as `8.sp`, `9.sp`, `10.sp`, and `11.sp` for small detail rows.
-* **Remediation**: Use `Label Medium (11.sp Monospace)` for account codes and account filter buttons, and `Label Small (10.sp Monospace)` for metadata tags, timestamps, and list timestamps. No text size should fall below `10.sp` to maintain accessibility and sharp rendering.
+* **Remediation**: Use `AppTypography.accountCode` (`12.sp` Monospace) for account codes, and `AppTypography.timestamp` (`11.sp` Monospace) for metadata tags, timestamps, and list timestamps. No text size should fall below `11.sp` to maintain accessibility and sharp rendering.
 
 ### C. Open Space Consistency
 * **Current Issue**: Header spacing and list paddings differ. The Home screen headers use a custom row layout with different paddings, whereas the Ledger top-bar uses a custom icon alignment.
@@ -88,19 +88,25 @@ graph TD
 Instead of inline `fontSize` and `fontFamily` parameters, the project should define these types inside `Type.kt` and apply them using `style = MaterialTheme.typography.x` or via a custom typography wrapper `PocketFinancerTypography`:
 
 ```kotlin
-// Example custom definition in Theme/Type
-val CustomTypography = Typography(
-    displayLarge = TextStyle(
-        fontFamily = FontFamily.Monospace,
-        fontWeight = FontWeight.Bold,
+// Example centralized baseline definitions in Theme/Type
+val PocketFinancerTypography = Typography(
+    headlineLarge = TextStyle(
+        fontFamily = FontFamily.SansSerif,
+        fontWeight = FontWeight.Normal,     // M3: 400
         fontSize = 32.sp,
         lineHeight = 40.sp
     ),
     titleLarge = TextStyle(
         fontFamily = FontFamily.SansSerif,
-        fontWeight = FontWeight.Bold,
-        fontSize = 18.sp,
-        lineHeight = 24.sp
+        fontWeight = FontWeight.Normal,     // M3: 400
+        fontSize = 22.sp,
+        lineHeight = 28.sp
+    ),
+    labelSmall = TextStyle(
+        fontFamily = FontFamily.Monospace,  // Monospace for timestamps
+        fontWeight = FontWeight.Medium,     // M3: 500
+        fontSize = 11.sp,
+        lineHeight = 16.sp
     )
     // ...
 )

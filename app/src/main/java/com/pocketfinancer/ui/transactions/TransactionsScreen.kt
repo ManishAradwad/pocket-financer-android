@@ -98,32 +98,28 @@ fun TransactionsScreen(
                     )
                 }
                 Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     IconButton(
                         onClick = { /* Search functionality - coming soon */ },
-                        modifier = Modifier
-                            .size(40.dp)
-                            .background(M3_SurfaceContainer, CircleShape)
+                        modifier = Modifier.size(40.dp)
                     ) {
                         Icon(
                             imageVector = Icons.Default.Search,
                             contentDescription = "Search",
-                            tint = M3_OnSurface,
-                            modifier = Modifier.size(20.dp)
+                            tint = M3_OnSurfaceVariant,
+                            modifier = Modifier.size(24.dp)
                         )
                     }
                     IconButton(
                         onClick = { /* Filter list - coming soon */ },
-                        modifier = Modifier
-                            .size(40.dp)
-                            .background(M3_SurfaceContainer, CircleShape)
+                        modifier = Modifier.size(40.dp)
                     ) {
                         Icon(
                             imageVector = Icons.Default.FilterList,
                             contentDescription = "Filters",
-                            tint = M3_OnSurface,
-                            modifier = Modifier.size(20.dp)
+                            tint = M3_OnSurfaceVariant,
+                            modifier = Modifier.size(24.dp)
                         )
                     }
                 }
@@ -1054,15 +1050,20 @@ fun TransactionItem(
                     Spacer(modifier = Modifier.height(2.dp))
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
+                        Icon(
+                            imageVector = Icons.Rounded.CreditCard,
+                            contentDescription = null,
+                            tint = M3_OnSurfaceVariant.copy(alpha = 0.6f),
+                            modifier = Modifier.size(12.dp)
+                        )
                         Text(
-                            text = transaction.accountLabel ?: "Unknown Card",
+                            text = getAccountShortLabel(transaction.accountLabel),
                             color = M3_OnSurfaceVariant,
-                            style = AppTypography.accountCode,
-                            modifier = Modifier
-                                .background(M3_SurfaceContainerHigh, RoundedCornerShape(4.dp))
-                                .padding(horizontal = 6.dp, vertical = 1.dp)
+                            style = MaterialTheme.typography.bodySmall,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                         if (transaction.isEdited) {
                             Text(
@@ -1322,4 +1323,36 @@ private fun getAccountColor(name: String): Color {
         3 -> Color(0xFF9B51E0)
         else -> Color(0xFFEB5757)
     }
+}
+
+private fun getAccountShortLabel(label: String?): String {
+    if (label == null || label == "__UNKNOWN__") return "Unknown"
+    
+    val runs = Regex("\\d+").findAll(label).toList()
+    val digits = if (runs.isNotEmpty()) runs.last().value.takeLast(4) else ""
+    
+    val cleanLabel = label
+        .replace(Regex("A/c|Card|Account", RegexOption.IGNORE_CASE), "")
+        .replace(Regex("XX\\d*", RegexOption.IGNORE_CASE), "")
+        .replace(Regex("\\s+"), " ")
+        .trim()
+        
+    val shortBank = when {
+        cleanLabel.contains("State Bank of India", ignoreCase = true) || cleanLabel.contains("SBI", ignoreCase = true) -> "SBI"
+        cleanLabel.contains("HDFC", ignoreCase = true) -> "HDFC"
+        cleanLabel.contains("ICICI", ignoreCase = true) -> "ICICI"
+        cleanLabel.contains("Axis", ignoreCase = true) -> "Axis"
+        cleanLabel.contains("Kotak", ignoreCase = true) -> "Kotak"
+        cleanLabel.contains("Standard Chartered", ignoreCase = true) -> "SCB"
+        cleanLabel.contains("Federal", ignoreCase = true) -> "Federal"
+        cleanLabel.contains("Paytm", ignoreCase = true) -> "Paytm"
+        cleanLabel.contains("PhonePe", ignoreCase = true) -> "PhonePe"
+        cleanLabel.isBlank() -> "Bank"
+        else -> {
+            val firstWord = cleanLabel.split(" ").firstOrNull() ?: "Bank"
+            if (firstWord.length > 8) firstWord.take(8) else firstWord
+        }
+    }
+    
+    return if (digits.isNotEmpty()) "$shortBank ••$digits" else shortBank
 }
