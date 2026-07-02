@@ -3,8 +3,18 @@ package com.pocketfinancer.ui.onboarding
 import android.Manifest
 import android.os.Build
 import android.content.pm.PackageManager
+import android.app.Activity
+import android.content.ContextWrapper
+import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
+import android.util.Log
+import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
@@ -58,6 +68,19 @@ fun OnboardingScreen(
     LaunchedEffect(state.step) {
         if (state.step == OnboardingStep.COMPLETED) {
             onComplete()
+        }
+    }
+
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                viewModel.checkPermissions()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
         }
     }
 
@@ -327,6 +350,21 @@ private fun PermissionsStepScreen(
     onProceedAnyway: () -> Unit,
     onNotNow: () -> Unit
 ) {
+    val context = LocalContext.current
+    val activity = remember(context) { context.findActivity() }
+    val isSmsPermanentlyDenied = remember(deniedCount, context) {
+        activity?.let { act ->
+            val hasReadSms = ContextCompat.checkSelfPermission(act, Manifest.permission.READ_SMS) == PackageManager.PERMISSION_GRANTED
+            val hasReceiveSms = ContextCompat.checkSelfPermission(act, Manifest.permission.RECEIVE_SMS) == PackageManager.PERMISSION_GRANTED
+            val smsGranted = hasReadSms && hasReceiveSms
+            
+            !smsGranted && 
+                    !ActivityCompat.shouldShowRequestPermissionRationale(act, Manifest.permission.READ_SMS) &&
+                    !ActivityCompat.shouldShowRequestPermissionRationale(act, Manifest.permission.RECEIVE_SMS) &&
+                    deniedCount > 0
+        } ?: false
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -462,6 +500,40 @@ private fun PermissionsStepScreen(
                     }
                 }
                 Spacer(modifier = Modifier.height(16.dp))
+            } else if (isSmsPermanentlyDenied) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(M3_ErrorContainer.copy(alpha = 0.3f), RoundedCornerShape(16.dp))
+                        .border(
+                            BorderStroke(1.dp, M3_Error.copy(alpha = 0.2f)),
+                            RoundedCornerShape(16.dp)
+                        )
+                        .padding(14.dp),
+                    verticalAlignment = Alignment.Top
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Warning,
+                        contentDescription = null,
+                        tint = M3_Error,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column {
+                        Text(
+                            text = "SMS Permission Permanently Denied",
+                            color = M3_OnErrorContainer,
+                            style = AppTypography.bodySmallBold
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "The app cannot function without SMS access. To enable it:\n1. Click 'Open Settings' below.\n2. Tap 'Permissions'.\n3. Select 'SMS' and set to 'Allow'.",
+                            color = M3_OnErrorContainer.copy(alpha = 0.85f),
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(16.dp))
             } else if (deniedCount > 0) {
                 Row(
                     modifier = Modifier
@@ -517,7 +589,7 @@ private fun PermissionsStepScreen(
                 )
                 Spacer(modifier = Modifier.width(12.dp))
                 Text(
-                    text = "100% On-Device. No data ever leaves your device. We do not use cloud servers or trackers.",
+                    text = "100% On-Device. No data ever leaves your device. We only use the internet to download the AI model; after that, the app operates completely offline with no cloud servers or trackers.",
                     color = M3_OnPosContainer,
                     style = AppTypography.bodySmallBold
                 )
@@ -528,8 +600,33 @@ private fun PermissionsStepScreen(
             modifier = Modifier.fillMaxWidth()
         ) {
             Spacer(modifier = Modifier.height(24.dp))
+            
+            val buttonText = when {
+                showNotificationWarning -> "Proceed Anyway"
+                isSmsPermanentlyDenied -> "Open Settings"
+                else -> "Allow Permissions"
+            }
+            
+            val onButtonClick: () -> Unit = when {
+                showNotificationWarning -> onProceedAnyway
+                isSmsPermanentlyDenied -> {
+                    {
+                        try {
+                            val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                                data = Uri.fromParts("package", context.packageName, null)
+                            }
+                            context.startActivity(intent)
+                        } catch (e: Exception) {
+                            Log.e("OnboardingScreen", "Failed to open settings", e)
+                        }
+                        Unit
+                    }
+                }
+                else -> onGrant
+            }
+
             Button(
-                onClick = if (showNotificationWarning) onProceedAnyway else onGrant,
+                onClick = onButtonClick,
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(48.dp),
@@ -540,7 +637,7 @@ private fun PermissionsStepScreen(
                 )
             ) {
                 Text(
-                    text = if (showNotificationWarning) "Proceed Anyway" else "Allow Permissions",
+                    text = buttonText,
                     style = AppTypography.titleSmallBold
                 )
             }
@@ -1621,3 +1718,12 @@ private fun SyncingStepScreen(
 private fun Modifier.fillGridModifier(): Modifier = this
     .fillMaxWidth()
     .background(M3_Background)
+
+private fun android.content.Context.findActivity(): Activity? {
+    var context = this
+    while (context is ContextWrapper) {
+        if (context is Activity) return context
+        context = context.baseContext
+    }
+    return null
+}

@@ -134,9 +134,13 @@ class OnboardingViewModel @Inject constructor(
             hasNotificationPermission = notifGranted
         )
 
-        // Automatically transition if both are granted and we are on the permissions screen
-        if (granted && notifGranted && _state.value.step == OnboardingStep.PERMISSIONS) {
-            _state.value = _state.value.copy(step = OnboardingStep.DOWNLOAD_SLM)
+        // Handle auto-transition and state updates if on the permissions screen
+        if (granted && _state.value.step == OnboardingStep.PERMISSIONS) {
+            if (notifGranted) {
+                _state.value = _state.value.copy(step = OnboardingStep.DOWNLOAD_SLM)
+            } else {
+                _state.value = _state.value.copy(showNotificationWarning = true)
+            }
         }
     }
 
