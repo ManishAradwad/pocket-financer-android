@@ -165,17 +165,6 @@ class SmsParserWorker(
                 SmsNotificationHelper.showSuccessNotification(
                     applicationContext, address, date, parsedResult.amount, parsedResult.counterparty ?: "Unknown Merchant"
                 )
-                try {
-                    withContext(Dispatchers.Main) {
-                        Toast.makeText(
-                            applicationContext,
-                            "Background: Saved transaction of ₹${parsedResult.amount} from ${parsedResult.counterparty ?: address}",
-                            Toast.LENGTH_LONG
-                        ).show()
-                    }
-                } catch (e: Exception) {
-                    Log.e("SmsParserWorker", "Failed to show background Toast", e)
-                }
             } else {
                 Log.w("SmsParserWorker", "Pipeline execution finished but returned null (no transaction saved).")
                 SmsNotificationHelper.showFailureNotification(

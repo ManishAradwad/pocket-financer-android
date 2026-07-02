@@ -209,6 +209,7 @@ class LlamaEngine @Inject constructor(
         }
 
         try {
+            val modelName = modelPath?.let { java.io.File(it).name } ?: MODEL_FILENAME
             if (!hasThinkingMode) {
                 // Direct single-pass grammar-constrained JSON generation (Gemma, etc.)
                 var executionPrompt = prompt
@@ -221,7 +222,7 @@ class LlamaEngine @Inject constructor(
                         val suffixString = prompt.substring(splitIndex + staticPrefix.length)
 
                         val prefixHash = computeSha256(prefixString)
-                        val sessionFile = getSessionFile(prefixHash)
+                        val sessionFile = getSessionFile(modelName, prefixHash)
 
                         val prefixTokens = tokenize(prefixString, addSpecial = true)
                         if (prefixTokens != null) {
@@ -250,7 +251,7 @@ class LlamaEngine @Inject constructor(
                                     false,
                                     null
                                 )
-                                deleteStaleSessions(prefixHash)
+                                deleteStaleSessions(modelName, prefixHash)
                                 val saved = saveSession(sessionFile.absolutePath, prefixTokens)
                                 android.util.Log.i("pocketfinancer_llm", "Session cache saved: $saved")
                             }
@@ -297,7 +298,7 @@ class LlamaEngine @Inject constructor(
                     val suffixString = prompt.substring(splitIndex + staticPrefix.length)
 
                     val prefixHash = computeSha256(prefixString)
-                    val sessionFile = getSessionFile(prefixHash)
+                    val sessionFile = getSessionFile(modelName, prefixHash)
 
                     val prefixTokens = tokenize(prefixString, addSpecial = true)
                     if (prefixTokens != null) {
@@ -326,7 +327,7 @@ class LlamaEngine @Inject constructor(
                                 false,
                                 null
                             )
-                            deleteStaleSessions(prefixHash)
+                            deleteStaleSessions(modelName, prefixHash)
                             val saved = saveSession(sessionFile.absolutePath, prefixTokens)
                             android.util.Log.i("pocketfinancer_llm", "Session cache saved: $saved")
                         }
@@ -511,19 +512,38 @@ class LlamaEngine @Inject constructor(
      * Get the session file for a given prefix hash.
      */
     fun getSessionFile(hash: String): File {
+        val modelName = modelPath?.let { File(it).name } ?: MODEL_FILENAME
+        return getSessionFile(modelName, hash)
+    }
+
+    /**
+     * Get the session file for a given model name and prefix hash.
+     */
+    fun getSessionFile(modelName: String, hash: String): File {
         val dir = getModelStorageDir()
-        return File(dir, "session_$hash.bin")
+        val sanitizedModelName = modelName.replace(Regex("[^a-zA-Z0-9_-]"), "_")
+        return File(dir, "session_${sanitizedModelName}_$hash.bin")
     }
 
     /**
      * Delete any stale session files, keeping only the one with the specified hash (if any).
      */
     fun deleteStaleSessions(activeHash: String?) {
+        val modelName = modelPath?.let { File(it).name } ?: MODEL_FILENAME
+        deleteStaleSessions(modelName, activeHash)
+    }
+
+    /**
+     * Delete any stale session files for a specific model, keeping only the one with the specified hash (if any).
+     */
+    fun deleteStaleSessions(modelName: String, activeHash: String?) {
         val dir = getModelStorageDir()
         val files = dir.listFiles() ?: return
+        val sanitizedModelName = modelName.replace(Regex("[^a-zA-Z0-9_-]"), "_")
+        val activeSessionName = activeHash?.let { "session_${sanitizedModelName}_$it.bin" }
         for (file in files) {
-            if (file.name.startsWith("session_") && file.name.endsWith(".bin")) {
-                if (activeHash == null || file.name != "session_$activeHash.bin") {
+            if (file.name.startsWith("session_${sanitizedModelName}_") && file.name.endsWith(".bin")) {
+                if (activeSessionName == null || file.name != activeSessionName) {
                     try {
                         val deleted = file.delete()
                         android.util.Log.i("pocketfinancer_llm", "Deleted stale session file: ${file.name} (success=$deleted)")

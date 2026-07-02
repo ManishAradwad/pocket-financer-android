@@ -691,6 +691,43 @@ private fun DownloadSlmStepScreen(
             modifier = Modifier.fillMaxWidth()
         ) {
             Spacer(modifier = Modifier.height(24.dp))
+
+            val errorText = downloadState.error
+            if (!isDownloading && errorText != null) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(M3_ErrorContainer.copy(alpha = 0.2f), RoundedCornerShape(16.dp))
+                        .border(
+                            BorderStroke(1.dp, M3_Error.copy(alpha = 0.3f)),
+                            RoundedCornerShape(16.dp)
+                        )
+                        .padding(14.dp),
+                    verticalAlignment = Alignment.Top
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Warning,
+                        contentDescription = null,
+                        tint = M3_Error,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column {
+                        Text(
+                            text = "Download Failed",
+                            color = M3_OnErrorContainer,
+                            style = AppTypography.bodySmallBold
+                        )
+                        Text(
+                            text = errorText,
+                            color = M3_OnErrorContainer.copy(alpha = 0.85f),
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(16.dp))
+            }
+
             if (!isDownloading) {
                 Text(
                     text = "Model size: ~${selectedSlm?.sizeMb ?: 1200}MB. This one-time download ensures your data never leaves this device.",

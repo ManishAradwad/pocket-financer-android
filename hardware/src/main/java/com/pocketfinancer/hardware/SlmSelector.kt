@@ -98,7 +98,7 @@ data class SlmTier(
             description = "~0.7 GB · 8-bit quant · Lightweight fallback",
             sizeMb = 700,
             minRamGb = 2.5f,
-            downloadUrl = "https://huggingface.co/unsloth/Qwen3-1.7B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf",
+            downloadUrl = "https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf",
             family = "qwen3",
             hasThinkingMode = true
         )
@@ -143,8 +143,8 @@ fun selectSlmForDevice(device: DeviceCapabilities.DeviceInfo): SlmTier? {
         // Tier 1: Gemma 4 E2B Q8_0 (8GB+ RAM & high-perf CPU)
         ram >= 8.0f && highPerf -> SlmTier.GEMMA4_E2B_Q8_0
 
-        // Tier 2: Gemma 4 E2B Q4_K_M (6GB+ RAM)
-        ram >= 6.0f -> SlmTier.GEMMA4_E2B_Q4_K_M
+        // Tier 2: Gemma 4 E2B Q4_K_M (6GB+ RAM & high-perf CPU)
+        ram >= 6.0f && highPerf -> SlmTier.GEMMA4_E2B_Q4_K_M
 
         // Tier 3: Qwen3-1.7B Q8_0 (4GB+ RAM & high-perf CPU)
         ram >= 4.0f && highPerf -> SlmTier.QWEN3_1_7B_Q8_0
@@ -175,11 +175,8 @@ fun explainTierSelection(
         return when {
             tier == SlmTier.GEMMA4_E2B_Q8_0 ->
                 "Selected — highest overall model quality (8-bit quant, high-perf CPU)"
-            tier == SlmTier.GEMMA4_E2B_Q4_K_M -> {
-                val reason = if (highPerf) "CPU features (i8mm+dotprod) detected but RAM prefers lighter quant"
-                             else "balanced size/quality — no i8mm+dotprod CPU features detected"
-                "Selected — $reason"
-            }
+            tier == SlmTier.GEMMA4_E2B_Q4_K_M ->
+                "Selected — balanced size/quality (4-bit quant, high-perf CPU)"
             tier == SlmTier.QWEN3_1_7B_Q8_0 ->
                 "Selected — balanced quality (8-bit thinking mode, high-perf CPU)"
             tier == SlmTier.QWEN3_1_7B_Q4_K_M ->
@@ -197,6 +194,7 @@ fun explainTierSelection(
 
     when (tier) {
         SlmTier.GEMMA4_E2B_Q8_0,
+        SlmTier.GEMMA4_E2B_Q4_K_M,
         SlmTier.QWEN3_1_7B_Q8_0,
         SlmTier.QWEN3_1_7B_Q4_K_M -> {
             if (!highPerf) blockers.add("needs i8mm+dotprod CPU instructions (not detected)")

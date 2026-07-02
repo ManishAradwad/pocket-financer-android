@@ -50,26 +50,26 @@ class ModelDownloader @Inject constructor() {
      */
     suspend fun download(url: String, destFile: File): Result<String> =
         withContext(Dispatchers.IO) {
-            // ── Check if already downloaded (HEAD request) ──
-            val remoteSize = fetchContentLength(url)
-            if (remoteSize > 0 && destFile.exists() && destFile.length() == remoteSize) {
-                _state.value = DownloadState(
-                    isDownloading = false,
-                    isComplete = true,
-                    progress = 1f,
-                    downloadedMb = destFile.length() / 1_048_576f,
-                    totalMb = destFile.length() / 1_048_576f,
-                    outputPath = destFile.absolutePath
-                )
-                return@withContext Result.success(destFile.absolutePath)
-            }
-
-            // Partial or missing — download fresh
-            if (destFile.exists()) destFile.delete()
-
             _state.value = DownloadState(isDownloading = true, progress = 0f)
 
             try {
+                // ── Check if already downloaded (HEAD request) ──
+                val remoteSize = fetchContentLength(url)
+                if (remoteSize > 0 && destFile.exists() && destFile.length() == remoteSize) {
+                    _state.value = DownloadState(
+                        isDownloading = false,
+                        isComplete = true,
+                        progress = 1f,
+                        downloadedMb = destFile.length() / 1_048_576f,
+                        totalMb = destFile.length() / 1_048_576f,
+                        outputPath = destFile.absolutePath
+                    )
+                    return@withContext Result.success(destFile.absolutePath)
+                }
+
+                // Partial or missing — download fresh
+                if (destFile.exists()) destFile.delete()
+
                 downloadJob = coroutineContext[Job]
                 performDownload(url, destFile, remoteSize)
             } catch (e: CancellationException) {

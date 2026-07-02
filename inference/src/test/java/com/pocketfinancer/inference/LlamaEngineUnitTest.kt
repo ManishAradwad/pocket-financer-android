@@ -107,8 +107,9 @@ class LlamaEngineUnitTest {
     fun testGetSessionFile() {
         val hash = "abcd1234"
         val sessionFile = llamaEngine.getSessionFile(hash)
-        assertEquals("session_abcd1234.bin", sessionFile.name)
-        assertEquals(File(llamaEngine.getModelStorageDir(), "session_abcd1234.bin").absolutePath, sessionFile.absolutePath)
+        val expectedName = "session_qwen3-1_7b-Q8_0_gguf_abcd1234.bin"
+        assertEquals(expectedName, sessionFile.name)
+        assertEquals(File(llamaEngine.getModelStorageDir(), expectedName).absolutePath, sessionFile.absolutePath)
     }
 
     @Test
@@ -122,8 +123,9 @@ class LlamaEngineUnitTest {
     @Test
     fun testDeleteStaleSessions_onlyStale() {
         val storageDir = llamaEngine.getModelStorageDir()
-        val stale1 = File(storageDir, "session_stale1.bin").apply { createNewFile() }
-        val stale2 = File(storageDir, "session_stale2.bin").apply { createNewFile() }
+        val prefix = "session_qwen3-1_7b-Q8_0_gguf_"
+        val stale1 = File(storageDir, "${prefix}stale1.bin").apply { createNewFile() }
+        val stale2 = File(storageDir, "${prefix}stale2.bin").apply { createNewFile() }
 
         assertTrue(stale1.exists())
         assertTrue(stale2.exists())
@@ -137,8 +139,9 @@ class LlamaEngineUnitTest {
     @Test
     fun testDeleteStaleSessions_keepsActive() {
         val storageDir = llamaEngine.getModelStorageDir()
-        val stale = File(storageDir, "session_stale.bin").apply { createNewFile() }
-        val active = File(storageDir, "session_activehash.bin").apply { createNewFile() }
+        val prefix = "session_qwen3-1_7b-Q8_0_gguf_"
+        val stale = File(storageDir, "${prefix}stale.bin").apply { createNewFile() }
+        val active = File(storageDir, "${prefix}activehash.bin").apply { createNewFile() }
 
         assertTrue(stale.exists())
         assertTrue(active.exists())
@@ -152,8 +155,9 @@ class LlamaEngineUnitTest {
     @Test
     fun testDeleteStaleSessions_keepsNonSessionFiles() {
         val storageDir = llamaEngine.getModelStorageDir()
+        val prefix = "session_qwen3-1_7b-Q8_0_gguf_"
         val otherFile = File(storageDir, "other_file.txt").apply { createNewFile() }
-        val staleSession = File(storageDir, "session_stale.bin").apply { createNewFile() }
+        val staleSession = File(storageDir, "${prefix}stale.bin").apply { createNewFile() }
 
         assertTrue(otherFile.exists())
         assertTrue(staleSession.exists())
@@ -167,8 +171,9 @@ class LlamaEngineUnitTest {
     @Test
     fun testDeleteStaleSessions_nullActiveHash() {
         val storageDir = llamaEngine.getModelStorageDir()
-        val session1 = File(storageDir, "session_1.bin").apply { createNewFile() }
-        val session2 = File(storageDir, "session_2.bin").apply { createNewFile() }
+        val prefix = "session_qwen3-1_7b-Q8_0_gguf_"
+        val session1 = File(storageDir, "${prefix}1.bin").apply { createNewFile() }
+        val session2 = File(storageDir, "${prefix}2.bin").apply { createNewFile() }
 
         assertTrue(session1.exists())
         assertTrue(session2.exists())

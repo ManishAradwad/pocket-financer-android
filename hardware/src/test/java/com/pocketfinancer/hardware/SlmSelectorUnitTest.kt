@@ -94,13 +94,13 @@ class SlmSelectorUnitTest {
     // ── Tier 2: Gemma 4 E2B Q4_K_M with 6GB RAM ────────────────────
 
     @Test
-    fun `selectSlmForDevice should pick Gemma Q4_K_M with 6GB`() {
+    fun `selectSlmForDevice should NOT pick Gemma Q4_K_M with 6GB without high-perf CPU`() {
         val device = deviceWith(ramGb = 6.0f, highPerf = false)
-        assertEquals(SlmTier.GEMMA4_E2B_Q4_K_M, selectSlmForDevice(device))
+        assertEquals(SlmTier.QWEN3_0_6B_Q8_0, selectSlmForDevice(device))
     }
 
     @Test
-    fun `selectSlmForDevice should pick Gemma Q4_K_M with 6GB even with CPU features`() {
+    fun `selectSlmForDevice should pick Gemma Q4_K_M with 6GB with high-perf CPU`() {
         val device = deviceWith(ramGb = 6.0f, highPerf = true)
         assertEquals(SlmTier.GEMMA4_E2B_Q4_K_M, selectSlmForDevice(device))
     }
@@ -218,16 +218,23 @@ class SlmSelectorUnitTest {
 
     @Test
     fun `explainTierSelection should say Selected for Gemma Q4_K_M`() {
-        val device = deviceWith(ramGb = 6.0f, highPerf = false)
+        val device = deviceWith(ramGb = 6.0f, highPerf = true)
         val explanation = explainTierSelection(SlmTier.GEMMA4_E2B_Q4_K_M, device, isSelected = true)
-        assertTrue(explanation.contains("Selected") && explanation.contains("no i8mm+dotprod"))
+        assertTrue(explanation.contains("Selected") && explanation.contains("balanced size/quality"))
     }
 
     @Test
     fun `explainTierSelection should say Selected with CPU info for Gemma Q4_K_M with CPU features`() {
         val device = deviceWith(ramGb = 6.0f, highPerf = true)
         val explanation = explainTierSelection(SlmTier.GEMMA4_E2B_Q4_K_M, device, isSelected = true)
-        assertTrue(explanation.contains("Selected") && explanation.contains("CPU features (i8mm+dotprod) detected"))
+        assertTrue(explanation.contains("Selected") && explanation.contains("high-perf CPU"))
+    }
+
+    @Test
+    fun `explainTierSelection should mention CPU requirement for Gemma Q4_K_M`() {
+        val device = deviceWith(ramGb = 6.0f, highPerf = false)
+        val explanation = explainTierSelection(SlmTier.GEMMA4_E2B_Q4_K_M, device, isSelected = false)
+        assertTrue(explanation.contains("Not available") && explanation.contains("i8mm+dotprod"))
     }
 
     @Test
