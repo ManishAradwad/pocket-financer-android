@@ -24,7 +24,11 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.material.icons.rounded.*
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.automirrored.rounded.List
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -51,6 +55,15 @@ fun TransactionsScreen(
 ) {
     val state by viewModel.uiState.collectAsState()
     var selectedProcessingSms by remember { mutableStateOf<SyncSmsItem?>(null) }
+    var isSearching by remember { mutableStateOf(false) }
+    var sortMenuExpanded by remember { mutableStateOf(false) }
+    val focusRequester = remember { FocusRequester() }
+
+    LaunchedEffect(isSearching) {
+        if (isSearching) {
+            focusRequester.requestFocus()
+        }
+    }
 
     Box(
         modifier = Modifier
@@ -61,66 +74,169 @@ fun TransactionsScreen(
             modifier = Modifier.fillMaxSize()
         ) {
             // ── Header ──
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 64.dp)
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+            if (isSearching) {
                 Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 64.dp)
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .size(32.dp)
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(
-                                Brush.linearGradient(
-                                    listOf(M3_Secondary.copy(alpha = 0.3f), M3_Secondary)
-                                )
-                            ),
-                        contentAlignment = Alignment.Center
+                    IconButton(
+                        onClick = {
+                            isSearching = false
+                            viewModel.updateSearchQuery("")
+                        },
+                        modifier = Modifier.size(40.dp)
                     ) {
                         Icon(
-                            imageVector = Icons.Rounded.List,
-                            contentDescription = "Transactions Icon",
-                            tint = M3_OnSecondary,
-                            modifier = Modifier.size(18.dp)
+                            imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
+                            contentDescription = "Back",
+                            tint = M3_OnSurface
                         )
                     }
-                    Text(
-                        text = "transactionLedger",
-                        color = M3_OnSurface,
-                        style = MaterialTheme.typography.titleLarge
+                    TextField(
+                        value = state.searchQuery,
+                        onValueChange = { viewModel.updateSearchQuery(it) },
+                        placeholder = {
+                            Text(
+                                text = "Search transactions...",
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = M3_OnSurfaceVariant.copy(alpha = 0.6f)
+                            )
+                        },
+                        modifier = Modifier
+                            .weight(1f)
+                            .focusRequester(focusRequester),
+                        singleLine = true,
+                        colors = TextFieldDefaults.colors(
+                            focusedContainerColor = Color.Transparent,
+                            unfocusedContainerColor = Color.Transparent,
+                            disabledContainerColor = Color.Transparent,
+                            focusedIndicatorColor = Color.Transparent,
+                            unfocusedIndicatorColor = Color.Transparent,
+                            cursorColor = M3_Primary
+                        ),
+                        textStyle = MaterialTheme.typography.bodyLarge.copy(color = M3_OnSurface),
+                        trailingIcon = {
+                            if (state.searchQuery.isNotEmpty()) {
+                                IconButton(
+                                    onClick = { viewModel.updateSearchQuery("") }
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Close,
+                                        contentDescription = "Clear",
+                                        tint = M3_OnSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
                     )
                 }
+            } else {
                 Row(
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 64.dp)
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    IconButton(
-                        onClick = { /* Search functionality - coming soon */ },
-                        modifier = Modifier.size(40.dp)
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.Search,
-                            contentDescription = "Search",
-                            tint = M3_OnSurfaceVariant,
-                            modifier = Modifier.size(24.dp)
+                        Box(
+                            modifier = Modifier
+                                .size(32.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(
+                                    Brush.linearGradient(
+                                        listOf(M3_Secondary.copy(alpha = 0.3f), M3_Secondary)
+                                    )
+                                ),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Rounded.List,
+                                contentDescription = "Transactions Icon",
+                                tint = M3_OnSecondary,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                        Text(
+                            text = "transactionLedger",
+                            color = M3_OnSurface,
+                            style = MaterialTheme.typography.titleLarge
                         )
                     }
-                    IconButton(
-                        onClick = { /* Filter list - coming soon */ },
-                        modifier = Modifier.size(40.dp)
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.FilterList,
-                            contentDescription = "Filters",
-                            tint = M3_OnSurfaceVariant,
-                            modifier = Modifier.size(24.dp)
-                        )
+                        IconButton(
+                            onClick = { isSearching = true },
+                            modifier = Modifier.size(40.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Search,
+                                contentDescription = "Search",
+                                tint = M3_OnSurfaceVariant,
+                                modifier = Modifier.size(24.dp)
+                            )
+                        }
+                        Box {
+                            IconButton(
+                                onClick = { sortMenuExpanded = true },
+                                modifier = Modifier.size(40.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.FilterList,
+                                    contentDescription = "Filters",
+                                    tint = M3_OnSurfaceVariant,
+                                    modifier = Modifier.size(24.dp)
+                                )
+                            }
+                            DropdownMenu(
+                                expanded = sortMenuExpanded,
+                                onDismissRequest = { sortMenuExpanded = false },
+                                modifier = Modifier.background(M3_SurfaceContainerLow)
+                            ) {
+                                val sortOptions = listOf(
+                                    SortOption.DATE_DESC to "Date (Newest First)",
+                                    SortOption.DATE_ASC to "Date (Oldest First)",
+                                    SortOption.AMOUNT_DESC to "Amount (Highest First)",
+                                    SortOption.AMOUNT_ASC to "Amount (Lowest First)"
+                                )
+                                sortOptions.forEach { (option, label) ->
+                                    val isSelected = state.sortOption == option
+                                    DropdownMenuItem(
+                                        text = {
+                                            Text(
+                                                text = label,
+                                                color = if (isSelected) M3_Primary else M3_OnSurface,
+                                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                                            )
+                                        },
+                                        onClick = {
+                                            viewModel.updateSortOption(option)
+                                            sortMenuExpanded = false
+                                        },
+                                        leadingIcon = {
+                                            if (isSelected) {
+                                                Icon(
+                                                    imageVector = Icons.Rounded.Check,
+                                                    contentDescription = null,
+                                                    tint = M3_Primary
+                                                )
+                                            } else {
+                                                Spacer(modifier = Modifier.size(24.dp))
+                                            }
+                                        }
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }

@@ -23,13 +23,22 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
+enum class SortOption {
+    DATE_DESC,   // Newest First (Default)
+    DATE_ASC,    // Oldest First
+    AMOUNT_DESC, // Highest Amount First
+    AMOUNT_ASC   // Lowest Amount First
+}
+
 data class TransactionsUiState(
     val transactions: List<Transaction> = emptyList(),
     val activeSegment: String = "All",
     val selectedTransaction: Transaction? = null,
     val accounts: List<Account> = emptyList(),
     val selectedAccountId: String = "All",
-    val syncState: HomeSyncState = HomeSyncState()
+    val syncState: HomeSyncState = HomeSyncState(),
+    val searchQuery: String = "",
+    val sortOption: SortOption = SortOption.DATE_DESC
 )
 
 @HiltViewModel
@@ -52,13 +61,21 @@ class TransactionsViewModel @Inject constructor(
     private val _selectedAccountId = MutableStateFlow("All")
     val selectedAccountId: StateFlow<String> = _selectedAccountId.asStateFlow()
 
+    private val _searchQuery = MutableStateFlow("")
+    val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
+
+    private val _sortOption = MutableStateFlow(SortOption.DATE_DESC)
+    val sortOption: StateFlow<SortOption> = _sortOption.asStateFlow()
+
     val uiState: StateFlow<TransactionsUiState> = combine(
         transactionRepository.getAllByDateDesc(),
         _activeSegment,
         _selectedTransaction,
         accountRepository.getAll(),
         _selectedAccountId,
-        syncManager.syncState
+        syncManager.syncState,
+        _searchQuery,
+        _sortOption
     ) { flowsArray ->
         val txs = flowsArray[0] as List<Transaction>
         val segment = flowsArray[1] as String
@@ -66,25 +83,46 @@ class TransactionsViewModel @Inject constructor(
         val accountsList = flowsArray[3] as List<Account>
         val selectedAccId = flowsArray[4] as String
         val syncState = flowsArray[5] as HomeSyncState
+        val query = flowsArray[6] as String
+        val sort = flowsArray[7] as SortOption
 
         val filteredBySegment = when (segment) {
             "Debits" -> txs.filter { it.type == TransactionType.DEBIT }
             "Credits" -> txs.filter { it.type == TransactionType.CREDIT }
             else -> txs
         }
-        val filtered = if (selectedAccId == "All") {
+        val filteredByAccount = if (selectedAccId == "All") {
             filteredBySegment
         } else {
             filteredBySegment.filter { it.accountId == selectedAccId }
         }
 
+        val filteredBySearch = if (query.isBlank()) {
+            filteredByAccount
+        } else {
+            filteredByAccount.filter { tx ->
+                tx.merchant.contains(query, ignoreCase = true) ||
+                tx.amount.toString().contains(query) ||
+                (tx.accountLabel?.contains(query, ignoreCase = true) == true)
+            }
+        }
+
+        val sortedTransactions = when (sort) {
+            SortOption.DATE_DESC -> filteredBySearch.sortedByDescending { it.date }
+            SortOption.DATE_ASC -> filteredBySearch.sortedBy { it.date }
+            SortOption.AMOUNT_DESC -> filteredBySearch.sortedByDescending { it.amount }
+            SortOption.AMOUNT_ASC -> filteredBySearch.sortedBy { it.amount }
+        }
+
         TransactionsUiState(
-            transactions = filtered,
+            transactions = sortedTransactions,
             activeSegment = segment,
             selectedTransaction = selected,
             accounts = accountsList,
             selectedAccountId = selectedAccId,
-            syncState = syncState
+            syncState = syncState,
+            searchQuery = query,
+            sortOption = sort
         )
     }
     .stateIn(
@@ -103,6 +141,14 @@ class TransactionsViewModel @Inject constructor(
 
     fun selectAccount(accountId: String) {
         _selectedAccountId.value = accountId
+    }
+
+    fun updateSearchQuery(query: String) {
+        _searchQuery.value = query
+    }
+
+    fun updateSortOption(option: SortOption) {
+        _sortOption.value = option
     }
 
     fun resetSyncState() {
