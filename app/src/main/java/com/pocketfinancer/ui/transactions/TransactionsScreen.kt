@@ -266,7 +266,7 @@ fun TransactionsScreen(
                         Text(
                             text = label,
                             color = if (isSelected) M3_OnSecondaryContainer else M3_OnSurfaceVariant,
-                            style = MaterialTheme.typography.labelMedium,
+                            style = MaterialTheme.typography.labelLarge,
                             fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
                         )
                     }
