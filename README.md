@@ -41,11 +41,12 @@ graph TD
     C -->|Pre-Filter Checks| FP{SmsFilterPipeline<br>6-Stage Deterministic Filter}
     FP -->|Dropped / Non-Transactional| Discard[Discard Alert]
     FP -->|Passed / Transactional| C2[Inference Queue]
-    D[Device Profile] -->|RAM & Instruction Capabilities| C2
+    D[Device Profile] -->|RAM & CPU Flags| SEL{selectSlmForDevice}
+    SEL -->|Loads Selected GGUF| F[LlamaEngine / llama.cpp]
     C2 -->|Assembles Prompt & Context| E[PromptBuilder]
     E -->|Raw Text Prompt| C2
     C2 -->|Checks Cache File| CHK{Session File Exists?}
-    CHK -->|Yes: Load Cache < 100ms| F[LlamaEngine / llama.cpp]
+    CHK -->|Yes: Load Cache < 100ms| F
     CHK -->|No: Prefill Prefix| DEL[Delete Stale Sessions]
     DEL -->|Save New Session| F
     F -->|Phase 1: Chain of Thought Reasoning| F
@@ -126,9 +127,9 @@ To run local inference smoothly without triggering Android's low-memory killer (
 | Model ID | Model Family | Quantization | Size | Min. RAM | CPU Requirement | Status / Target |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | **`Gemma 4 E2B Q8_0`** | Gemma 4 (E2B) | 8-bit | ~5.00 GB | **8.0 GB** | ARMv8.2-A with `i8mm` + `dotprod` | **Highest Quality** (Default for high-end devices) |
-| **`Gemma 4 E2B Q4_K_M`**| Gemma 4 (E2B) | 4-bit (Medium) | ~3.10 GB | **6.0 GB** | Standard ARMv8 | **Balanced** (Optimal for mid-to-high devices) |
+| **`Gemma 4 E2B Q4_K_M`**| Gemma 4 (E2B) | 4-bit (Medium) | ~3.10 GB | **6.0 GB** | ARMv8.2-A with `i8mm` + `dotprod` | **Balanced** (Optimal for mid-to-high devices) |
 | **`Qwen3-1.7B Q8_0`** | Qwen 3 (1.7B) | 8-bit | ~1.95 GB | **4.0 GB** | ARMv8.2-A with `i8mm` + `dotprod` | **High Quality Thinking** (Default for mid-range CPU) |
-| **`Qwen3-1.7B Q4_K_M`** | Qwen 3 (1.7B) | 4-bit (Medium) | ~1.10 GB | **3.5 GB** | Standard ARMv8 | **Balanced Thinking** (Optimal for mid-range) |
+| **`Qwen3-1.7B Q4_K_M`** | Qwen 3 (1.7B) | 4-bit (Medium) | ~1.10 GB | **3.5 GB** | ARMv8.2-A with `i8mm` + `dotprod` | **Balanced Thinking** (Optimal for mid-range) |
 | **`Qwen3-0.6B Q8_0`** | Qwen 3 (0.6B) | 8-bit | ~0.70 GB | **2.5 GB** | Standard ARMv8 | **Lightweight Fallback** (For budget devices) |
 | **Blocked** | — | — | — | **< 2.5 GB**| — | *Incompatible (Device cannot execute local SLMs)* |
 
@@ -183,8 +184,8 @@ cd pocket-financer-android
 
 - [x] **Phase 1-4**: Core Native JNI bindings, llama.cpp compilation, & Model Downloader pipeline.
 - [x] **Phase 5**: Pipeline service orchestration, validation rules, & SQLCipher secure database persistence.
-- [/] **Phase 6**: UI screen development. Dashboard registers (`Transactions` tab with full date-grouped cards, debit/credit filters, and SLM metadata bottom sheets) and Settings debug metrics are active. Dashboard summary (`Home` tab) and analytics graphs (`Insights` tab) are under development.
-- [ ] **Phase 7**: Background Worker integration for sleeping SMS parses.
+- [x] **Phase 6**: UI screen development. Dashboard registers (`Transactions` tab with full date-grouped cards, debit/credit filters, and SLM metadata bottom sheets) and Settings debug metrics are active. Dashboard summary (`Home` tab) and analytics graphs (`Insights` tab) are fully implemented and integrated.
+- [x] **Phase 7**: Background Worker integration for sleeping SMS parses.
 
 ---
 
