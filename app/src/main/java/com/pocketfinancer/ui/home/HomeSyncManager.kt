@@ -278,7 +278,11 @@ class HomeSyncManager @Inject constructor(
                                         type = parsed.type,
                                         accountId = account.id,
                                         rawMessage = processedItem.body,
-                                        sender = processedItem.sender
+                                        sender = processedItem.sender,
+                                        slmPromptEvalMs = result.perf?.tPromptEvalMs,
+                                        slmEvalMs = result.perf?.tEvalMs,
+                                        slmNumTokens = result.perf?.nTokens,
+                                        slmModelName = llamaEngine.getModelPath()?.let { java.io.File(it).name }
                                     )
                                 )
 

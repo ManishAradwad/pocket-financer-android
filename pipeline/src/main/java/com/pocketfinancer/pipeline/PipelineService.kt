@@ -228,7 +228,11 @@ class PipelineService @Inject constructor(
                         type = parsed.type,
                         accountId = account.id,
                         rawMessage = sms.body,
-                        sender = sms.address
+                        sender = sms.address,
+                        slmPromptEvalMs = result.perf?.tPromptEvalMs,
+                        slmEvalMs = result.perf?.tEvalMs,
+                        slmNumTokens = result.perf?.nTokens,
+                        slmModelName = llamaEngine.getModelPath()?.let { java.io.File(it).name }
                     )
                 )
 

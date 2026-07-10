@@ -400,7 +400,11 @@ class SettingsViewModel @Inject constructor(
                                     type = p.type,
                                     accountId = account.id,
                                     rawMessage = testBody,
-                                    sender = testSender
+                                    sender = testSender,
+                                    slmPromptEvalMs = result.perf?.tPromptEvalMs,
+                                    slmEvalMs = result.perf?.tEvalMs,
+                                    slmNumTokens = result.perf?.nTokens,
+                                    slmModelName = llamaEngine.getModelPath()?.let { java.io.File(it).name }
                                 )
                             )
                         }

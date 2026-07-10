@@ -699,6 +699,79 @@ fun TransactionsScreen(
                             }
                         }
 
+                        if (tx.slmPromptEvalMs != null || tx.slmEvalMs != null || tx.slmNumTokens != null || tx.slmModelName != null) {
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.FlashOn,
+                                    contentDescription = null,
+                                    tint = M3_OnSurfaceVariant,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Text(
+                                    text = "SLM RUN TELEMETRY",
+                                    color = M3_OnSurfaceVariant,
+                                    style = AppTypography.eyebrow
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(M3_SurfaceContainerLowest, RoundedCornerShape(12.dp))
+                                    .border(BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.3f)), RoundedCornerShape(12.dp))
+                                    .padding(12.dp)
+                            ) {
+                                val promptEvalMs = tx.slmPromptEvalMs
+                                val evalMs = tx.slmEvalMs
+                                val numTokens = tx.slmNumTokens
+                                val modelName = tx.slmModelName
+
+                                val tps = if (evalMs != null && evalMs > 0 && numTokens != null) {
+                                    (numTokens.toDouble() / (evalMs.toDouble() / 1000.0))
+                                } else {
+                                    0.0
+                                }
+
+                                val telemetryProps = listOf(
+                                    "model_name" to (modelName ?: "Unknown Model"),
+                                    "prompt_eval" to (promptEvalMs?.let { "${it}ms" } ?: "N/A"),
+                                    "generation" to (evalMs?.let { "${it}ms" } ?: "N/A"),
+                                    "tokens" to (numTokens?.let { "$it tokens" } ?: "N/A"),
+                                    "tps" to if (tps > 0.0) String.format("%.1f tok/s", tps) else "N/A"
+                                )
+
+                                telemetryProps.forEach { (key, value) ->
+                                    Row(
+                                        modifier = Modifier.padding(vertical = 2.dp)
+                                    ) {
+                                        Text(
+                                            text = key,
+                                            color = M3_OnSurfaceVariant,
+                                            style = AppTypography.monoBody,
+                                            modifier = Modifier.width(100.dp)
+                                        )
+                                        Text(
+                                            text = ":",
+                                            color = M3_OnSurfaceVariant,
+                                            style = AppTypography.monoBody,
+                                            modifier = Modifier.padding(horizontal = 4.dp)
+                                        )
+                                        Text(
+                                            text = value,
+                                            color = if (key == "model_name") Color(0xFFE5C07B) else if (key == "tps") M3_Primary else M3_OnSurface,
+                                            style = AppTypography.monoBody,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
                         Spacer(modifier = Modifier.height(20.dp))
                         Button(
                             onClick = { isEditing = true },
