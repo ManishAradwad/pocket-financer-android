@@ -24,5 +24,9 @@ data class TransactionEntity(
     val sender: String,                 // SMS sender address (e.g. "AX-HDFCBK")
     val isEdited: Boolean = false,
     val createdAt: Long = System.currentTimeMillis(),
-    val updatedAt: Long = System.currentTimeMillis()
+    val updatedAt: Long = System.currentTimeMillis(),
+    val slmPromptEvalMs: Long? = null,
+    val slmEvalMs: Long? = null,
+    val slmNumTokens: Int? = null,
+    val slmModelName: String? = null
 )

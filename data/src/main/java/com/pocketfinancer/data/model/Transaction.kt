@@ -13,7 +13,11 @@ data class Transaction(
     val accountLabel: String?,
     val rawMessage: String,
     val sender: String,
-    val isEdited: Boolean = false
+    val isEdited: Boolean = false,
+    val slmPromptEvalMs: Long? = null,
+    val slmEvalMs: Long? = null,
+    val slmNumTokens: Int? = null,
+    val slmModelName: String? = null
 )
 
 enum class TransactionType {

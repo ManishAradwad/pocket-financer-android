@@ -29,7 +29,7 @@ import javax.inject.Singleton
         TransactionEntity::class,
         AccountEntity::class
     ],
-    version = 2,
+    version = 3,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -100,6 +100,15 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL("ALTER TABLE transactions ADD COLUMN isEdited INTEGER NOT NULL DEFAULT 0")
             }
         }
+
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE transactions ADD COLUMN slmPromptEvalMs INTEGER")
+                db.execSQL("ALTER TABLE transactions ADD COLUMN slmEvalMs INTEGER")
+                db.execSQL("ALTER TABLE transactions ADD COLUMN slmNumTokens INTEGER")
+                db.execSQL("ALTER TABLE transactions ADD COLUMN slmModelName TEXT")
+            }
+        }
     }
 
     /**
@@ -116,7 +125,7 @@ abstract class AppDatabase : RoomDatabase() {
 
             val builder = Room.databaseBuilder(context, AppDatabase::class.java, DB_NAME)
                 .openHelperFactory(factory)
-                .addMigrations(MIGRATION_1_2)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
 
             val isDebug = (context.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
             if (isDebug) {

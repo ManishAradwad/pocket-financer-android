@@ -42,7 +42,11 @@ class TransactionRepository @Inject constructor(
             type = data.type.name.lowercase(),
             accountId = data.accountId,
             rawMessage = data.rawMessage,
-            sender = data.sender
+            sender = data.sender,
+            slmPromptEvalMs = data.slmPromptEvalMs,
+            slmEvalMs = data.slmEvalMs,
+            slmNumTokens = data.slmNumTokens,
+            slmModelName = data.slmModelName
         )
         transactionDao.insert(entity)
         return entity.toDomain()
@@ -91,7 +95,11 @@ class TransactionRepository @Inject constructor(
             accountLabel = account?.name,
             rawMessage = rawMessage,
             sender = sender,
-            isEdited = isEdited
+            isEdited = isEdited,
+            slmPromptEvalMs = slmPromptEvalMs,
+            slmEvalMs = slmEvalMs,
+            slmNumTokens = slmNumTokens,
+            slmModelName = slmModelName
         )
     }
 
@@ -102,6 +110,10 @@ class TransactionRepository @Inject constructor(
         val type: TransactionType,
         val accountId: String,
         val rawMessage: String,
-        val sender: String
+        val sender: String,
+        val slmPromptEvalMs: Long? = null,
+        val slmEvalMs: Long? = null,
+        val slmNumTokens: Int? = null,
+        val slmModelName: String? = null
     )
 }
