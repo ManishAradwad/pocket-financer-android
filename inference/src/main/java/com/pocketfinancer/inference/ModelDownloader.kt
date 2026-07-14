@@ -204,7 +204,7 @@ class ModelDownloader @Inject constructor() {
     }
 
     @Throws(IOException::class)
-    private fun performDownload(
+    private suspend fun performDownload(
         urlStr: String,
         destFile: File,
         expectedTotalBytes: Long,
@@ -242,6 +242,7 @@ class ModelDownloader @Inject constructor() {
                 var lastUpdateTime = sessionStartTime
 
                 while (input.read(buffer).also { bytesRead = it } != -1) {
+                    currentCoroutineContext().ensureActive()
                     output.write(buffer, 0, bytesRead)
                     totalRead += bytesRead
 
