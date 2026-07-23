@@ -247,4 +247,23 @@ class SlmSelectorUnitTest {
         assertEquals("https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q8_0.gguf", tier.downloadUrl)
         assertEquals("gemma4", tier.family)
     }
+
+    @Test
+    fun `DEFAULT_ONBOARDING_SLM should be QWEN3_0_6B_Q8_0`() {
+        assertEquals(SlmTier.QWEN3_0_6B_Q8_0, SlmTier.DEFAULT_ONBOARDING_SLM)
+    }
+
+    @Test
+    fun `isUpgradeAvailable should return true when device supports higher tier than current`() {
+        val highSpecDevice = deviceWith(ramGb = 8.0f, highPerf = true)
+        val defaultSlm = SlmTier.DEFAULT_ONBOARDING_SLM
+        assertTrue(isUpgradeAvailable(defaultSlm, highSpecDevice))
+    }
+
+    @Test
+    fun `isUpgradeAvailable should return false when current model matches device max recommendation`() {
+        val highSpecDevice = deviceWith(ramGb = 8.0f, highPerf = true)
+        val bestSlm = SlmTier.GEMMA4_E2B_Q8_0
+        assertFalse(isUpgradeAvailable(bestSlm, highSpecDevice))
+    }
 }

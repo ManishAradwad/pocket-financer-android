@@ -708,7 +708,7 @@ private fun DownloadSlmStepScreen(
             Spacer(modifier = Modifier.height(8.dp))
 
             Text(
-                text = "We need to download the local Small Language Model (SLM) that powers Pocket Financer.",
+                text = "We will download a fast, compact starter AI model (~0.7 GB) to get your finance engine running quickly. Higher accuracy models for your phone can be unlocked post-onboarding.",
                 color = M3_OnSurfaceVariant,
                 style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Medium)
             )

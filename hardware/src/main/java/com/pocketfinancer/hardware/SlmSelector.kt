@@ -103,6 +103,9 @@ data class SlmTier(
             hasThinkingMode = true
         )
 
+        /** Default model used during initial onboarding for fast setup. */
+        val DEFAULT_ONBOARDING_SLM = QWEN3_0_6B_Q8_0
+
         /** All tiers in priority order (best extraction first). */
         val ALL_TIERS = listOf(
             GEMMA4_E2B_Q8_0,
@@ -209,3 +212,65 @@ fun explainTierSelection(
     // No blockers but still not selected → a higher-priority tier was picked
     return "Available but a higher-priority tier was selected"
 }
+
+/**
+ * Checks if a higher quality SLM tier is recommended for the device compared to currentSlm.
+ */
+fun isUpgradeAvailable(
+    currentSlm: SlmTier?,
+    device: DeviceCapabilities.DeviceInfo
+): Boolean {
+    val recommended = selectSlmForDevice(device) ?: return false
+    if (currentSlm == null) return true
+
+    val currentRank = SlmTier.ALL_TIERS.indexOf(currentSlm)
+    val recommendedRank = SlmTier.ALL_TIERS.indexOf(recommended)
+
+    // Lower index in ALL_TIERS means higher quality/priority tier
+    return recommendedRank != -1 && (currentRank == -1 || recommendedRank < currentRank)
+}
+
+/**
+ * Resolves the active model tier to load, checking saved preference first,
+ * then downloaded files on disk, and falling back to hardware recommendation.
+ */
+fun resolveActiveSlmTier(
+    context: android.content.Context,
+    modelStorageDir: java.io.File,
+    device: DeviceCapabilities.DeviceInfo
+): SlmTier? {
+    val prefs = context.getSharedPreferences(".app_settings", android.content.Context.MODE_PRIVATE)
+    val savedId = prefs.getString("selected_slm_id", null)
+
+    // 1. Try saved SLM tier if valid on disk
+    if (savedId != null) {
+        val savedTier = SlmTier.ALL_TIERS.find { it.id == savedId }
+        if (savedTier != null) {
+            val file = java.io.File(modelStorageDir, savedTier.modelFile)
+            val expectedMin = savedTier.sizeMb.toLong() * 1024 * 1024 * 90 / 100
+            if (file.exists() && file.length() >= expectedMin) {
+                return savedTier
+            }
+        }
+    }
+
+    // 2. Try default onboarding SLM tier if valid on disk
+    val defaultTier = SlmTier.DEFAULT_ONBOARDING_SLM
+    val defaultFile = java.io.File(modelStorageDir, defaultTier.modelFile)
+    if (defaultFile.exists() && defaultFile.length() >= (defaultTier.sizeMb.toLong() * 1024 * 1024 * 90 / 100)) {
+        return defaultTier
+    }
+
+    // 3. Try any valid downloaded model file on disk in tier priority order
+    for (tier in SlmTier.ALL_TIERS) {
+        val file = java.io.File(modelStorageDir, tier.modelFile)
+        if (file.exists() && file.length() >= (tier.sizeMb.toLong() * 1024 * 1024 * 90 / 100)) {
+            return tier
+        }
+    }
+
+    // 4. Fall back to hardware recommendation selector
+    return selectSlmForDevice(device)
+}
+
+

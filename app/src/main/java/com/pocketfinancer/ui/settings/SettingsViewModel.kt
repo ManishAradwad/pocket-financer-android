@@ -7,6 +7,7 @@ import androidx.lifecycle.viewModelScope
 import com.pocketfinancer.hardware.DeviceCapabilities
 import com.pocketfinancer.hardware.SlmTier
 import com.pocketfinancer.hardware.explainTierSelection
+import com.pocketfinancer.hardware.resolveActiveSlmTier
 import com.pocketfinancer.hardware.selectSlmForDevice
 import com.pocketfinancer.inference.LlamaEngine
 import com.pocketfinancer.inference.ModelDownloader
@@ -35,6 +36,7 @@ data class SettingsUiState(
 
     // ── SLM Selection ──
     val selectedSlm: SlmTier? = null,
+    val recommendedSlm: SlmTier? = null,
     val allTiers: List<SlmTier> = SlmTier.ALL_TIERS,
     val tierExplanations: Map<String, String> = emptyMap(),
 
@@ -118,13 +120,15 @@ class SettingsViewModel @Inject constructor(
     private fun assessDevice() {
         try {
             val device = deviceCapabilities.assessDevice()
-            val slm = selectSlmForDevice(device)
+            val recommendedSlm = selectSlmForDevice(device)
+            val activeSlm = resolveActiveSlmTier(context, llamaEngine.getModelStorageDir(), device)
             val explanations = SlmTier.ALL_TIERS.associate { tier ->
-                tier.id to explainTierSelection(tier, device, tier == slm)
+                tier.id to explainTierSelection(tier, device, tier == recommendedSlm)
             }
             _state.value = _state.value.copy(
                 deviceInfo = device,
-                selectedSlm = slm,
+                selectedSlm = activeSlm,
+                recommendedSlm = recommendedSlm,
                 tierExplanations = explanations
             )
         } catch (e: Exception) {
@@ -212,6 +216,12 @@ class SettingsViewModel @Inject constructor(
 
             result.fold(
                 onSuccess = {
+                    slm?.let { tier ->
+                        context.getSharedPreferences(".app_settings", Context.MODE_PRIVATE)
+                            .edit()
+                            .putString("selected_slm_id", tier.id)
+                            .apply()
+                    }
                     _state.value = _state.value.copy(
                         loadingModel = false,
                         modelLoaded = true,

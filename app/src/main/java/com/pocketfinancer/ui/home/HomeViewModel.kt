@@ -14,6 +14,14 @@ import com.pocketfinancer.pipeline.SmsFilterPipeline
 import com.pocketfinancer.pipeline.PromptBuilder
 import com.pocketfinancer.pipeline.ExtractionParser
 import com.pocketfinancer.inference.LlamaEngine
+import com.pocketfinancer.hardware.DeviceCapabilities
+import com.pocketfinancer.hardware.SlmTier
+import com.pocketfinancer.hardware.isUpgradeAvailable
+import com.pocketfinancer.hardware.resolveActiveSlmTier
+import com.pocketfinancer.hardware.selectSlmForDevice
+import com.pocketfinancer.inference.ModelDownloader
+import com.pocketfinancer.ui.onboarding.OnboardingSyncManager
+import java.io.File
 import java.util.Calendar
 import javax.inject.Inject
 
@@ -25,10 +33,20 @@ data class PeriodData(
     val recent: List<Transaction> = emptyList()
 )
 
+data class ModelUpgradeRecommendation(
+    val isUpgradeAvailable: Boolean = false,
+    val recommendedSlm: SlmTier? = null,
+    val currentSlm: SlmTier? = null,
+    val downloadState: ModelDownloader.DownloadState = ModelDownloader.DownloadState(),
+    val isDownloading: Boolean = false,
+    val isDismissed: Boolean = false
+)
+
 data class HomeUiState(
     val selectedPeriod: String = "Day", // "Day" | "Week" | "Month"
     val periodData: Map<String, PeriodData> = emptyMap(),
-    val syncState: HomeSyncState = HomeSyncState()
+    val syncState: HomeSyncState = HomeSyncState(),
+    val upgradeRecommendation: ModelUpgradeRecommendation = ModelUpgradeRecommendation()
 )
 
 @HiltViewModel
@@ -39,22 +57,58 @@ class HomeViewModel @Inject constructor(
     private val smsFilterPipeline: SmsFilterPipeline,
     private val promptBuilder: PromptBuilder,
     private val llamaEngine: LlamaEngine,
-    private val extractionParser: ExtractionParser
+    private val extractionParser: ExtractionParser,
+    private val deviceCapabilities: DeviceCapabilities,
+    private val modelDownloader: ModelDownloader,
+    private val onboardingSyncManager: OnboardingSyncManager
 ) : ViewModel() {
 
     private val _selectedPeriod = MutableStateFlow("Day")
     val selectedPeriod: StateFlow<String> = _selectedPeriod.asStateFlow()
+    private val _isDismissed = MutableStateFlow(false)
 
     val uiState: StateFlow<HomeUiState> = combine(
         transactionRepository.getAllByDateDesc(),
         _selectedPeriod,
-        syncManager.syncState
-    ) { txs, period, syncState ->
+        syncManager.syncState,
+        modelDownloader.state,
+        onboardingSyncManager.syncState,
+        _isDismissed
+    ) { flows ->
+        @Suppress("UNCHECKED_CAST")
+        val txs = flows[0] as List<Transaction>
+        val period = flows[1] as String
+        val syncState = flows[2] as HomeSyncState
+        val downloadState = flows[3] as ModelDownloader.DownloadState
+        val onboardingSyncState = flows[4] as OnboardingSyncManager.OnboardingSyncState
+        val isDismissed = flows[5] as Boolean
+
         val periodDataMap = calculatePeriodData(txs)
+        val device = deviceCapabilities.assessDevice()
+        val currentSlm = resolveActiveSlmTier(context, llamaEngine.getModelStorageDir(), device)
+        val recommendedSlm = selectSlmForDevice(device)
+
+        val recommendedFile = recommendedSlm?.let { File(llamaEngine.getModelStorageDir(), it.modelFile) }
+        val isRecommendedDownloaded = recommendedFile != null && recommendedFile.exists() && recommendedFile.length() >= (recommendedSlm.sizeMb.toLong() * 1024L * 1024L * 90L / 100L)
+
+        val hasUpgrade = !isRecommendedDownloaded && isUpgradeAvailable(currentSlm, device)
+
+        val activeDs = if (onboardingSyncState.isDownloading) onboardingSyncState.downloadState else downloadState
+
+        val upgradeRec = ModelUpgradeRecommendation(
+            isUpgradeAvailable = hasUpgrade,
+            recommendedSlm = recommendedSlm,
+            currentSlm = currentSlm,
+            downloadState = activeDs,
+            isDownloading = activeDs.isDownloading || onboardingSyncState.isDownloading,
+            isDismissed = isDismissed
+        )
+
         HomeUiState(
             selectedPeriod = period,
             periodData = periodDataMap,
-            syncState = syncState
+            syncState = syncState,
+            upgradeRecommendation = upgradeRec
         )
     }.stateIn(
         scope = viewModelScope,
@@ -87,6 +141,16 @@ class HomeViewModel @Inject constructor(
         viewModelScope.launch {
             SyncService.start(context)
         }
+    }
+
+    fun startModelUpgrade() {
+        val device = deviceCapabilities.assessDevice()
+        val recommendedSlm = selectSlmForDevice(device) ?: return
+        onboardingSyncManager.startOnboarding(context, recommendedSlm)
+    }
+
+    fun dismissUpgradeBanner() {
+        _isDismissed.value = true
     }
 
     fun resetSyncState() {

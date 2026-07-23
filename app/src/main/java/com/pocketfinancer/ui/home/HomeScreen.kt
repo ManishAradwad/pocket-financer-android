@@ -219,6 +219,18 @@ fun HomeScreen(
                     }
                 }
 
+                // ── Model Upgrade Banner ──
+                val upgradeRec = state.upgradeRecommendation
+                if (upgradeRec.isUpgradeAvailable && !upgradeRec.isDismissed) {
+                    item {
+                        ModelUpgradeBanner(
+                            recommendation = upgradeRec,
+                            onUpgrade = { viewModel.startModelUpgrade() },
+                            onDismiss = { viewModel.dismissUpgradeBanner() }
+                        )
+                    }
+                }
+
                 // ── Sync Banner ──
                 item {
                     SyncStrip(
@@ -1535,4 +1547,167 @@ private fun getAccountShortLabel(label: String?): String {
     }
     
     return if (digits.isNotEmpty()) "$shortBank ••$digits" else shortBank
+}
+
+@Composable
+fun ModelUpgradeBanner(
+    recommendation: ModelUpgradeRecommendation,
+    onUpgrade: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val recSlm = recommendation.recommendedSlm ?: return
+    val ds = recommendation.downloadState
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp),
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(containerColor = M3_SurfaceContainerLow),
+        border = BorderStroke(1.dp, M3_Primary.copy(alpha = 0.35f))
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(32.dp)
+                            .background(M3_Primary.copy(alpha = 0.15f), CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Bolt,
+                            contentDescription = null,
+                            tint = M3_Primary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                    Text(
+                        text = "PERFORMANCE UPGRADE AVAILABLE",
+                        color = M3_Primary,
+                        style = AppTypography.eyebrow
+                    )
+                }
+
+                IconButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.size(24.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Close,
+                        contentDescription = "Dismiss",
+                        tint = M3_OnSurfaceVariant.copy(alpha = 0.7f),
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+            }
+
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(
+                    text = "Upgrade Engine to ${recSlm.name}",
+                    color = M3_OnSurface,
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
+                )
+                Text(
+                    text = "Your phone supports a higher quality AI model (~${"%.1f".format(recSlm.sizeGb)} GB). Upgrading will improve extraction accuracy and performance.",
+                    color = M3_OnSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+
+            if (recommendation.isDownloading) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(M3_SurfaceContainer, RoundedCornerShape(12.dp))
+                        .padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Downloading in background...",
+                            color = M3_OnSurface,
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                        Text(
+                            text = "${"%.0f".format(ds.progress * 100)}%",
+                            color = M3_Primary,
+                            style = AppTypography.bodySmallBold
+                        )
+                    }
+                    LinearProgressIndicator(
+                        progress = { ds.progress },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(6.dp)
+                            .clip(RoundedCornerShape(3.dp)),
+                        color = M3_Primary,
+                        trackColor = M3_OutlineVariant.copy(alpha = 0.3f)
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "${"%.1f".format(ds.downloadedMb)} / ${"%.1f".format(ds.totalMb)} MB",
+                            color = M3_OnSurfaceVariant,
+                            style = AppTypography.timestamp
+                        )
+                        if (ds.speedMbps > 0) {
+                            Text(
+                                text = "${"%.1f".format(ds.speedMbps)} MB/s",
+                                color = M3_OnSurfaceVariant,
+                                style = AppTypography.timestamp
+                            )
+                        }
+                    }
+                }
+            } else {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    TextButton(onClick = onDismiss) {
+                        Text("Later", color = M3_OnSurfaceVariant, style = MaterialTheme.typography.labelMedium)
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Button(
+                        onClick = onUpgrade,
+                        colors = ButtonDefaults.buttonColors(containerColor = M3_Primary),
+                        shape = RoundedCornerShape(100)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Download,
+                            contentDescription = null,
+                            tint = M3_OnPrimary,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "Upgrade Engine",
+                            color = M3_OnPrimary,
+                            style = AppTypography.titleSmallBold
+                        )
+                    }
+                }
+            }
+        }
+    }
 }

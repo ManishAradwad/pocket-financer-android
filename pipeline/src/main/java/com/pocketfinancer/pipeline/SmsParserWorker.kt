@@ -8,6 +8,7 @@ import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import com.pocketfinancer.hardware.DeviceCapabilities
+import com.pocketfinancer.hardware.resolveActiveSlmTier
 import com.pocketfinancer.hardware.selectSlmForDevice
 import com.pocketfinancer.inference.LlamaEngine
 import com.pocketfinancer.sms.SmsReader
@@ -114,7 +115,7 @@ class SmsParserWorker(
             if (!llamaEngine.isModelLoaded()) {
                 Log.i("SmsParserWorker", "Model not loaded. Performing dynamic hardware selection...")
                 val device = deviceCapabilities.assessDevice()
-                val slm = selectSlmForDevice(device)
+                val slm = resolveActiveSlmTier(applicationContext, llamaEngine.getModelStorageDir(), device)
                 if (slm == null) {
                     val errMsg = "No viable SLM for this device (RAM below minimum)."
                     Log.e("SmsParserWorker", errMsg)

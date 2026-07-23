@@ -161,11 +161,11 @@ class OnboardingViewModel @Inject constructor(
 
     private fun assessDeviceHardware() {
         try {
-            val device = deviceCapabilities.assessDevice()
-            val slm = selectSlmForDevice(device)
+            val slm = SlmTier.DEFAULT_ONBOARDING_SLM
             _state.value = _state.value.copy(selectedSlm = slm)
         } catch (e: Exception) {
             Log.e("OnboardingViewModel", "Hardware assessment failed", e)
+            _state.value = _state.value.copy(selectedSlm = SlmTier.DEFAULT_ONBOARDING_SLM)
         }
     }
 

@@ -75,7 +75,7 @@ class OnboardingService : Service() {
         }
 
         val slmId = intent?.getStringExtra("EXTRA_SLM_ID")
-        val slm = SlmTier.ALL_TIERS.find { it.id == slmId } ?: SlmTier.QWEN3_1_7B_Q4_K_M
+        val slm = SlmTier.ALL_TIERS.find { it.id == slmId } ?: SlmTier.DEFAULT_ONBOARDING_SLM
 
         Log.i(TAG, "Starting onboarding for SLM: ${slm.name}")
 
@@ -359,7 +359,7 @@ class OnboardingService : Service() {
                     syncTotalMessages = 0
                 )
             }
-            completeOnboarding()
+            completeOnboarding(slm)
             return
         }
         addLog("SmsReader: Retrieved ${rawMessages.size} messages.")
@@ -396,7 +396,7 @@ class OnboardingService : Service() {
                     syncMessage = "Sync completed! No transactional history."
                 )
             }
-            completeOnboarding()
+            completeOnboarding(slm)
             return
         }
         addLog("Pipeline: Found ${transactionalMessages.size} transactions to process.")
@@ -498,12 +498,15 @@ class OnboardingService : Service() {
         }
         runOnWorkflowProgress("Syncing Transactions", "Completed successfully!", 1.0f)
         delay(600)
-        completeOnboarding()
+        completeOnboarding(slm)
     }
 
-    private fun completeOnboarding() {
+    private fun completeOnboarding(slm: SlmTier) {
         val prefs = getSharedPreferences(".app_settings", Context.MODE_PRIVATE)
-        prefs.edit().putBoolean("onboarding_completed", true).apply()
+        prefs.edit()
+            .putBoolean("onboarding_completed", true)
+            .putString("selected_slm_id", slm.id)
+            .apply()
         syncManager.updateState {
             it.copy(
                 step = OnboardingStep.COMPLETED,

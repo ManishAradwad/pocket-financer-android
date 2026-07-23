@@ -6,6 +6,7 @@ import com.pocketfinancer.data.model.TransactionType
 import com.pocketfinancer.data.repository.AccountRepository
 import com.pocketfinancer.data.repository.TransactionRepository
 import com.pocketfinancer.hardware.DeviceCapabilities
+import com.pocketfinancer.hardware.resolveActiveSlmTier
 import com.pocketfinancer.hardware.selectSlmForDevice
 import com.pocketfinancer.inference.LlamaEngine
 import com.pocketfinancer.pipeline.ExtractionParser
@@ -137,7 +138,7 @@ class HomeSyncManager @Inject constructor(
             // 1. Ensure Model is Loaded
             if (!llamaEngine.isModelLoaded()) {
                 val device = deviceCapabilities.assessDevice()
-                val slm = selectSlmForDevice(device)
+                val slm = resolveActiveSlmTier(context, llamaEngine.getModelStorageDir(), device)
                 if (slm == null) {
                     throw Exception("No viable SLM for this device (RAM below minimum).")
                 }
