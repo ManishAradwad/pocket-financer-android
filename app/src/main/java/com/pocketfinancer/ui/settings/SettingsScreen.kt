@@ -3,6 +3,7 @@ package com.pocketfinancer.ui.settings
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
@@ -11,6 +12,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -39,6 +41,11 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
 
         // ── Section: Background SMS Processing ──────────────────────────
         BackgroundParsingCard(state.processIncomingSms, viewModel)
+
+        SlmProcessingCard(
+            enabled = state.gbnfGrammarEnabled,
+            onEnabledChange = viewModel::setGbnfGrammarEnabled
+        )
 
         // ── Section 3: Engine Status + Test ──────────────────────────────
         EngineCard(state, viewModel)
@@ -527,6 +534,53 @@ private fun BackgroundParsingCard(
             Switch(
                 checked = enabled,
                 onCheckedChange = { viewModel.toggleProcessIncomingSms() },
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = Color.White,
+                    checkedTrackColor = M3_Primary
+                )
+            )
+        }
+    }
+}
+
+@Composable
+private fun SlmProcessingCard(
+    enabled: Boolean,
+    onEnabledChange: (Boolean) -> Unit
+) {
+    SectionCard(title = "SLM SMS PROCESSING") {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .toggleable(
+                    value = enabled,
+                    role = Role.Switch,
+                    onValueChange = onEnabledChange
+                )
+                .padding(vertical = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Use GBNF grammar",
+                    color = M3_OnSurface,
+                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold)
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = "Constrains the SLM to produce valid transaction JSON. " +
+                        "Enabling GBNF slows processing for each SMS, but may improve " +
+                        "extraction accuracy and reliability. Changes apply to the next SMS; " +
+                        "one already being processed keeps its current setting.",
+                    color = M3_OnSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+            Spacer(modifier = Modifier.width(16.dp))
+            Switch(
+                checked = enabled,
+                onCheckedChange = null,
                 colors = SwitchDefaults.colors(
                     checkedThumbColor = Color.White,
                     checkedTrackColor = M3_Primary

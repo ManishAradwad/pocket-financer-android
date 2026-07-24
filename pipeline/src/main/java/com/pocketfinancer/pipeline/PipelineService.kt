@@ -18,7 +18,7 @@ import javax.inject.Singleton
  * LLM access crashes. Each SMS goes through:
  *   1. Build prompt (system + few-shot + sender + body)
  *   2. Apply chat template (Qwen3 Jinja via model, or manual fallback)
- *   3. Two-phase inference (thinking → GBNF grammar)
+ *   3. Two-phase inference (thinking → structured JSON generation)
  *   4. Parse output (null = skip, JSON = save)
  *   5. Save transaction + find-or-create account
  */
@@ -29,7 +29,8 @@ class PipelineService @Inject constructor(
     private val extractionParser: ExtractionParser,
     private val transactionRepository: TransactionRepository,
     private val accountRepository: AccountRepository,
-    private val smsFilterPipeline: SmsFilterPipeline
+    private val smsFilterPipeline: SmsFilterPipeline,
+    private val slmProcessingPreferences: SlmProcessingPreferences
 ) {
     /** Max SMS in queue before dropping. */
     private val maxQueueLen = 200
@@ -160,6 +161,10 @@ class PipelineService @Inject constructor(
     }
 
     suspend fun processSingle(sms: SmsReader.SmsMessage): ExtractionParser.ExtractedTransaction? {
+        // Snapshot once per SMS. Preference changes while inference is running
+        // intentionally apply only to the next SMS.
+        val gbnfEnabledForSms = slmProcessingPreferences.gbnfGrammarEnabled.value
+
         if (!llamaEngine.isModelLoaded()) {
             emit(Stage.ERROR, "Model not loaded, skipping SMS")
             return null
@@ -176,7 +181,7 @@ class PipelineService @Inject constructor(
         // 3. Run two-phase inference
         val result = llamaEngine.inferForExtraction(
             prompt = chatPrompt,
-            grammar = grammar,
+            grammar = if (gbnfEnabledForSms) grammar else null,
             staticPrefix = promptBuilder.getStaticPrefix(),
             thinkingTokens = 1024,
             answerTokens = 256

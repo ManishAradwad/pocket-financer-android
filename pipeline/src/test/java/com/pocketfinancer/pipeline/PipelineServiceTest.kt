@@ -11,7 +11,10 @@ import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.async
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.runBlocking
 import org.junit.Before
 import org.junit.Test
@@ -27,6 +30,8 @@ class PipelineServiceTest {
     private lateinit var extractionParser: ExtractionParser
     private lateinit var transactionRepository: TransactionRepository
     private lateinit var accountRepository: AccountRepository
+    private lateinit var slmProcessingPreferences: SlmProcessingPreferences
+    private lateinit var gbnfEnabled: MutableStateFlow<Boolean>
     private lateinit var pipeline: PipelineService
 
     private val testSender = "AX-HDFCBK"
@@ -39,6 +44,8 @@ class PipelineServiceTest {
         extractionParser = mockk()
         transactionRepository = mockk(relaxed = true)
         accountRepository = mockk()
+        slmProcessingPreferences = mockk()
+        gbnfEnabled = MutableStateFlow(true)
 
         every { llamaEngine.isModelLoaded() } returns true
         every { promptBuilder.buildExtractionPrompt(any(), any()) } returns "Sender: AX-HDFCBK\nSMS: Rs.500 credited\nOutput:"
@@ -54,6 +61,7 @@ Output:
 """
         every { llamaEngine.applyChatTemplate(any(), any()) } returns null
         every { llamaEngine.readAsset("sms_extraction.gbnf") } returns "root ::= ..."
+        every { slmProcessingPreferences.gbnfGrammarEnabled } returns gbnfEnabled
 
         val defaultAccount = Account(
             id = UUID.randomUUID().toString(),
@@ -75,7 +83,8 @@ Output:
             extractionParser = extractionParser,
             transactionRepository = transactionRepository,
             accountRepository = accountRepository,
-            smsFilterPipeline = SmsFilterPipeline()
+            smsFilterPipeline = SmsFilterPipeline(),
+            slmProcessingPreferences = slmProcessingPreferences
         )
     }
 
@@ -85,6 +94,78 @@ Output:
             val state = pipeline.pipelineState.first()
             assertNull(state)
         }
+    }
+
+    @Test
+    fun `enabled grammar is loaded and passed to inference`() = runBlocking {
+        coEvery {
+            llamaEngine.inferForExtraction(any(), any(), any(), any(), any())
+        } returns LlamaEngine.InferenceResult.Null
+
+        pipeline.processSingle(SmsReader.SmsMessage(testSender, testBody, 1000L, 1))
+
+        verify(exactly = 1) { llamaEngine.readAsset("sms_extraction.gbnf") }
+        coVerify(exactly = 1) {
+            llamaEngine.inferForExtraction(
+                prompt = any(),
+                grammar = "root ::= ...",
+                staticPrefix = any(),
+                thinkingTokens = any(),
+                answerTokens = any()
+            )
+        }
+    }
+
+    @Test
+    fun `disabled grammar skips asset and passes null to inference`() = runBlocking {
+        gbnfEnabled.value = false
+        coEvery {
+            llamaEngine.inferForExtraction(any(), null, any(), any(), any())
+        } returns LlamaEngine.InferenceResult.Null
+
+        pipeline.processSingle(SmsReader.SmsMessage(testSender, testBody, 1000L, 1))
+
+        verify(exactly = 0) { llamaEngine.readAsset("sms_extraction.gbnf") }
+        coVerify(exactly = 1) {
+            llamaEngine.inferForExtraction(
+                prompt = any(),
+                grammar = null,
+                staticPrefix = any(),
+                thinkingTokens = any(),
+                answerTokens = any()
+            )
+        }
+    }
+
+    @Test
+    fun `in-flight SMS keeps grammar snapshot and next SMS uses new setting`() = runBlocking {
+        val inferenceStarted = CompletableDeferred<Unit>()
+        val releaseFirstInference = CompletableDeferred<Unit>()
+        val capturedGrammar = mutableListOf<String?>()
+
+        coEvery {
+            llamaEngine.inferForExtraction(any(), any(), any(), any(), any())
+        } coAnswers {
+            capturedGrammar += secondArg<String?>()
+            if (capturedGrammar.size == 1) {
+                inferenceStarted.complete(Unit)
+                releaseFirstInference.await()
+            }
+            LlamaEngine.InferenceResult.Null
+        }
+
+        val firstSms = async {
+            pipeline.processSingle(SmsReader.SmsMessage(testSender, testBody, 1000L, 1))
+        }
+        inferenceStarted.await()
+        gbnfEnabled.value = false
+        releaseFirstInference.complete(Unit)
+        firstSms.await()
+
+        pipeline.processSingle(SmsReader.SmsMessage(testSender, testBody, 2000L, 1))
+
+        assertEquals(listOf("root ::= ...", null), capturedGrammar)
+        verify(exactly = 1) { llamaEngine.readAsset("sms_extraction.gbnf") }
     }
 
     @Test

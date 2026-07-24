@@ -1290,13 +1290,13 @@ fun PipelineStagesView(
         listOf(
             "Pre-Filter Check" to "Checking message format and keywords",
             "Phase 1: Thinking Pass" to "Greedy reasoning pass on device CPU",
-            "Phase 2: Grammar Constraint" to "Strict JSON output validation",
+            "Phase 2: Structured JSON" to "Structured transaction extraction",
             "Database Persistence" to "Inserting transaction in encrypted DB"
         )
     } else {
         listOf(
             "Pre-Filter Check" to "Checking message format and keywords",
-            "Phase 2: Grammar Constraint" to "Strict JSON output validation",
+            "Phase 2: Structured JSON" to "Structured transaction extraction",
             "Database Persistence" to "Inserting transaction in encrypted DB"
         )
     }

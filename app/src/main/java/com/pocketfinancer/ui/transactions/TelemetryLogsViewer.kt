@@ -52,8 +52,8 @@ fun TelemetryLogsViewer(
             expandedStage = when {
                 activeStageIndex == 0 -> 0 // Pre-filter
                 activeStageIndex == 1 && hasThinkingMode -> 2 // Thinking Pass (mapped to stage 2: Inference)
-                activeStageIndex == 1 && !hasThinkingMode -> 2 // Grammar JSON
-                activeStageIndex == 2 -> 2 // Grammar JSON
+                activeStageIndex == 1 && !hasThinkingMode -> 2 // Structured JSON
+                activeStageIndex == 2 -> 2 // Structured JSON
                 activeStageIndex == 3 -> 3 // Persistence
                 else -> expandedStage
             }
@@ -221,7 +221,7 @@ fun TelemetryLogsViewer(
             val isStage2Done = !isActive || activeStageIndex > 2
             val isStage2Active = isActive && (activeStageIndex == 1 || activeStageIndex == 2)
             val stage2Status = if (isStage2Done) "Inference Complete" else if (isStage2Active) {
-                if (activeStageIndex == 1 && hasThinkingMode) "Phase 1: Thinking Pass" else "Phase 2: Grammar JSON"
+                if (activeStageIndex == 1 && hasThinkingMode) "Phase 1: Thinking Pass" else "Phase 2: Structured JSON"
             } else "Pending"
             val stage2Color = if (isStage2Done) M3_Pos else if (isStage2Active) Color(0xFFF2C94C) else M3_OnSurfaceVariant.copy(alpha = 0.4f)
             

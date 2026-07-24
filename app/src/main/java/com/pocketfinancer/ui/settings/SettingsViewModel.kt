@@ -13,6 +13,7 @@ import com.pocketfinancer.inference.LlamaEngine
 import com.pocketfinancer.inference.ModelDownloader
 import com.pocketfinancer.pipeline.ExtractionParser
 import com.pocketfinancer.pipeline.PromptBuilder
+import com.pocketfinancer.pipeline.SlmProcessingPreferences
 import com.pocketfinancer.pipeline.SmsFilterPipeline
 import com.pocketfinancer.data.repository.TransactionRepository
 import com.pocketfinancer.data.repository.AccountRepository
@@ -59,7 +60,8 @@ data class SettingsUiState(
     val filterLogs: List<String>? = null,
     val sessionCacheLogs: List<String>? = null,
     val slmPrompt: String? = null,
-    val processIncomingSms: Boolean = true
+    val processIncomingSms: Boolean = true,
+    val gbnfGrammarEnabled: Boolean = true
 )
 
 @HiltViewModel
@@ -72,7 +74,8 @@ class SettingsViewModel @Inject constructor(
     private val extractionParser: ExtractionParser,
     private val smsFilterPipeline: SmsFilterPipeline,
     private val transactionRepository: TransactionRepository,
-    private val accountRepository: AccountRepository
+    private val accountRepository: AccountRepository,
+    private val slmProcessingPreferences: SlmProcessingPreferences
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(SettingsUiState())
@@ -84,7 +87,16 @@ class SettingsViewModel @Inject constructor(
 
         val prefs = context.getSharedPreferences(".app_settings", Context.MODE_PRIVATE)
         val enabled = prefs.getBoolean("process_incoming_sms", true)
-        _state.value = _state.value.copy(processIncomingSms = enabled)
+        _state.value = _state.value.copy(
+            processIncomingSms = enabled,
+            gbnfGrammarEnabled = slmProcessingPreferences.gbnfGrammarEnabled.value
+        )
+
+        viewModelScope.launch {
+            slmProcessingPreferences.gbnfGrammarEnabled.collect { enabled ->
+                _state.value = _state.value.copy(gbnfGrammarEnabled = enabled)
+            }
+        }
 
         // Mirror downloader state into UI state
         viewModelScope.launch {
@@ -285,6 +297,9 @@ class SettingsViewModel @Inject constructor(
             return
         }
 
+        // Match production semantics: capture one grammar mode for the whole
+        // test so a settings change cannot alter an in-flight inference.
+        val gbnfEnabledForSms = slmProcessingPreferences.gbnfGrammarEnabled.value
         val testSender = "AX-HDFCBK"
         val testBody = "HDFC Bank: Rs.500.00 credited to a/c XXXXXX0000 on 01-01-20 by a/c linked to VPA demouser000@examplebank (UPI Ref No 000000000000)."
 
@@ -321,7 +336,11 @@ class SettingsViewModel @Inject constructor(
 
             try {
                 val hasThinking = llamaEngine.hasThinkingMode
-                val grammar = llamaEngine.readAsset("sms_extraction.gbnf")
+                val grammar = if (gbnfEnabledForSms) {
+                    llamaEngine.readAsset("sms_extraction.gbnf")
+                } else {
+                    null
+                }
                 val staticPrefix = promptBuilder.getStaticPrefix()
                 val rawPrompt = promptBuilder.buildExtractionPrompt(testSender, testBody)
                 val chatPrompt = promptBuilder.buildChatPrompt(rawPrompt, enableThinking = hasThinking)
@@ -468,6 +487,10 @@ class SettingsViewModel @Inject constructor(
         val next = !current
         prefs.edit().putBoolean("process_incoming_sms", next).apply()
         _state.value = _state.value.copy(processIncomingSms = next)
+    }
+
+    fun setGbnfGrammarEnabled(enabled: Boolean) {
+        slmProcessingPreferences.setGbnfGrammarEnabled(enabled)
     }
 
     fun resetOnboarding(onSuccess: () -> Unit) {

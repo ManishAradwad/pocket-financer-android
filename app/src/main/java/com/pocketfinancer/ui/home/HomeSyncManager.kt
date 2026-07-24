@@ -11,6 +11,7 @@ import com.pocketfinancer.hardware.selectSlmForDevice
 import com.pocketfinancer.inference.LlamaEngine
 import com.pocketfinancer.pipeline.ExtractionParser
 import com.pocketfinancer.pipeline.PromptBuilder
+import com.pocketfinancer.pipeline.SlmProcessingPreferences
 import com.pocketfinancer.pipeline.SmsFilterPipeline
 import com.pocketfinancer.sms.SmsReader
 import com.pocketfinancer.sms.SmsRepository
@@ -61,7 +62,8 @@ class HomeSyncManager @Inject constructor(
     private val llamaEngine: LlamaEngine,
     private val deviceCapabilities: DeviceCapabilities,
     private val promptBuilder: PromptBuilder,
-    private val extractionParser: ExtractionParser
+    private val extractionParser: ExtractionParser,
+    private val slmProcessingPreferences: SlmProcessingPreferences
 ) {
     private val TAG = "HomeSyncManager"
 
@@ -167,7 +169,9 @@ class HomeSyncManager @Inject constructor(
                 )
             }
 
-            val grammar = llamaEngine.readAsset("sms_extraction.gbnf")
+            val grammar: String by lazy {
+                llamaEngine.readAsset("sms_extraction.gbnf")
+            }
 
             // 2. Loop and Sync
             var index = 0
@@ -187,6 +191,9 @@ class HomeSyncManager @Inject constructor(
                 )
 
                 val activeItem = _syncState.value.queue[index]
+                // Snapshot at the per-SMS boundary so changing the setting
+                // affects the next item without mutating this inference.
+                val gbnfEnabledForSms = slmProcessingPreferences.gbnfGrammarEnabled.value
 
                 // Double check if transaction already exists in DB to prevent duplicates
                 if (transactionRepository.exists(activeItem.sender, activeItem.date)) {
@@ -209,7 +216,7 @@ class HomeSyncManager @Inject constructor(
                 try {
                     // Update stage:
                     // If model has thinking mode: update to stage 1 (Thinking Pass)
-                    // If model has NO thinking mode: update to stage 2 (Grammar Constraint)
+                    // If model has NO thinking mode: update to stage 2 (Structured JSON)
                     val hasThinking = _syncState.value.hasThinkingMode
                     _syncState.value = _syncState.value.copy(
                         currentStageIndex = if (hasThinking) 1 else 2
@@ -230,7 +237,7 @@ class HomeSyncManager @Inject constructor(
                     // Run dynamic extraction with real-time logging
                     val result = llamaEngine.inferForExtraction(
                         prompt = chatPrompt,
-                        grammar = grammar,
+                        grammar = if (gbnfEnabledForSms) grammar else null,
                         staticPrefix = staticPrefix,
                         thinkingTokens = 1024,
                         answerTokens = 256,
@@ -240,7 +247,7 @@ class HomeSyncManager @Inject constructor(
                             )
                         },
                         jsonCallback = { token ->
-                            // Update stage to Phase 2: Grammar Constraint on first json token
+                            // Update stage to Phase 2: Structured JSON on first JSON token
                             if (_syncState.value.currentStageIndex != 2) {
                                 _syncState.value = _syncState.value.copy(currentStageIndex = 2)
                             }

@@ -18,7 +18,7 @@ import javax.inject.Singleton
  * - Model loading/unloading
  * - Two-phase generation for Qwen3 thinking models:
  *   Phase 1: think pass (no grammar, <think>...</think>)
- *   Phase 2: GBNF-constrained JSON decode
+ *   Phase 2: structured JSON decode, optionally constrained by GBNF
  * - Chat template rendering via model's built-in Jinja template
  * - Performance data capture (prompt eval time, token generation speed)
  * - Stop/cancel support
@@ -184,20 +184,21 @@ class LlamaEngine @Inject constructor(
     // and the model collapses into copying few-shot demos.
     //
     // Phase 1: generate thinking tokens with stop=["</think>"], no grammar
-    // Phase 2: append the think block, apply GBNF grammar, decode JSON
+    // Phase 2: append the think block, optionally apply GBNF, decode JSON
 
     /**
      * Run the full two-phase extraction pipeline.
      *
      * @param prompt         The full chat-template-rendered prompt
-     * @param grammar        GBNF grammar string (from sms_extraction.gbnf)
+     * @param grammar        Optional GBNF grammar string (from sms_extraction.gbnf);
+     *                       null disables grammar-constrained sampling
      * @param thinkingTokens Max tokens for the thinking phase (default 1024)
      * @param answerTokens   Max tokens for the JSON answer phase (default 256)
      * @return InferenceResult.Success(jsonString) or InferenceResult.Null
      */
     suspend fun inferForExtraction(
         prompt: String,
-        grammar: String,
+        grammar: String?,
         staticPrefix: String? = null,
         thinkingTokens: Int = 1024,
         answerTokens: Int = 256,
@@ -211,7 +212,7 @@ class LlamaEngine @Inject constructor(
         try {
             val modelName = modelPath?.let { java.io.File(it).name } ?: MODEL_FILENAME
             if (!hasThinkingMode) {
-                // Direct single-pass grammar-constrained JSON generation (Gemma, etc.)
+                // Direct single-pass JSON generation (Gemma, etc.), optionally grammar-constrained
                 var executionPrompt = prompt
                 var keepCache = false
 
@@ -355,17 +356,17 @@ class LlamaEngine @Inject constructor(
                 return@withContext InferenceResult.Error("Thinking phase produced empty output")
             }
 
-            // Phase 2: Grammar-constrained JSON decode
+            // Phase 2: Structured JSON decode, optionally grammar-constrained
             // We reuse the existing KV cache that contains the prompt and the generated think block.
             // We only need to append and decode the stop suffix "</think>\n".
             val thinkSuffix = "</think>\n"
             val answer = nativeCompletion(
                 modelHandle,
                 thinkSuffix,
-                grammar,           // GBNF grammar applied here
+                grammar,           // nullable: null selects unconstrained sampling
                 answerTokens,
                 0.0f,              // greedy sampling for deterministic output
-                null,              // no stop token — grammar controls completion
+                null,              // ends on EOG, grammar completion, or token limit
                 true,              // keep cache!
                 jsonCallback
             )

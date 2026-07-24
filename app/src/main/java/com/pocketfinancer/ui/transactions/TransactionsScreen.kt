@@ -1477,7 +1477,7 @@ fun ActiveSyncCard(
                 val stageName = if (isComplete) "Database Persistence" else when (currentStageIndex) {
                     0 -> "Pre-Filter Check"
                     1 -> "Phase 1: Thinking Pass"
-                    2 -> "Phase 2: Grammar Constraint"
+                    2 -> "Phase 2: Structured JSON"
                     else -> "Database Persistence"
                 }
                 Text(

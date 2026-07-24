@@ -20,7 +20,7 @@ By leveraging a local **Small Language Model (SLM)** backed by `llama.cpp` via a
 *   **Three-Phase Reasoning Pipeline**:
     *   *Phase 0 (Pre-Filtering)*: Checks sender, currency amounts, masked accounts, and action verbs; filters out OTPs and collect requests.
     *   *Phase 1 (Chain of Thought)*: Dynamic allocation of `<think>` tokens (1024 token budget) to analyze the alert sender context and message logic.
-    *   *Phase 2 (Grammar-Constrained Parse)*: Utilizes **GBNF (GGML BNF) Grammars** to force the model to output a strict, valid JSON transaction schema (guaranteeing a 100% parser success rate).
+    *   *Phase 2 (Structured JSON Generation)*: Produces transaction JSON with optional **GBNF (GGML BNF) grammar** constraints. GBNF is enabled by default and can improve structured-output reliability at the cost of slower per-SMS processing.
 *   **Dynamic Hardware Auto-Tuning**: Smart hardware profiling detects device RAM capacities and CPU architectures (specifically checking for `ARMv8.2-A` instruction features like `i8mm` and `dotprod` to accelerate integer math) to select the optimal model size automatically.
 *   **Disk-Based KV Cache Caching**: Saves and loads the static prefix KV cache state to/from disk using SHA-256 hashes. This cuts prefill time from ~140 seconds down to `< 100ms` on subsequent runs while automatically cleaning up old stale session files.
 *   **Cryptographically Secured Database**: Persists transaction and account information in a Room database encrypted with **SQLCipher (AES-256)**, securing sensitive ledger data from third-party app leaks or root-level vulnerabilities.
@@ -50,7 +50,7 @@ graph TD
     CHK -->|No: Prefill Prefix| DEL[Delete Stale Sessions]
     DEL -->|Save New Session| F
     F -->|Phase 1: Chain of Thought Reasoning| F
-    F -->|Phase 2: GBNF Grammar JSON Enforcement| F
+    F -->|Phase 2: Structured JSON Generation| F
     F -->|JSON / Null Output| C2
     C2 -->|Sanitize & Parse| G[ExtractionParser]
     G -->|Normalized Transaction| C2
@@ -93,8 +93,8 @@ Extracting structured data from highly unstructured, localized SMS alerts (which
     Before waking the SLM execution engine, the incoming message runs through a 6-stage regex validation check ([SmsFilterPipeline.kt](file:///d:/Personal_Projects/pocket-financer-android/pipeline/src/main/java/com/pocketfinancer/pipeline/SmsFilterPipeline.kt)) to assert that the alert contains actual transaction markers (amounts, masked accounts, action verbs) and excludes verification codes/OTPs and pending payment collect requests. If any stage fails, processing terminates instantly (taking less than 1ms), avoiding unnecessary CPU-heavy model evaluations.
 2.  **Phase 1: Thinking Pass (Chain of Thought)**:
     For messages that pass the pre-filter, the system builds the inference prompt (merging the system prompt and few-shot examples) and appends `<think>` to the end. The local SLM processes the SMS semantics, reasoning step-by-step to verify transaction details.
-3.  **Phase 2: Constrained JSON Generation**:
-    Once the thinking tag is closed with `</think>`, the native JNI engine applies a strict Backus-Naur Form (GBNF) grammar defined in [sms_extraction.gbnf](file:///d:/Personal_Projects/pocket-financer-android/inference/src/main/assets/sms_extraction.gbnf). This grammar constrains the vocabulary sampling to force the model to output a strict, valid JSON transaction schema (guaranteeing a 100% parser success rate):
+3.  **Phase 2: Structured JSON Generation**:
+    Once the thinking tag is closed with `</think>`, the native JNI engine generates the transaction JSON. By default it applies the Backus-Naur Form (GBNF) grammar defined in [sms_extraction.gbnf](file:///d:/Personal_Projects/pocket-financer-android/inference/src/main/assets/sms_extraction.gbnf), constraining vocabulary sampling to the expected schema. Users can disable GBNF from Settings for faster per-SMS processing; unconstrained output still passes through the defensive extraction parser and malformed results are rejected:
     ```json
     {
       "amount": 1500.00,
@@ -103,7 +103,7 @@ Extracting structured data from highly unstructured, localized SMS alerts (which
       "account": "A/c XX6254"
     }
     ```
-    If the message is determined to be non-financial, the grammar enforces outputting a simple literal `"null"`.
+    With GBNF enabled, non-financial messages are constrained to the literal `"null"`. Without GBNF, the prompt requests the same output contract and the parser validates the result before anything is saved.
 
 ---
 

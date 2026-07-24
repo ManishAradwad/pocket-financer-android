@@ -86,8 +86,8 @@ class ExtractionParser @Inject constructor() {
 
     /**
      * Check if a value is JSON null or the literal string "null".
-     * Grammar-constrained outputs can't emit real null on non-nullable fields
-     * and fall back to the string "null".
+     * Grammar-constrained outputs use the string "null" for non-nullable
+     * fields; unconstrained output may use either JSON null or that string.
      */
     private fun isNullish(value: Any?): Boolean {
         if (value == null) return true
@@ -124,10 +124,9 @@ class ExtractionParser @Inject constructor() {
 
     /**
      * Coerce the type field. Returns null for anything that isn't
-     * exactly "debit" or "credit" — the GBNF grammar guarantees these two
-     * values; anything else indicates a grammar-attachment bug or tokenizer
-     * mismatch and the extraction should be rejected rather than silently
-     * defaulted to DEBIT.
+     * exactly "debit" or "credit". Grammar-constrained generation enforces
+     * these values, while unconstrained output is validated here. Anything
+     * else is rejected rather than silently defaulted to DEBIT.
      */
     private fun coerceType(raw: String): TransactionType? {
         return when (raw.trim().lowercase()) {

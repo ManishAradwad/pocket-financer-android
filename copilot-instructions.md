@@ -31,11 +31,11 @@ pocket-financer-android/
    - **[`PipelineService.kt`](file:///d:/Personal_Projects/pocket-financer-android/pipeline/src/main/java/com/pocketfinancer/pipeline/PipelineService.kt)**: Coordinates SMS parsing flows, builds prompt, runs JNI inference, parses JSON output, and persists in database.
    - **[`SmsFilterPipeline.kt`](file:///d:/Personal_Projects/pocket-financer-android/pipeline/src/main/java/com/pocketfinancer/pipeline/SmsFilterPipeline.kt)**: 6-stage deterministic regex-based filter running in `< 1ms` to filter out personal numbers, marketing/OTP alerts, and non-transactional messages.
    - **[`PromptBuilder.kt`](file:///d:/Personal_Projects/pocket-financer-android/pipeline/src/main/java/com/pocketfinancer/pipeline/PromptBuilder.kt)**: Assembles the prompt, merging the system prompt and few-shot examples.
-   - **[`ExtractionParser.kt`](file:///d:/Personal_Projects/pocket-financer-android/pipeline/src/main/java/com/pocketfinancer/pipeline/ExtractionParser.kt)**: Parses extracted grammar-constrained JSON string.
+   - **[`ExtractionParser.kt`](file:///d:/Personal_Projects/pocket-financer-android/pipeline/src/main/java/com/pocketfinancer/pipeline/ExtractionParser.kt)**: Validates and parses structured SLM output, including unconstrained output when GBNF is disabled.
 
 3. **[`:inference`](file:///d:/Personal_Projects/pocket-financer-android/inference)**
    - **[`LlamaEngine.kt`](file:///d:/Personal_Projects/pocket-financer-android/inference/src/main/java/com/pocketfinancer/inference/LlamaEngine.kt)**: Native JNI bridge wrapper containing loading, pre-fill cache, thread count config, and two-phase reasoning.
-   - **GBNF Grammar**: Strict grammar schema defined in [`assets/sms_extraction.gbnf`](file:///d:/Personal_Projects/pocket-financer-android/inference/src/main/assets/sms_extraction.gbnf) enforcing strict JSON output.
+   - **GBNF Grammar**: Optional, default-enabled grammar schema defined in [`assets/sms_extraction.gbnf`](file:///d:/Personal_Projects/pocket-financer-android/inference/src/main/assets/sms_extraction.gbnf). It improves structured-output reliability but can slow per-SMS processing.
 
 4. **[`:data`](file:///d:/Personal_Projects/pocket-financer-android/data)**
    - **Room DB & SQLCipher**: Uses SQLCipher for AES-256 database encryption.
@@ -56,7 +56,7 @@ Extracting structured transaction schema requires a power-saving and robust pipe
 
 1. **Deterministic Filter (Phase 0)**: Uses regexes to assert details like currency, amounts, masked cards/accounts, action verbs, and excludes OTPs/collect requests. If failed, it stops immediately.
 2. **Thinking Pass (Phase 1)**: Assembles prompt, appends `<think>`, and lets the model reason step-by-step. The native JNI engine generates tokens with a stop token set to `</think>`.
-3. **Constrained Generation (Phase 2)**: Appends `</think>\n` and executes native completion with the GBNF grammar active. This forces the model's logits sampler to output only valid JSON matching the transaction schema (e.g., `amount`, `counterparty`, `type`, `account`).
+3. **Structured JSON Generation (Phase 2)**: Appends `</think>\n` and executes native completion. The default-enabled GBNF setting constrains the sampler to the transaction schema (`amount`, `counterparty`, `type`, `account`); when disabled, defensive parsing rejects malformed output.
 
 ---
 
