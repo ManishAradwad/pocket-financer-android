@@ -400,7 +400,20 @@ class HomeSyncManager @Inject constructor(
                 date = date,
                 status = if (isTransaction) "pending" else "filtered_out"
             )
-            _syncState.value = _syncState.value.copy(queue = queue)
+            val currentState = _syncState.value
+            _syncState.value = if (currentState.status == HomeSyncState.Status.DONE) {
+                currentState.copy(
+                    status = HomeSyncState.Status.IDLE,
+                    queue = queue,
+                    currentIndex = null,
+                    currentStageIndex = null,
+                    thinkingOutput = "",
+                    jsonOutput = "",
+                    activeSmsPerformance = null
+                )
+            } else {
+                currentState.copy(queue = queue)
+            }
             isTransaction
         } finally {
             withContext(NonCancellable) {

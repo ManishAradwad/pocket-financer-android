@@ -11,6 +11,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.HelpOutline
 import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -214,14 +215,13 @@ fun TelemetryLogsViewer(
             val stage1Status = when {
                 isStage1Done -> "Prompt Compiled"
                 isStage1Active -> "Compiling..."
-                isSettledError -> "Unavailable"
+                isSettledError -> "Status unavailable"
                 isSettledFiltered -> "Not retained"
                 else -> "Pending"
             }
             val stage1Color = when {
                 isStage1Done -> M3_Pos
                 isStage1Active -> Color(0xFFF2C94C)
-                isSettledError -> M3_Error
                 else -> M3_OnSurfaceVariant.copy(alpha = 0.4f)
             }
             
@@ -248,14 +248,13 @@ fun TelemetryLogsViewer(
                 isStage2Active -> {
                     if (activeStageIndex == 1 && hasThinkingMode) "Phase 1: Thinking Pass" else "Phase 2: Structured JSON"
                 }
-                isSettledError -> "Failed"
+                isSettledError -> "Status unavailable"
                 isSettledFiltered -> "No transaction"
                 else -> "Pending"
             }
             val stage2Color = when {
                 isStage2Done -> M3_Pos
                 isStage2Active -> Color(0xFFF2C94C)
-                isSettledError -> M3_Error
                 else -> M3_OnSurfaceVariant.copy(alpha = 0.4f)
             }
             
@@ -266,7 +265,7 @@ fun TelemetryLogsViewer(
                 statusColor = stage2Color,
                 icon = when {
                     isStage2Done -> Icons.Rounded.CheckCircle
-                    isSettledError -> Icons.Rounded.ErrorOutline
+                    isSettledError -> Icons.AutoMirrored.Rounded.HelpOutline
                     isSettledFiltered -> Icons.Rounded.Block
                     else -> Icons.Rounded.Memory
                 },

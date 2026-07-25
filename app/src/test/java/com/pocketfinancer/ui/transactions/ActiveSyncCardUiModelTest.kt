@@ -60,12 +60,12 @@ class ActiveSyncCardUiModelTest {
             ActiveSyncCardUiModel(
                 tone = ActiveSyncCardTone.SUCCESS,
                 title = "Sync complete",
-                detail = "1 saved • 1 skipped",
+                detail = "Queue: 1 saved • 1 skipped",
                 badge = "DONE",
                 stepLabel = "LATEST RESULT",
                 stepValue = "Skipped — no transaction found",
                 actionLabel = "View latest log",
-                stateDescription = "Sync complete. 1 saved • 1 skipped. Skipped — no transaction found."
+                stateDescription = "Sync complete. Queue: 1 saved • 1 skipped. Skipped — no transaction found."
             ),
             state.toActiveSyncCardUiModel(skipped)
         )
@@ -82,7 +82,11 @@ class ActiveSyncCardUiModelTest {
 
         assertSame(failed, state.syncCardItem())
         assertEquals(ActiveSyncCardTone.ISSUE, state.toActiveSyncCardUiModel(failed)?.tone)
-        assertEquals("1 saved • 1 failed", state.toActiveSyncCardUiModel(failed)?.detail)
+        assertEquals("Queue: 1 saved • 1 failed", state.toActiveSyncCardUiModel(failed)?.detail)
+        assertEquals(
+            "Processing needs attention",
+            state.toActiveSyncCardUiModel(failed)?.stepValue
+        )
         assertEquals("Review log", state.toActiveSyncCardUiModel(failed)?.actionLabel)
     }
 
@@ -96,7 +100,7 @@ class ActiveSyncCardUiModelTest {
 
         assertSame(interrupted, state.syncCardItem())
         assertEquals(ActiveSyncCardTone.ISSUE, state.toActiveSyncCardUiModel(interrupted)?.tone)
-        assertEquals("1 incomplete", state.toActiveSyncCardUiModel(interrupted)?.detail)
+        assertEquals("Queue: 1 incomplete", state.toActiveSyncCardUiModel(interrupted)?.detail)
         assertEquals(
             "Sync ended before processing",
             state.toActiveSyncCardUiModel(interrupted)?.stepValue
@@ -114,6 +118,10 @@ class ActiveSyncCardUiModelTest {
         )
 
         assertSame(active, state.syncCardItem())
+        assertEquals(
+            "Processing message 2 of 2",
+            state.toActiveSyncCardUiModel(active)?.title
+        )
     }
 
     private fun sms(

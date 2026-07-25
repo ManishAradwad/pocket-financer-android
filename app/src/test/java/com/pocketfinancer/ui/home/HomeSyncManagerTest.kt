@@ -29,6 +29,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class HomeSyncManagerTest {
@@ -124,14 +125,23 @@ class HomeSyncManagerTest {
             assertEquals(listOf("root ::= ...", null), capturedGrammar)
             coVerify(exactly = 1) { lease.release() }
 
+            assertEquals(HomeSyncState.Status.DONE, manager.syncState.value.status)
+            val admittedAfterCompletion = manager.queueIncomingSms(
+                address = "AX-HDFCBK",
+                body = "Rs.900 debited from a/c XX0000",
+                date = 3000L
+            )
+            assertTrue(admittedAfterCompletion)
+            assertEquals(HomeSyncState.Status.IDLE, manager.syncState.value.status)
+
             val queueBeforePause = manager.syncState.value.queue
             val pause = appFlowCoordinator.tryPauseAndDrain(
                 SlmRuntimeOwner.SETTINGS_MANUAL
             )
             val admittedDuringReset = manager.queueIncomingSms(
                 address = "AX-HDFCBK",
-                body = "Rs.900 debited from a/c XX0000",
-                date = 3000L
+                body = "Rs.1,100 debited from a/c XX0000",
+                date = 4000L
             )
             assertFalse(admittedDuringReset)
             assertEquals(queueBeforePause, manager.syncState.value.queue)

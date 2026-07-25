@@ -92,9 +92,13 @@ internal fun HomeSyncState.toActiveSyncCardUiModel(
 
     if (status == HomeSyncState.Status.SYNCING) {
         val total = queue.size.coerceAtLeast(1)
-        val position = currentIndex
+        val position = queue
+            .indexOfFirst { it.id == activeSms.id }
+            .takeIf { it >= 0 }
             ?.plus(1)
-            ?.coerceIn(1, total)
+            ?: currentIndex
+                ?.plus(1)
+                ?.coerceIn(1, total)
             ?: 1
         val step = when (currentStageIndex) {
             0, null -> "Checking message"
@@ -129,16 +133,17 @@ internal fun HomeSyncState.toActiveSyncCardUiModel(
         it.status != "synced" && it.status != "filtered_out" && it.status != "error"
     }
     val hasIssues = failed > 0 || incomplete > 0
-    val summary = buildList {
+    val resultCounts = buildList {
         if (saved > 0) add("$saved saved")
         if (skipped > 0) add("$skipped skipped")
         if (failed > 0) add("$failed failed")
         if (incomplete > 0) add("$incomplete incomplete")
     }.joinToString(" • ").ifEmpty { "No messages processed" }
+    val summary = "Queue: $resultCounts"
     val result = when (activeSms.status) {
         "synced" -> "Saved to transaction ledger"
         "filtered_out" -> "Skipped — no transaction found"
-        "error" -> "Extraction needs attention"
+        "error" -> "Processing needs attention"
         "pending", "syncing" -> "Sync ended before processing"
         else -> "Result unavailable"
     }

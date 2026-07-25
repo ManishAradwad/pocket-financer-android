@@ -508,7 +508,7 @@ fun HomeScreen(
             } else if (telemetrySms.status == "filtered_out") {
                 "No transaction JSON was retained for this message."
             } else if (telemetrySms.status == "error") {
-                "Inference output is unavailable because extraction failed."
+                "Output is unavailable because processing did not finish."
             } else {
                 ""
             }
@@ -529,7 +529,7 @@ fun HomeScreen(
             } else if (telemetrySms.status == "filtered_out") {
                 "No transaction was saved for this message."
             } else if (telemetrySms.status == "error") {
-                "Extraction failed before a transaction could be saved."
+                "The message could not be saved. The failed stage was not retained."
             } else {
                 ""
             }
