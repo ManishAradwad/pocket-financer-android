@@ -17,7 +17,12 @@ struct ModelInstance {
     llama_model   *model   = nullptr;
     llama_context *ctx     = nullptr;
     const llama_vocab *vocab = nullptr;
-    std::atomic<bool> should_stop{false};
+    // Exactly one coordinator-owned native operation may mutate ctx/KV/perf.
+    // stop_operation is request-scoped so a stale cancel cannot affect the
+    // next operation that reuses this ModelInstance.
+    std::atomic<jlong> active_operation{0};
+    std::atomic<jlong> stop_operation{0};
+    std::atomic<jlong> pending_stop_operation{0};
     int n_past = 0;
 };
 
@@ -42,6 +47,17 @@ static jlong ptr_to_jlong(void *p) {
 
 static ModelInstance *jlong_to_instance(jlong handle) {
     return reinterpret_cast<ModelInstance *>(handle);
+}
+
+static bool operation_matches(ModelInstance *inst, jlong operation_id) {
+    return inst &&
+        operation_id != 0 &&
+        inst->active_operation.load(std::memory_order_acquire) == operation_id;
+}
+
+static bool operation_stopped(ModelInstance *inst, jlong operation_id) {
+    return operation_matches(inst, operation_id) &&
+        inst->stop_operation.load(std::memory_order_acquire) == operation_id;
 }
 
 /** Optimal thread count: use available cores, capped at 4 for thermal safety. */
@@ -113,11 +129,66 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeLoadModel(
     inst->model = model;
     inst->ctx   = ctx;
     inst->vocab = llama_model_get_vocab(model);
-    inst->should_stop.store(false);
+    inst->active_operation.store(0);
+    inst->stop_operation.store(0);
+    inst->pending_stop_operation.store(0);
 
     LOG_INF("nativeLoadModel: loaded model, ctx=%d, threads=%d, gpu_layers=%d\n",
             n_ctx, optimal_threads, n_gpu_layers);
     return ptr_to_jlong(inst);
+}
+
+// ── Request-scoped operation lifecycle ─────────────────────────────────────
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_pocketfinancer_inference_LlamaEngine_nativeBeginOperation(
+    JNIEnv */*env*/, jclass /*clazz*/, jlong handle, jlong operation_id) {
+    auto *inst = jlong_to_instance(handle);
+    if (!inst || !inst->ctx || operation_id == 0) {
+        return JNI_FALSE;
+    }
+
+    jlong expected = 0;
+    if (!inst->active_operation.compare_exchange_strong(
+            expected,
+            operation_id,
+            std::memory_order_acq_rel,
+            std::memory_order_acquire)) {
+        return JNI_FALSE;
+    }
+
+    // Reset cancellation and performance exactly once for the complete
+    // template/tokenize/session/prefill/generation/perf operation.
+    const jlong pending_stop =
+        inst->pending_stop_operation.exchange(0, std::memory_order_acq_rel);
+    if (pending_stop == operation_id) {
+        inst->stop_operation.store(operation_id, std::memory_order_release);
+    }
+    llama_perf_context_reset(inst->ctx);
+    return JNI_TRUE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_pocketfinancer_inference_LlamaEngine_nativeEndOperation(
+    JNIEnv */*env*/, jclass /*clazz*/, jlong handle, jlong operation_id) {
+    auto *inst = jlong_to_instance(handle);
+    if (!operation_matches(inst, operation_id)) {
+        return JNI_FALSE;
+    }
+    jlong expected = operation_id;
+    return inst->active_operation.compare_exchange_strong(
+        expected,
+        0,
+        std::memory_order_acq_rel,
+        std::memory_order_acquire) ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_pocketfinancer_inference_LlamaEngine_nativeWasStopped(
+    JNIEnv */*env*/, jclass /*clazz*/, jlong handle, jlong operation_id) {
+    return operation_stopped(jlong_to_instance(handle), operation_id)
+        ? JNI_TRUE
+        : JNI_FALSE;
 }
 
 // ── nativeCompletion ────────────────────────────────────────────────────────
@@ -126,6 +197,7 @@ extern "C" JNIEXPORT jstring JNICALL
 Java_com_pocketfinancer_inference_LlamaEngine_nativeCompletion(
     JNIEnv *env, jclass /*clazz*/,
     jlong handle,
+    jlong operation_id,
     jstring jprompt,
     jstring jgrammar,
     jint    n_predict,
@@ -135,14 +207,8 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeCompletion(
     jobject jcallback) {
 
     auto *inst = jlong_to_instance(handle);
-    if (!inst || !inst->ctx) {
+    if (!inst || !inst->ctx || !operation_matches(inst, operation_id)) {
         return env->NewStringUTF("");
-    }
-
-    inst->should_stop.store(false);
-
-    if (!jkeep_cache) {
-        llama_perf_context_reset(inst->ctx);
     }
 
     const char *prompt  = env->GetStringUTFChars(jprompt, nullptr);
@@ -214,6 +280,10 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeCompletion(
     int n_batch = llama_n_batch(inst->ctx);
     bool prefill_failed = false;
     for (int i = 0; i < n_tokens; i += n_batch) {
+        if (operation_stopped(inst, operation_id)) {
+            prefill_failed = true;
+            break;
+        }
         int n_eval = std::min(n_tokens - i, n_batch);
         llama_batch batch = llama_batch_init(n_eval, 0, 1);
         batch.n_tokens = n_eval;
@@ -232,6 +302,10 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeCompletion(
             break;
         }
         llama_batch_free(batch);
+        if (operation_stopped(inst, operation_id)) {
+            prefill_failed = true;
+            break;
+        }
     }
 
     if (prefill_failed) {
@@ -273,7 +347,7 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeCompletion(
 
         // ── Decode loop ──
         for (int i = 0; i < n_predict; i++) {
-            if (inst->should_stop.load()) {
+            if (operation_stopped(inst, operation_id)) {
                 break;
             }
 
@@ -318,6 +392,9 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeCompletion(
                 break;
             }
             inst->n_past++;
+            if (operation_stopped(inst, operation_id)) {
+                break;
+            }
         }
 
         llama_batch_free(batch_single);
@@ -445,10 +522,11 @@ static int parse_chat_messages_json(const char *json, llama_chat_message *out, i
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_pocketfinancer_inference_LlamaEngine_nativeApplyChatTemplate(
     JNIEnv *env, jclass /*clazz*/,
-    jlong handle, jstring jmessages, jboolean add_assistant_prefix) {
+    jlong handle, jlong operation_id, jstring jmessages,
+    jboolean add_assistant_prefix) {
 
     auto *inst = jlong_to_instance(handle);
-    if (!inst || !inst->model) {
+    if (!inst || !inst->model || !operation_matches(inst, operation_id)) {
         return env->NewStringUTF("");
     }
 
@@ -513,10 +591,10 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeApplyChatTemplate(
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_pocketfinancer_inference_LlamaEngine_nativeGetPerfData(
-    JNIEnv *env, jclass /*clazz*/, jlong handle) {
+    JNIEnv *env, jclass /*clazz*/, jlong handle, jlong operation_id) {
 
     auto *inst = jlong_to_instance(handle);
-    if (!inst || !inst->ctx) {
+    if (!inst || !inst->ctx || !operation_matches(inst, operation_id)) {
         return env->NewStringUTF("{}");
     }
 
@@ -535,22 +613,54 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeGetPerfData(
 
 // ── nativeStop ──────────────────────────────────────────────────────────────
 
-extern "C" JNIEXPORT void JNICALL
+extern "C" JNIEXPORT jboolean JNICALL
 Java_com_pocketfinancer_inference_LlamaEngine_nativeStop(
-    JNIEnv */*env*/, jclass /*clazz*/, jlong handle) {
+    JNIEnv */*env*/, jclass /*clazz*/, jlong handle, jlong operation_id) {
     auto *inst = jlong_to_instance(handle);
-    if (inst) {
-        inst->should_stop.store(true);
+    if (!inst || operation_id == 0) {
+        return JNI_FALSE;
     }
+
+    jlong active = inst->active_operation.load(std::memory_order_acquire);
+    if (active == operation_id) {
+        inst->stop_operation.store(operation_id, std::memory_order_release);
+        return JNI_TRUE;
+    }
+    if (active != 0) {
+        return JNI_FALSE;
+    }
+
+    // The actor may issue stop after dispatching the native job but just before
+    // nativeBeginOperation executes. Publish a request-scoped pending stop and
+    // then re-check active to close that race.
+    inst->pending_stop_operation.store(operation_id, std::memory_order_release);
+    active = inst->active_operation.load(std::memory_order_acquire);
+    if (active == operation_id) {
+        inst->stop_operation.store(operation_id, std::memory_order_release);
+        jlong expected = operation_id;
+        inst->pending_stop_operation.compare_exchange_strong(
+            expected, 0, std::memory_order_acq_rel, std::memory_order_acquire);
+        return JNI_TRUE;
+    }
+    if (active != 0) {
+        jlong expected = operation_id;
+        inst->pending_stop_operation.compare_exchange_strong(
+            expected, 0, std::memory_order_acq_rel, std::memory_order_acquire);
+        return JNI_FALSE;
+    }
+    return JNI_TRUE;
 }
 
 // ── nativeUnloadModel ───────────────────────────────────────────────────────
 
-extern "C" JNIEXPORT void JNICALL
+extern "C" JNIEXPORT jboolean JNICALL
 Java_com_pocketfinancer_inference_LlamaEngine_nativeUnloadModel(
     JNIEnv */*env*/, jclass /*clazz*/, jlong handle) {
     auto *inst = jlong_to_instance(handle);
-    if (!inst) return;
+    if (!inst) return JNI_TRUE;
+    if (inst->active_operation.load(std::memory_order_acquire) != 0) {
+        return JNI_FALSE;
+    }
 
     if (inst->ctx) {
         llama_free(inst->ctx);
@@ -562,6 +672,7 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeUnloadModel(
     }
     // NOTE: llama_backend_free is NOT called here — it's handled in JNI_OnUnload
     delete inst;
+    return JNI_TRUE;
 }
 
 // ── nativeGetModelSize ──────────────────────────────────────────────────────
@@ -588,10 +699,13 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeGetModelSize(
 
 extern "C" JNIEXPORT jintArray JNICALL
 Java_com_pocketfinancer_inference_LlamaEngine_nativeTokenize(
-    JNIEnv *env, jclass /*clazz*/, jlong handle, jstring jtext, jboolean add_special) {
+    JNIEnv *env, jclass /*clazz*/, jlong handle, jlong operation_id,
+    jstring jtext, jboolean add_special) {
 
     auto *inst = jlong_to_instance(handle);
-    if (!inst || !inst->vocab) return nullptr;
+    if (!inst || !inst->vocab || !operation_matches(inst, operation_id)) {
+        return nullptr;
+    }
 
     const char *text = env->GetStringUTFChars(jtext, nullptr);
     if (!text) return nullptr;
@@ -620,10 +734,13 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeTokenize(
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_pocketfinancer_inference_LlamaEngine_nativeSaveSession(
-    JNIEnv *env, jclass /*clazz*/, jlong handle, jstring jpath, jintArray jtokens) {
+    JNIEnv *env, jclass /*clazz*/, jlong handle, jlong operation_id,
+    jstring jpath, jintArray jtokens) {
 
     auto *inst = jlong_to_instance(handle);
-    if (!inst || !inst->ctx) return JNI_FALSE;
+    if (!inst || !inst->ctx || !operation_matches(inst, operation_id)) {
+        return JNI_FALSE;
+    }
 
     const char *path = env->GetStringUTFChars(jpath, nullptr);
     if (!path) return JNI_FALSE;
@@ -650,10 +767,13 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeSaveSession(
 
 extern "C" JNIEXPORT jint JNICALL
 Java_com_pocketfinancer_inference_LlamaEngine_nativeLoadSession(
-    JNIEnv *env, jclass /*clazz*/, jlong handle, jstring jpath, jintArray jtokens_out) {
+    JNIEnv *env, jclass /*clazz*/, jlong handle, jlong operation_id,
+    jstring jpath, jintArray jtokens_out) {
 
     auto *inst = jlong_to_instance(handle);
-    if (!inst || !inst->ctx) return -1;
+    if (!inst || !inst->ctx || !operation_matches(inst, operation_id)) {
+        return -1;
+    }
 
     const char *path = env->GetStringUTFChars(jpath, nullptr);
     if (!path) return -1;

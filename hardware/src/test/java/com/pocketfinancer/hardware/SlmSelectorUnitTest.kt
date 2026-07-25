@@ -1,9 +1,35 @@
 package com.pocketfinancer.hardware
 
+import android.content.Context
+import android.content.SharedPreferences
+import io.mockk.every
+import io.mockk.mockk
+import java.io.File
+import java.io.RandomAccessFile
+import java.nio.file.Files
 import org.junit.Test
 import kotlin.test.*
 
 class SlmSelectorUnitTest {
+
+    private fun contextWithSelectedModel(selectedId: String?): Context {
+        val preferences = mockk<SharedPreferences>()
+        every { preferences.getString("selected_slm_id", null) } returns selectedId
+        return mockk {
+            every {
+                getSharedPreferences(".app_settings", Context.MODE_PRIVATE)
+            } returns preferences
+        }
+    }
+
+    private inline fun withModelDirectory(block: (File) -> Unit) {
+        val directory = Files.createTempDirectory("slm-selector-models").toFile()
+        try {
+            block(directory)
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
 
     // ── Helper: build a DeviceInfo with given specs ───────────────────
 
@@ -266,4 +292,85 @@ class SlmSelectorUnitTest {
         val bestSlm = SlmTier.GEMMA4_E2B_Q8_0
         assertFalse(isUpgradeAvailable(bestSlm, highSpecDevice))
     }
+
+    @Test
+    fun `published onboarding artifact below approximate tier size is selected`() =
+        withModelDirectory { directory ->
+            val tier = SlmTier.DEFAULT_ONBOARDING_SLM
+            val artifact = File(directory, tier.modelFile)
+            RandomAccessFile(artifact, "rw").use {
+                it.setLength(639_447_744L)
+            }
+
+            assertTrue(isPublishedModelArtifact(artifact))
+            assertEquals(
+                tier,
+                resolveActiveSlmTier(
+                    context = contextWithSelectedModel(tier.id),
+                    modelStorageDir = directory,
+                    device = deviceWith(ramGb = 8.0f, highPerf = true)
+                )
+            )
+        }
+
+    @Test
+    fun `default published artifact can be smaller than approximate tier size`() =
+        withModelDirectory { directory ->
+            val tier = SlmTier.DEFAULT_ONBOARDING_SLM
+            File(directory, tier.modelFile).writeBytes(byteArrayOf(1))
+
+            assertEquals(
+                tier,
+                resolveActiveSlmTier(
+                    context = contextWithSelectedModel(null),
+                    modelStorageDir = directory,
+                    device = deviceWith(ramGb = 8.0f, highPerf = true)
+                )
+            )
+        }
+
+    @Test
+    fun `downloaded non-default published artifact is selected`() =
+        withModelDirectory { directory ->
+            val tier = SlmTier.QWEN3_1_7B_Q8_0
+            File(directory, tier.modelFile).writeBytes(byteArrayOf(1))
+
+            assertEquals(
+                tier,
+                resolveActiveSlmTier(
+                    context = contextWithSelectedModel(null),
+                    modelStorageDir = directory,
+                    device = deviceWith(ramGb = 2.0f)
+                )
+            )
+        }
+
+    @Test
+    fun `missing empty and directory artifacts are not published models`() =
+        withModelDirectory { directory ->
+            val tier = SlmTier.DEFAULT_ONBOARDING_SLM
+            val artifact = File(directory, tier.modelFile)
+            assertFalse(isPublishedModelArtifact(artifact))
+
+            artifact.createNewFile()
+            assertFalse(isPublishedModelArtifact(artifact))
+            assertNull(
+                resolveActiveSlmTier(
+                    context = contextWithSelectedModel(tier.id),
+                    modelStorageDir = directory,
+                    device = deviceWith(ramGb = 2.0f)
+                )
+            )
+
+            artifact.delete()
+            artifact.mkdir()
+            assertFalse(isPublishedModelArtifact(artifact))
+            assertNull(
+                resolveActiveSlmTier(
+                    context = contextWithSelectedModel(tier.id),
+                    modelStorageDir = directory,
+                    device = deviceWith(ramGb = 2.0f)
+                )
+            )
+        }
 }

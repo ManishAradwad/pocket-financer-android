@@ -60,7 +60,7 @@ class LlamaEngineUnitTest {
 
     @Test
     fun testPerformanceData_tokensPerSecond_normal() {
-        val perf = LlamaEngine.PerformanceData(
+        val perf = SlmPerformanceData(
             tLoadMs = 100,
             tPromptEvalMs = 200,
             tEvalMs = 1000,
@@ -71,7 +71,7 @@ class LlamaEngineUnitTest {
 
     @Test
     fun testPerformanceData_tokensPerSecond_zeroEvalTime() {
-        val perf = LlamaEngine.PerformanceData(
+        val perf = SlmPerformanceData(
             tLoadMs = 100,
             tPromptEvalMs = 200,
             tEvalMs = 0,
@@ -82,7 +82,7 @@ class LlamaEngineUnitTest {
 
     @Test
     fun testPerformanceData_tokensPerSecond_negativeEvalTime() {
-        val perf = LlamaEngine.PerformanceData(
+        val perf = SlmPerformanceData(
             tLoadMs = 100,
             tPromptEvalMs = 200,
             tEvalMs = -500,
@@ -182,5 +182,29 @@ class LlamaEngineUnitTest {
 
         assertFalse(session1.exists())
         assertFalse(session2.exists())
+    }
+
+    @Test
+    fun `session namespace changes with exact model revision and config`() {
+        val storage = DefaultSlmModelStorage(mockContext)
+        val base = SlmModelSpec(
+            modelId = "model",
+            modelPath = File(storage.modelDirectory, "model.gguf").absolutePath,
+            artifactRevision = "r1"
+        )
+        val newRevision = SlmModelSpec(
+            modelId = "model",
+            modelPath = base.modelPath,
+            artifactRevision = "r2"
+        )
+        val newContext = SlmModelSpec(
+            modelId = "model",
+            modelPath = base.modelPath,
+            artifactRevision = "r1",
+            contextSize = 4096
+        )
+
+        assertTrue(storage.sessionNamespace(base) != storage.sessionNamespace(newRevision))
+        assertTrue(storage.sessionNamespace(base) != storage.sessionNamespace(newContext))
     }
 }

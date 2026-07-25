@@ -9,9 +9,10 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.pocketfinancer.hardware.DeviceCapabilities
 import com.pocketfinancer.hardware.SlmTier
+import com.pocketfinancer.hardware.isPublishedModelArtifact
 import com.pocketfinancer.hardware.selectSlmForDevice
-import com.pocketfinancer.inference.LlamaEngine
 import com.pocketfinancer.inference.ModelDownloader
+import com.pocketfinancer.inference.SlmModelStorage
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -61,7 +62,7 @@ data class OnboardingUiState(
 class OnboardingViewModel @Inject constructor(
     @ApplicationContext private val context: Context,
     private val deviceCapabilities: DeviceCapabilities,
-    private val llamaEngine: LlamaEngine,
+    private val modelStorage: SlmModelStorage,
     private val smsRepository: com.pocketfinancer.sms.SmsRepository,
     private val syncManager: OnboardingSyncManager
 ) : ViewModel() {
@@ -79,7 +80,7 @@ class OnboardingViewModel @Inject constructor(
             syncManager.syncState.collect { syncState ->
                 val slm = _state.value.selectedSlm
                 val file = slm?.let { getModelFile(it) }
-                val isDone = file != null && file.exists() && slm != null && file.length() >= (slm.sizeMb.toLong() * 1024L * 1024L * 95L / 100L)
+                val isDone = file != null && isPublishedModelArtifact(file)
 
                 val finalDs = if (!syncState.isDownloading && !syncState.downloadState.isComplete && isDone) {
                     syncState.downloadState.copy(
@@ -172,7 +173,7 @@ class OnboardingViewModel @Inject constructor(
     private fun checkModelDownloadStatus() {
         val slm = _state.value.selectedSlm ?: return
         val file = getModelFile(slm)
-        if (file.exists() && file.length() >= (slm.sizeMb.toLong() * 1024L * 1024L * 95L / 100L)) {
+        if (isPublishedModelArtifact(file)) {
             _state.value = _state.value.copy(
                 downloadState = ModelDownloader.DownloadState(
                     isDownloading = false,
@@ -192,7 +193,6 @@ class OnboardingViewModel @Inject constructor(
     }
 
     private fun getModelFile(slm: SlmTier): File {
-        val dir = llamaEngine.getModelStorageDir()
-        return File(dir, slm.modelFile)
+        return modelStorage.modelFile(slm.modelFile)
     }
 }

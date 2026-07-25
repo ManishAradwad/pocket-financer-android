@@ -51,7 +51,7 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
         EngineCard(state, viewModel)
 
         // ── Section 4: Developer Options ─────────────────────────────────
-        DeveloperToolsCard(viewModel)
+        DeveloperToolsCard(state, viewModel)
 
         Spacer(modifier = Modifier.height(8.dp))
     }
@@ -177,12 +177,28 @@ private fun EngineCard(state: SettingsUiState, viewModel: SettingsViewModel) {
         InfoRow(
             label = "Status",
             value = when {
+                state.runtimePhase != com.pocketfinancer.inference.SlmRuntimePhase.UNLOADED &&
+                    state.runtimePhase != com.pocketfinancer.inference.SlmRuntimePhase.READY ->
+                    state.runtimePhase.name
                 state.loadingModel -> "LOADING..."
-                state.modelLoaded -> "LOADED"
+                state.runtimePhase == com.pocketfinancer.inference.SlmRuntimePhase.READY -> "READY"
                 else -> "NOT LOADED"
             },
-            valueColor = if (state.modelLoaded) M3_Pos else M3_OnSurfaceVariant
+            valueColor = when (state.runtimePhase) {
+                com.pocketfinancer.inference.SlmRuntimePhase.ERROR -> M3_Error
+                com.pocketfinancer.inference.SlmRuntimePhase.READY -> M3_Pos
+                else -> M3_OnSurfaceVariant
+            }
         )
+        if (state.runtimeQueueDepth > 0) {
+            LabelValue("Queue", "${state.runtimeQueueDepth} request(s) waiting")
+        }
+        state.runtimeActiveOwner?.let { owner ->
+            LabelValue("Active owner", owner)
+        }
+        state.pendingRuntimeAction?.let { pending ->
+            LabelValue("Pending", pending)
+        }
 
         // Selected model info
         state.selectedSlm?.let { slm ->
@@ -199,14 +215,24 @@ private fun EngineCard(state: SettingsUiState, viewModel: SettingsViewModel) {
         }
 
         // Error
-        state.modelLoadError?.let { error ->
+        state.runtimeError?.let { error ->
+            Text(
+                text = "Runtime: $error",
+                color = M3_Error,
+                style = AppTypography.monoBody,
+                modifier = Modifier.padding(top = 8.dp)
+            )
+        }
+        state.modelLoadError
+            ?.takeUnless { it == state.runtimeError }
+            ?.let { error ->
             Text(
                 text = error,
                 color = M3_Error,
                 style = AppTypography.monoBody,
                 modifier = Modifier.padding(top = 8.dp)
             )
-        }
+            }
 
         Spacer(modifier = Modifier.height(12.dp))
 
@@ -263,7 +289,12 @@ private fun EngineCard(state: SettingsUiState, viewModel: SettingsViewModel) {
                 if (!state.modelLoaded && !ds.isComplete) {
                     Button(
                         onClick = { viewModel.downloadSelectedModel() },
-                        enabled = state.selectedSlm != null,
+                        enabled = state.selectedSlm != null &&
+                            !state.runtimeBusy &&
+                            !state.flowBusy &&
+                            !state.testRunning &&
+                            !state.loadingModel &&
+                            !state.resetRunning,
                         colors = ButtonDefaults.buttonColors(containerColor = M3_PrimaryContainer)
                     ) {
                         val label = state.selectedSlm?.let {
@@ -276,7 +307,7 @@ private fun EngineCard(state: SettingsUiState, viewModel: SettingsViewModel) {
                 // Load button
                 Button(
                     onClick = { viewModel.loadSelectedModel() },
-                    enabled = !state.loadingModel && !state.modelLoaded && ds.isComplete,
+                    enabled = state.canLoadModel && !state.modelPinnedByUser,
                     colors = ButtonDefaults.buttonColors(containerColor = M3_PrimaryContainer)
                 ) {
                     Text(
@@ -289,6 +320,7 @@ private fun EngineCard(state: SettingsUiState, viewModel: SettingsViewModel) {
                 if (state.modelLoaded) {
                     OutlinedButton(
                         onClick = { viewModel.unloadModel() },
+                        enabled = state.canUnloadModel,
                         colors = ButtonDefaults.outlinedButtonColors(contentColor = M3_Error)
                     ) {
                         Text("UNLOAD", style = MaterialTheme.typography.labelMedium)
@@ -301,13 +333,19 @@ private fun EngineCard(state: SettingsUiState, viewModel: SettingsViewModel) {
 
         // Run test button
         Button(
-            onClick = { viewModel.runTestSms() },
-            enabled = state.modelLoaded && !state.testRunning,
+            onClick = {
+                if (state.testRunning) {
+                    viewModel.cancelTestSms()
+                } else {
+                    viewModel.runTestSms()
+                }
+            },
+            enabled = state.testRunning || state.canRunTest,
             colors = ButtonDefaults.buttonColors(containerColor = M3_SecondaryContainer),
             modifier = Modifier.fillMaxWidth()
         ) {
             Text(
-                if (state.testRunning) "RUNNING..." else "RUN TEST SMS",
+                if (state.testRunning) "CANCEL TEST" else "RUN TEST SMS",
                 color = M3_OnSecondaryContainer,
                 style = MaterialTheme.typography.labelMedium
             )
@@ -477,7 +515,7 @@ private fun ramBadge(tier: DeviceCapabilities.RamTier): Pair<String, Color>? {
 }
 
 @Composable
-private fun DeveloperToolsCard(viewModel: SettingsViewModel) {
+private fun DeveloperToolsCard(state: SettingsUiState, viewModel: SettingsViewModel) {
     val context = androidx.compose.ui.platform.LocalContext.current
     
     SectionCard(title = "DEVELOPER OPTIONS") {
@@ -496,10 +534,15 @@ private fun DeveloperToolsCard(viewModel: SettingsViewModel) {
                     activity?.recreate()
                 }
             },
+            enabled = state.canResetOnboarding,
             colors = ButtonDefaults.buttonColors(containerColor = M3_Error),
             modifier = Modifier.fillMaxWidth()
         ) {
-            Text("RESET ONBOARDING & CLEAR DB", color = Color.White, style = MaterialTheme.typography.labelMedium)
+            Text(
+                if (state.resetRunning) "RESETTING..." else "RESET ONBOARDING & CLEAR DB",
+                color = Color.White,
+                style = MaterialTheme.typography.labelMedium
+            )
         }
     }
 }

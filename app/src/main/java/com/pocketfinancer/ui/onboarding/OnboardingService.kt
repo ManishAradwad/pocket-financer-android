@@ -13,14 +13,24 @@ import androidx.core.app.NotificationCompat
 import com.pocketfinancer.data.model.TransactionType
 import com.pocketfinancer.hardware.DeviceCapabilities
 import com.pocketfinancer.hardware.SlmTier
-import com.pocketfinancer.inference.LlamaEngine
+import com.pocketfinancer.hardware.isPublishedModelArtifact
 import com.pocketfinancer.inference.ModelDownloader
+import com.pocketfinancer.inference.SlmLease
+import com.pocketfinancer.inference.SlmModelSpec
+import com.pocketfinancer.inference.SlmModelStorage
+import com.pocketfinancer.inference.SlmRuntime
+import com.pocketfinancer.inference.SlmRuntimeOwner
 import com.pocketfinancer.pipeline.PipelineService
 import com.pocketfinancer.pipeline.SmsFilterPipeline
 import com.pocketfinancer.pipeline.SmsNotificationHelper
 import com.pocketfinancer.sms.SmsRepository
+import com.pocketfinancer.SelectedModelResidency
+import com.pocketfinancer.SlmAppFlowCoordinator
+import com.pocketfinancer.toModelSpec
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.*
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.File
 import javax.inject.Inject
 
@@ -39,7 +49,19 @@ class OnboardingService : Service() {
     lateinit var deviceCapabilities: DeviceCapabilities
 
     @Inject
-    lateinit var llamaEngine: LlamaEngine
+    lateinit var slmRuntime: SlmRuntime
+
+    @Inject
+    lateinit var modelStorage: SlmModelStorage
+
+    @Inject
+    lateinit var selectedModelResidency: SelectedModelResidency
+
+    @Inject
+    lateinit var appFlowCoordinator: SlmAppFlowCoordinator
+
+    @Inject
+    lateinit var runGenerationStore: OnboardingRunGenerationStore
 
     @Inject
     lateinit var modelDownloader: ModelDownloader
@@ -54,6 +76,7 @@ class OnboardingService : Service() {
     lateinit var pipelineService: PipelineService
 
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val workflowMutex = Mutex()
     private var workJob: Job? = null
     private var downloadObserverJob: Job? = null
 
@@ -91,23 +114,50 @@ class OnboardingService : Service() {
             startForeground(NOTIFICATION_ID, initialNotification)
         }
 
-        // Run download and sync task
+        if (!runGenerationStore.isCurrent(intent)) {
+            Log.i(
+                TAG,
+                "Rejecting stale or unstamped onboarding start"
+            )
+            if (stopSelfResult(startId)) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            }
+            return START_NOT_STICKY
+        }
+
+        // A repeated start first cancels and drains the previous coordinator
+        // request. Starting a replacement before the old JNI call returned
+        // would allow two onboarding workflows to race over model residency.
         workJob?.cancel()
         workJob = serviceScope.launch {
-            try {
-                runOnboardingWorkflow(slm)
-            } catch (e: CancellationException) {
-                Log.i(TAG, "Onboarding workflow cancelled")
-            } catch (e: Exception) {
-                Log.e(TAG, "Error in onboarding workflow", e)
-                syncManager.updateState {
-                    it.copy(
-                        modelLoadError = e.message ?: "Unknown service error",
-                        isRunning = false
-                    )
+            workflowMutex.withLock {
+                val flowLease = appFlowCoordinator.tryEnter(SlmRuntimeOwner.ONBOARDING)
+                if (flowLease == null) {
+                    Log.i(TAG, "Onboarding start rejected while app-flow admission is paused")
+                    syncManager.updateState { it.copy(isRunning = false) }
+                    stopSelfResult(startId)
+                    return@withLock
                 }
-            } finally {
-                stopSelf()
+                try {
+                    runOnboardingWorkflow(slm)
+                } catch (e: CancellationException) {
+                    Log.i(TAG, "Onboarding workflow cancelled")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error in onboarding workflow", e)
+                    syncManager.updateState {
+                        it.copy(
+                            modelLoadError = e.message ?: "Unknown service error",
+                            isRunning = false
+                        )
+                    }
+                } finally {
+                    withContext(NonCancellable) {
+                        flowLease.release()
+                    }
+                    // A cancelled older start must not tear down a newer
+                    // replacement workflow that is waiting on the mutex.
+                    stopSelfResult(startId)
+                }
             }
         }
 
@@ -212,79 +262,64 @@ class OnboardingService : Service() {
     private suspend fun runOnboardingWorkflow(slm: SlmTier) {
         val destFile = getModelFile(slm)
 
-        // 1. Check if model is downloaded. If not, download it.
-        val expectedMinBytes = slm.sizeMb.toLong() * 1024 * 1024 * 95 / 100
-        val isDone = destFile.exists() && destFile.length() >= expectedMinBytes
-        if (!isDone) {
-            Log.i(TAG, "Model not cached. Launching download...")
-            syncManager.updateState {
-                it.copy(
-                    step = OnboardingStep.DOWNLOAD_SLM,
-                    isDownloading = true
-                )
-            }
-
-            // Observe downloader progress
-            downloadObserverJob = serviceScope.launch {
-                modelDownloader.state.collect { ds ->
-                    syncManager.updateState {
-                        it.copy(downloadState = ds, isDownloading = ds.isDownloading)
-                    }
-
-                    if (ds.isDownloading) {
-                        val progressPercent = (ds.progress * 100).toInt()
-                        val speedText = if (ds.speedMbps > 0) " • ${"%.1f".format(ds.speedMbps)} MB/s" else ""
-                        val etaText = if (ds.etaSeconds > 0) {
-                            val mins = ds.etaSeconds / 60
-                            val secs = ds.etaSeconds % 60
-                            " • " + (if (mins > 0) "${mins}m ${secs}s" else "${secs}s") + " left"
-                        } else ""
-                        runOnWorkflowProgress(
-                            title = "Downloading Local AI Model",
-                            text = "$progressPercent%$speedText$etaText",
-                            progress = ds.progress
-                        )
-                    }
-                }
-            }
-
-            val result = modelDownloader.download(slm.downloadUrl, destFile)
-            downloadObserverJob?.cancel()
-
-            if (result.isFailure) {
-                val errorMsg = result.exceptionOrNull()?.message ?: "Download failed"
-                Log.e(TAG, "Model download failed: $errorMsg")
-                syncManager.updateState {
-                    it.copy(
-                        modelLoadError = "Download failed: $errorMsg",
-                        isRunning = false,
-                        isDownloading = false
-                    )
-                }
-                return
-            }
-        }
-
-        // Ensure state marks complete download
+        // 1. Use an immutable cached final artifact or download through the
+        // staging path. Cached onboarding remains available offline; the
+        // native GGUF load below is its authoritative validity check.
+        Log.i(TAG, "Preparing model artifact...")
         syncManager.updateState {
             it.copy(
-                isDownloading = false,
-                downloadState = ModelDownloader.DownloadState(
-                    isDownloading = false,
-                    isComplete = true,
-                    progress = 1f,
-                    downloadedMb = destFile.length() / 1_048_576f,
-                    totalMb = destFile.length() / 1_048_576f,
-                    outputPath = destFile.absolutePath
-                )
+                step = OnboardingStep.DOWNLOAD_SLM,
+                isDownloading = true
             )
         }
 
-        // 2. Perform Syncing Phase
-        Log.i(TAG, "Starting sync phase...")
-        syncManager.updateState {
-            it.copy(step = OnboardingStep.SYNCING)
+        // Observe downloader progress
+        downloadObserverJob = serviceScope.launch {
+            modelDownloader.state.collect { ds ->
+                syncManager.updateState {
+                    it.copy(downloadState = ds, isDownloading = ds.isDownloading)
+                }
+
+                if (ds.isDownloading) {
+                    val progressPercent = (ds.progress * 100).toInt()
+                    val speedText = if (ds.speedMbps > 0) " • ${"%.1f".format(ds.speedMbps)} MB/s" else ""
+                    val etaText = if (ds.etaSeconds > 0) {
+                        val mins = ds.etaSeconds / 60
+                        val secs = ds.etaSeconds % 60
+                        " • " + (if (mins > 0) "${mins}m ${secs}s" else "${secs}s") + " left"
+                    } else ""
+                    runOnWorkflowProgress(
+                        title = "Downloading Local AI Model",
+                        text = "$progressPercent%$speedText$etaText",
+                        progress = ds.progress
+                    )
+                }
+            }
         }
+
+        val result = try {
+            modelDownloader.prepareForNativeValidation(slm.downloadUrl, destFile)
+        } finally {
+            downloadObserverJob?.cancel()
+            downloadObserverJob = null
+        }
+
+        if (result.isFailure) {
+            val errorMsg = result.exceptionOrNull()?.message ?: "Download failed"
+            Log.e(TAG, "Model download failed: $errorMsg")
+            syncManager.modelPreparationFailed(
+                errorMessage = errorMsg,
+                terminalDownloadState = modelDownloader.state.value
+            )
+            return
+        }
+
+        // Publish one authoritative state transition. The screen switches on
+        // `step`, so this also removes the Download action before sync starts.
+        syncManager.modelPreparationCompleted(destFile)
+
+        // 2. Perform syncing phase
+        Log.i(TAG, "Starting sync phase...")
         runOnboardingSync(slm, destFile)
     }
 
@@ -306,34 +341,50 @@ class OnboardingService : Service() {
         runOnWorkflowProgress("Syncing Transactions", "Initializing AI engine...", 0.05f)
         delay(800)
 
-        // Load the model
-        if (!llamaEngine.isModelLoaded()) {
-            addLog("Model: Loading ${slm.name} into memory...")
-            syncManager.updateState { it.copy(syncMessage = "Initializing model layers...") }
-            runOnWorkflowProgress("Syncing Transactions", "Loading model layers...", 0.08f)
-            val device = deviceCapabilities.assessDevice()
-            val hasFp16 = device.cpu?.hasFp16 ?: false
-            val result = llamaEngine.loadModel(
-                path = modelFile.absolutePath,
-                contextSize = 3072,
-                gpuLayers = 0,
-                numThreads = 0,
-                hasFp16 = hasFp16,
-                hasThinkingMode = slm.hasThinkingMode
+        addLog("Model: Loading ${slm.name} into memory...")
+        syncManager.updateState { it.copy(syncMessage = "Initializing model layers...") }
+        runOnWorkflowProgress("Syncing Transactions", "Loading model layers...", 0.08f)
+        val spec = slm.toModelSpec(modelStorage, deviceCapabilities.assessDevice())
+        var batchLease: SlmLease? = null
+        var provisionalPin: com.pocketfinancer.ProvisionalSelectedModelPin? = null
+        try {
+            val persistedRollback = resolvePersistedSelectedModelSpec()
+            val handoff = selectedModelResidency.beginProvisionalPin(
+                spec = spec,
+                persistedFallback = persistedRollback
             )
-            if (result.isFailure) {
-                val errorMsg = result.exceptionOrNull()?.message ?: "Unknown error"
+            provisionalPin = handoff
+            val activeLease = try {
+                slmRuntime.acquire(SlmRuntimeOwner.ONBOARDING, spec)
+            } catch (error: Exception) {
+                if (error is CancellationException) throw error
+                val errorMsg = error.message ?: "Unknown error"
                 addLog("Error: Failed to load model ($errorMsg)")
                 syncManager.updateState {
                     it.copy(
                         modelLoadError = "Failed to load model: $errorMsg",
-                        isRunning = false
+                        isRunning = false,
+                        isModelLoaded = false
                     )
                 }
                 return
             }
-        }
-        addLog("Model: Loaded successfully on device CPU.")
+            batchLease = activeLease
+
+            suspend fun completeSuccessfully() {
+                val stillOwnsSelection = withContext(NonCancellable) {
+                    handoff.commit {
+                        persistCompletedSelection(slm)
+                    }
+                }
+                check(stillOwnsSelection) {
+                    "Selected-model ownership changed before onboarding completed"
+                }
+                publishOnboardingCompleted()
+            }
+
+            addLog("Model: Loaded successfully on device CPU.")
+            syncManager.updateState { it.copy(isModelLoaded = true) }
 
         syncManager.updateState {
             it.copy(
@@ -359,7 +410,7 @@ class OnboardingService : Service() {
                     syncTotalMessages = 0
                 )
             }
-            completeOnboarding(slm)
+            completeSuccessfully()
             return
         }
         addLog("SmsReader: Retrieved ${rawMessages.size} messages.")
@@ -396,7 +447,7 @@ class OnboardingService : Service() {
                     syncMessage = "Sync completed! No transactional history."
                 )
             }
-            completeOnboarding(slm)
+            completeSuccessfully()
             return
         }
         addLog("Pipeline: Found ${transactionalMessages.size} transactions to process.")
@@ -441,25 +492,38 @@ class OnboardingService : Service() {
             val txStartTime = System.currentTimeMillis()
             val result = withContext(Dispatchers.IO) {
                 try {
-                    pipelineService.processSingle(sms)
+                    pipelineService.processSingle(sms, activeLease)
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (e: Exception) {
                     Log.e(TAG, "Sync parse error", e)
-                    null
+                    PipelineService.ProcessingResult.Failure(
+                        message = e.message ?: "Unknown pipeline error",
+                        retryable = true
+                    )
                 }
             }
             val durationMs = System.currentTimeMillis() - txStartTime
 
-            if (result != null) {
+            if (result is PipelineService.ProcessingResult.Stopped) {
+                throw CancellationException("Onboarding inference stopped")
+            }
+            if (result is PipelineService.ProcessingResult.Failure) {
+                addLog("➔ Failed: ${result.message}")
+                continue
+            }
+            if (result is PipelineService.ProcessingResult.Saved) {
+                val transaction = result.transaction
                 parsedCount++
-                if (result.type == TransactionType.DEBIT) {
-                    spendsTotal += result.amount
+                if (transaction.type == TransactionType.DEBIT) {
+                    spendsTotal += transaction.amount
                 }
                 recentTxList.add(
                     0,
                     ExtractedTxPreview(
-                        amount = result.amount,
-                        merchant = result.counterparty ?: "Unknown Merchant",
-                        type = result.type.name.lowercase()
+                        amount = transaction.amount,
+                        merchant = transaction.counterparty ?: "Unknown Merchant",
+                        type = transaction.type.name.lowercase()
                     )
                 )
 
@@ -471,7 +535,7 @@ class OnboardingService : Service() {
                     )
                 }
 
-                addLog("➔ Extracted: ₹${result.amount} at ${result.counterparty ?: "Unknown Merchant"} [${"%.1f".format(durationMs / 1000f)}s]")
+                addLog("➔ Extracted: ₹${transaction.amount} at ${transaction.counterparty ?: "Unknown Merchant"} [${"%.1f".format(durationMs / 1000f)}s]")
                 addLog("➔ Saved to encrypted local database.")
             } else {
                 addLog("➔ Skipped (non-transactional content detected) [${"%.1f".format(durationMs / 1000f)}s]")
@@ -498,26 +562,45 @@ class OnboardingService : Service() {
         }
         runOnWorkflowProgress("Syncing Transactions", "Completed successfully!", 1.0f)
         delay(600)
-        completeOnboarding(slm)
+        completeSuccessfully()
+        } finally {
+            withContext(NonCancellable) {
+                batchLease?.release()
+                provisionalPin?.rollbackUnlessCommitted()
+            }
+        }
     }
 
-    private fun completeOnboarding(slm: SlmTier) {
+    private fun persistCompletedSelection(slm: SlmTier): Boolean {
         val prefs = getSharedPreferences(".app_settings", Context.MODE_PRIVATE)
-        prefs.edit()
+        return prefs.edit()
             .putBoolean("onboarding_completed", true)
             .putString("selected_slm_id", slm.id)
-            .apply()
+            .commit()
+    }
+
+    private fun publishOnboardingCompleted() {
         syncManager.updateState {
             it.copy(
                 step = OnboardingStep.COMPLETED,
-                isRunning = false
+                isRunning = false,
+                isModelLoaded = true
             )
         }
     }
 
+    private fun resolvePersistedSelectedModelSpec(): SlmModelSpec? {
+        val selectedId = getSharedPreferences(".app_settings", Context.MODE_PRIVATE)
+            .getString("selected_slm_id", null)
+            ?: return null
+        val tier = SlmTier.ALL_TIERS.find { it.id == selectedId } ?: return null
+        val file = modelStorage.modelFile(tier.modelFile)
+        if (!isPublishedModelArtifact(file)) return null
+        return tier.toModelSpec(modelStorage, deviceCapabilities.assessDevice())
+    }
+
     private fun getModelFile(slm: SlmTier): File {
-        val dir = llamaEngine.getModelStorageDir()
-        return File(dir, slm.modelFile)
+        return modelStorage.modelFile(slm.modelFile)
     }
 
     override fun onBind(intent: Intent?): IBinder? = null

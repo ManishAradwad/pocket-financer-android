@@ -827,7 +827,11 @@ private fun DownloadSlmStepScreen(
 
             if (!isDownloading) {
                 Text(
-                    text = "Model size: ~${selectedSlm?.sizeMb ?: 1200}MB. This one-time download ensures your data never leaves this device.",
+                    text = if (downloadState.isComplete) {
+                        "The model is ready on this device. Continue to initialize the private engine."
+                    } else {
+                        "Model size: ~${selectedSlm?.sizeMb ?: 1200}MB. This one-time download ensures your data never leaves this device."
+                    },
                     color = M3_OnSurfaceVariant,
                     style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier
@@ -847,13 +851,17 @@ private fun DownloadSlmStepScreen(
                     )
                 ) {
                     Icon(
-                        imageVector = Icons.Rounded.Download,
+                        imageVector = if (downloadState.isComplete) {
+                            Icons.Rounded.CheckCircle
+                        } else {
+                            Icons.Rounded.Download
+                        },
                         contentDescription = null,
                         modifier = Modifier.size(18.dp)
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "Download",
+                        text = if (downloadState.isComplete) "Continue" else "Download",
                         style = AppTypography.titleSmallBold
                     )
                 }

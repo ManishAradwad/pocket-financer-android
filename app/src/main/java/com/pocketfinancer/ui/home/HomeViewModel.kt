@@ -13,13 +13,15 @@ import kotlinx.coroutines.launch
 import com.pocketfinancer.pipeline.SmsFilterPipeline
 import com.pocketfinancer.pipeline.PromptBuilder
 import com.pocketfinancer.pipeline.ExtractionParser
-import com.pocketfinancer.inference.LlamaEngine
 import com.pocketfinancer.hardware.DeviceCapabilities
 import com.pocketfinancer.hardware.SlmTier
 import com.pocketfinancer.hardware.isUpgradeAvailable
+import com.pocketfinancer.hardware.isPublishedModelArtifact
 import com.pocketfinancer.hardware.resolveActiveSlmTier
 import com.pocketfinancer.hardware.selectSlmForDevice
 import com.pocketfinancer.inference.ModelDownloader
+import com.pocketfinancer.inference.SlmModelStorage
+import com.pocketfinancer.inference.SlmRuntime
 import com.pocketfinancer.ui.onboarding.OnboardingSyncManager
 import java.io.File
 import java.util.Calendar
@@ -56,7 +58,8 @@ class HomeViewModel @Inject constructor(
     private val syncManager: HomeSyncManager,
     private val smsFilterPipeline: SmsFilterPipeline,
     private val promptBuilder: PromptBuilder,
-    private val llamaEngine: LlamaEngine,
+    private val slmRuntime: SlmRuntime,
+    private val modelStorage: SlmModelStorage,
     private val extractionParser: ExtractionParser,
     private val deviceCapabilities: DeviceCapabilities,
     private val modelDownloader: ModelDownloader,
@@ -85,11 +88,12 @@ class HomeViewModel @Inject constructor(
 
         val periodDataMap = calculatePeriodData(txs)
         val device = deviceCapabilities.assessDevice()
-        val currentSlm = resolveActiveSlmTier(context, llamaEngine.getModelStorageDir(), device)
+        val currentSlm = resolveActiveSlmTier(context, modelStorage.modelDirectory, device)
         val recommendedSlm = selectSlmForDevice(device)
 
-        val recommendedFile = recommendedSlm?.let { File(llamaEngine.getModelStorageDir(), it.modelFile) }
-        val isRecommendedDownloaded = recommendedFile != null && recommendedFile.exists() && recommendedFile.length() >= (recommendedSlm.sizeMb.toLong() * 1024L * 1024L * 90L / 100L)
+        val recommendedFile = recommendedSlm?.let { modelStorage.modelFile(it.modelFile) }
+        val isRecommendedDownloaded =
+            recommendedFile != null && isPublishedModelArtifact(recommendedFile)
 
         val hasUpgrade = !isRecommendedDownloaded && isUpgradeAvailable(currentSlm, device)
 
@@ -256,44 +260,15 @@ class HomeViewModel @Inject constructor(
     }
 
     fun getKvCacheLogs(sender: String, body: String): List<String> {
-        val staticPrefix = promptBuilder.getStaticPrefix()
-        val rawPrompt = promptBuilder.buildExtractionPrompt(sender, body)
-        val hasThinking = llamaEngine.hasThinkingMode
-        val chatPrompt = promptBuilder.buildChatPrompt(rawPrompt, enableThinking = hasThinking)
-        val splitIndex = chatPrompt.indexOf(staticPrefix)
-        val cacheLogs = mutableListOf<String>()
-        if (splitIndex != -1) {
-            val prefixString = chatPrompt.substring(0, splitIndex + staticPrefix.length)
-            val prefixHash = llamaEngine.computeSha256(prefixString)
-            val sessionFile = llamaEngine.getSessionFile(prefixHash)
-            val prefixTokens = llamaEngine.tokenize(prefixString, addSpecial = true)
-            if (prefixTokens != null) {
-                cacheLogs.add("Prefix Size: ${prefixTokens.size} tokens")
-                cacheLogs.add("Prefix Hash: ${prefixHash.take(12)}...")
-                if (sessionFile.exists()) {
-                    cacheLogs.add("Session cache file found: ${sessionFile.name}")
-                    cacheLogs.add("Reusing existing KV Cache (Skipped heavy prefill phase!).")
-                } else {
-                    cacheLogs.add("Session cache file not found. Generating new session cache...")
-                }
-            } else {
-                cacheLogs.add("Prefix Hash: ${prefixHash.take(12)}...")
-                if (sessionFile.exists()) {
-                    cacheLogs.add("Session cache file found: ${sessionFile.name}")
-                    cacheLogs.add("Reusing existing KV Cache.")
-                } else {
-                    cacheLogs.add("Session cache file not found. Prefix tokenization bypassed.")
-                }
-            }
-        } else {
-            cacheLogs.add("No static prefix matched in chat prompt.")
-        }
-        return cacheLogs
+        return listOf(
+            "KV cache telemetry is captured from the exact runtime request.",
+            "Historical transactions do not currently persist cache-hit diagnostics."
+        )
     }
 
     fun getSlmPrompt(sender: String, body: String): String {
         val rawPrompt = promptBuilder.buildExtractionPrompt(sender, body)
-        val hasThinking = llamaEngine.hasThinkingMode
+        val hasThinking = slmRuntime.state.value.loadedModel?.hasThinkingMode ?: true
         return promptBuilder.buildChatPrompt(rawPrompt, enableThinking = hasThinking)
     }
 

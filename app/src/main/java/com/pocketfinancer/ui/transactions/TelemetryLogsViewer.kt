@@ -142,7 +142,7 @@ fun TelemetryLogsViewer(
                 }
                 Column(horizontalAlignment = Alignment.End) {
                     Text(
-                        text = performanceText ?: "Evaluating...",
+                        text = performanceText ?: if (isActive) "Evaluating..." else "Unavailable",
                         color = M3_Primary,
                         style = AppTypography.monoBodyBold
                     )
@@ -160,18 +160,26 @@ fun TelemetryLogsViewer(
             modifier = Modifier.fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
+            val isSettledSuccess = status == "synced"
+            val isSettledFiltered = status == "filtered_out"
+            val isSettledError = status == "error"
+
             // Stage 0: SMS Pre-Filter Check
-            val isStage0Done = !isActive || activeStageIndex > 0
+            val isStage0Done = if (isActive) {
+                activeStageIndex > 0
+            } else {
+                isSettledSuccess || isSettledFiltered || isSettledError
+            }
             val isStage0Active = isActive && activeStageIndex == 0
-            val stage0Status = if (status == "filtered_out") "Filtered Out" else if (isStage0Done) "Passed" else "Pending"
-            val stage0Color = if (status == "filtered_out") M3_Error else if (isStage0Done) M3_Pos else if (isStage0Active) Color(0xFFF2C94C) else M3_OnSurfaceVariant.copy(alpha = 0.4f)
+            val stage0Status = if (isStage0Done) "Checked" else if (isStage0Active) "Checking..." else "Pending"
+            val stage0Color = if (isStage0Done) M3_Pos else if (isStage0Active) Color(0xFFF2C94C) else M3_OnSurfaceVariant.copy(alpha = 0.4f)
             
             TimelineStage(
                 index = 0,
                 title = "Stage 1: SMS Pre-Filter Check",
                 statusLabel = stage0Status,
                 statusColor = stage0Color,
-                icon = if (status == "filtered_out") Icons.Rounded.Block else if (isStage0Done) Icons.Rounded.CheckCircle else Icons.Rounded.Info,
+                icon = if (isStage0Done) Icons.Rounded.CheckCircle else Icons.Rounded.Info,
                 isExpanded = expandedStage == 0,
                 onToggle = { expandedStage = if (expandedStage == 0) null else 0 }
             ) {
@@ -197,10 +205,25 @@ fun TelemetryLogsViewer(
             }
 
             // Stage 1: KV Cache & Prompt Prep
-            val isStage1Done = !isActive || activeStageIndex >= (if (hasThinkingMode) 1 else 2)
+            val isStage1Done = if (isActive) {
+                activeStageIndex >= (if (hasThinkingMode) 1 else 2)
+            } else {
+                isSettledSuccess
+            }
             val isStage1Active = isActive && activeStageIndex == 1 && !isStage1Done
-            val stage1Status = if (isStage1Done) "Prompt Compiled" else if (isStage1Active) "Compiling..." else "Pending"
-            val stage1Color = if (isStage1Done) M3_Pos else if (isStage1Active) Color(0xFFF2C94C) else M3_OnSurfaceVariant.copy(alpha = 0.4f)
+            val stage1Status = when {
+                isStage1Done -> "Prompt Compiled"
+                isStage1Active -> "Compiling..."
+                isSettledError -> "Unavailable"
+                isSettledFiltered -> "Not retained"
+                else -> "Pending"
+            }
+            val stage1Color = when {
+                isStage1Done -> M3_Pos
+                isStage1Active -> Color(0xFFF2C94C)
+                isSettledError -> M3_Error
+                else -> M3_OnSurfaceVariant.copy(alpha = 0.4f)
+            }
             
             TimelineStage(
                 index = 1,
@@ -218,19 +241,35 @@ fun TelemetryLogsViewer(
             }
 
             // Stage 2: Local SLM Inference Execution
-            val isStage2Done = !isActive || activeStageIndex > 2
+            val isStage2Done = if (isActive) activeStageIndex > 2 else isSettledSuccess
             val isStage2Active = isActive && (activeStageIndex == 1 || activeStageIndex == 2)
-            val stage2Status = if (isStage2Done) "Inference Complete" else if (isStage2Active) {
-                if (activeStageIndex == 1 && hasThinkingMode) "Phase 1: Thinking Pass" else "Phase 2: Structured JSON"
-            } else "Pending"
-            val stage2Color = if (isStage2Done) M3_Pos else if (isStage2Active) Color(0xFFF2C94C) else M3_OnSurfaceVariant.copy(alpha = 0.4f)
+            val stage2Status = when {
+                isStage2Done -> "Inference Complete"
+                isStage2Active -> {
+                    if (activeStageIndex == 1 && hasThinkingMode) "Phase 1: Thinking Pass" else "Phase 2: Structured JSON"
+                }
+                isSettledError -> "Failed"
+                isSettledFiltered -> "No transaction"
+                else -> "Pending"
+            }
+            val stage2Color = when {
+                isStage2Done -> M3_Pos
+                isStage2Active -> Color(0xFFF2C94C)
+                isSettledError -> M3_Error
+                else -> M3_OnSurfaceVariant.copy(alpha = 0.4f)
+            }
             
             TimelineStage(
                 index = 2,
                 title = "Stage 3: Local SLM Inference Execution",
                 statusLabel = stage2Status,
                 statusColor = stage2Color,
-                icon = if (isStage2Done) Icons.Rounded.CheckCircle else Icons.Rounded.Memory,
+                icon = when {
+                    isStage2Done -> Icons.Rounded.CheckCircle
+                    isSettledError -> Icons.Rounded.ErrorOutline
+                    isSettledFiltered -> Icons.Rounded.Block
+                    else -> Icons.Rounded.Memory
+                },
                 isExpanded = expandedStage == 2,
                 onToggle = { expandedStage = if (expandedStage == 2) null else 2 }
             ) {
@@ -247,17 +286,27 @@ fun TelemetryLogsViewer(
             }
 
             // Stage 3: Database Persistence
-            val isStage3Done = !isActive || activeStageIndex > 3
+            val isStage3Done = isSettledSuccess || (isActive && activeStageIndex > 3)
             val isStage3Active = isActive && activeStageIndex == 3
-            val stage3Status = if (status == "synced" || isStage3Done) "Saved to DB" else if (isStage3Active) "Writing..." else "Pending"
-            val stage3Color = if (status == "synced" || isStage3Done) M3_Pos else if (isStage3Active) Color(0xFFF2C94C) else M3_OnSurfaceVariant.copy(alpha = 0.4f)
+            val stage3Status = when {
+                isStage3Done -> "Saved to DB"
+                isStage3Active -> "Writing..."
+                isSettledFiltered || isSettledError -> "Not saved"
+                else -> "Pending"
+            }
+            val stage3Color = when {
+                isStage3Done -> M3_Pos
+                isStage3Active -> Color(0xFFF2C94C)
+                isSettledError -> M3_Error
+                else -> M3_OnSurfaceVariant.copy(alpha = 0.4f)
+            }
             
             TimelineStage(
                 index = 3,
                 title = "Stage 4: Encrypted Persistence",
                 statusLabel = stage3Status,
                 statusColor = stage3Color,
-                icon = if (status == "synced" || isStage3Done) Icons.Rounded.SaveAlt else Icons.Rounded.Storage,
+                icon = if (isStage3Done) Icons.Rounded.SaveAlt else Icons.Rounded.Storage,
                 isExpanded = expandedStage == 3,
                 onToggle = { expandedStage = if (expandedStage == 3) null else 3 }
             ) {

@@ -3,16 +3,22 @@ package com.pocketfinancer.ui.onboarding
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import com.pocketfinancer.SlmAppFlowCoordinator
 import com.pocketfinancer.hardware.SlmTier
 import com.pocketfinancer.inference.ModelDownloader
+import java.io.File
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import javax.inject.Inject
 import javax.inject.Singleton
 
 @Singleton
-class OnboardingSyncManager @Inject constructor() {
+class OnboardingSyncManager @Inject constructor(
+    private val runGenerationStore: OnboardingRunGenerationStore,
+    private val appFlowCoordinator: SlmAppFlowCoordinator
+) {
 
     data class OnboardingSyncState(
         val isRunning: Boolean = false,
@@ -41,6 +47,20 @@ class OnboardingSyncManager @Inject constructor() {
     val syncState: StateFlow<OnboardingSyncState> = _syncState.asStateFlow()
 
     fun startOnboarding(context: Context, slm: SlmTier) {
+        // Capture before checking the in-memory gate. If reset pauses after the
+        // check, this old captured value becomes stale when reset commits. If
+        // reset pauses before the check, admissionPaused rejects scheduling.
+        // Re-reading the generation after the check would create a TOCTOU where
+        // a racing pre-reset start could accidentally receive the new value.
+        val requestedGeneration = runGenerationStore.currentGeneration()
+        if (appFlowCoordinator.state.value.admissionPaused) {
+            _syncState.value = _syncState.value.copy(
+                isRunning = false,
+                isDownloading = false,
+                modelLoadError = "Onboarding start is paused while reset completes."
+            )
+            return
+        }
         _syncState.value = _syncState.value.copy(
             isRunning = true,
             selectedSlm = slm,
@@ -50,6 +70,7 @@ class OnboardingSyncManager @Inject constructor() {
         val intent = Intent(context, OnboardingService::class.java).apply {
             putExtra("EXTRA_SLM_ID", slm.id)
         }
+        runGenerationStore.stamp(intent, requestedGeneration)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             context.startForegroundService(intent)
         } else {
@@ -69,11 +90,54 @@ class OnboardingSyncManager @Inject constructor() {
         )
     }
 
+    internal fun modelPreparationCompleted(modelFile: File) {
+        val sizeMb = modelFile.length() / BYTES_PER_MEBIBYTE
+        _syncState.update {
+            it.copy(
+                step = OnboardingStep.SYNCING,
+                isDownloading = false,
+                modelLoadError = null,
+                downloadState = ModelDownloader.DownloadState(
+                    isComplete = true,
+                    progress = 1f,
+                    downloadedMb = sizeMb,
+                    totalMb = sizeMb,
+                    outputPath = modelFile.absolutePath
+                )
+            )
+        }
+    }
+
+    internal fun modelPreparationFailed(
+        errorMessage: String,
+        terminalDownloadState: ModelDownloader.DownloadState
+    ) {
+        val visibleError = terminalDownloadState.error
+            ?: "Download failed: $errorMessage"
+        _syncState.update {
+            it.copy(
+                step = OnboardingStep.DOWNLOAD_SLM,
+                modelLoadError = visibleError,
+                isRunning = false,
+                isDownloading = false,
+                downloadState = terminalDownloadState.copy(
+                    isDownloading = false,
+                    isComplete = false,
+                    error = visibleError
+                )
+            )
+        }
+    }
+
     fun updateState(transform: (OnboardingSyncState) -> OnboardingSyncState) {
-        _syncState.value = transform(_syncState.value)
+        _syncState.update(transform)
     }
 
     fun reset() {
         _syncState.value = OnboardingSyncState()
+    }
+
+    private companion object {
+        const val BYTES_PER_MEBIBYTE = 1_048_576f
     }
 }

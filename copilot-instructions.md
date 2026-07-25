@@ -34,7 +34,8 @@ pocket-financer-android/
    - **[`ExtractionParser.kt`](file:///d:/Personal_Projects/pocket-financer-android/pipeline/src/main/java/com/pocketfinancer/pipeline/ExtractionParser.kt)**: Validates and parses structured SLM output, including unconstrained output when GBNF is disabled.
 
 3. **[`:inference`](file:///d:/Personal_Projects/pocket-financer-android/inference)**
-   - **[`LlamaEngine.kt`](file:///d:/Personal_Projects/pocket-financer-android/inference/src/main/java/com/pocketfinancer/inference/LlamaEngine.kt)**: Native JNI bridge wrapper containing loading, pre-fill cache, thread count config, and two-phase reasoning.
+   - **[`SlmRuntime.kt`](file:///d:/Personal_Projects/pocket-financer-android/inference/src/main/java/com/pocketfinancer/inference/SlmRuntime.kt)** and **[`SlmRuntimeCoordinator.kt`](file:///d:/Personal_Projects/pocket-financer-android/inference/src/main/java/com/pocketfinancer/inference/SlmRuntimeCoordinator.kt)**: The process-wide, lease-based access path for model residency and serialized native operations. Production callers must use this API.
+   - **[`LlamaEngine.kt`](file:///d:/Personal_Projects/pocket-financer-android/inference/src/main/java/com/pocketfinancer/inference/LlamaEngine.kt)**: Internal JNI owner used only by the coordinator; app, service, worker, and pipeline code must not access it directly.
    - **GBNF Grammar**: Optional, default-enabled grammar schema defined in [`assets/sms_extraction.gbnf`](file:///d:/Personal_Projects/pocket-financer-android/inference/src/main/assets/sms_extraction.gbnf). It improves structured-output reliability but can slow per-SMS processing.
 
 4. **[`:data`](file:///d:/Personal_Projects/pocket-financer-android/data)**

@@ -42,13 +42,14 @@ graph TD
     FP -->|Dropped / Non-Transactional| Discard[Discard Alert]
     FP -->|Passed / Transactional| C2[Inference Queue]
     D[Device Profile] -->|RAM & CPU Flags| SEL{selectSlmForDevice}
-    SEL -->|Loads Selected GGUF| F[LlamaEngine / llama.cpp]
+    SEL -->|Exact model request| R[Process-wide SlmRuntime coordinator]
+    R -->|Serialized native lifecycle| F[Internal LlamaEngine / llama.cpp]
     C2 -->|Assembles Prompt & Context| E[PromptBuilder]
     E -->|Raw Text Prompt| C2
     C2 -->|Checks Cache File| CHK{Session File Exists?}
-    CHK -->|Yes: Load Cache < 100ms| F
+    CHK -->|Yes: Load Cache < 100ms| R
     CHK -->|No: Prefill Prefix| DEL[Delete Stale Sessions]
-    DEL -->|Save New Session| F
+    DEL -->|Save New Session| R
     F -->|Phase 1: Chain of Thought Reasoning| F
     F -->|Phase 2: Structured JSON Generation| F
     F -->|JSON / Null Output| C2

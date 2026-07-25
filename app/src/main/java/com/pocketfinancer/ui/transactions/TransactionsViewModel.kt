@@ -12,7 +12,7 @@ import com.pocketfinancer.ui.home.HomeSyncState
 import com.pocketfinancer.pipeline.SmsFilterPipeline
 import com.pocketfinancer.pipeline.PromptBuilder
 import com.pocketfinancer.pipeline.ExtractionParser
-import com.pocketfinancer.inference.LlamaEngine
+import com.pocketfinancer.inference.SlmRuntime
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -48,7 +48,7 @@ class TransactionsViewModel @Inject constructor(
     private val syncManager: HomeSyncManager,
     private val smsFilterPipeline: SmsFilterPipeline,
     private val promptBuilder: PromptBuilder,
-    private val llamaEngine: LlamaEngine,
+    private val slmRuntime: SlmRuntime,
     private val extractionParser: ExtractionParser
 ) : ViewModel() {
 
@@ -186,44 +186,15 @@ class TransactionsViewModel @Inject constructor(
     }
 
     fun getKvCacheLogs(sender: String, body: String): List<String> {
-        val staticPrefix = promptBuilder.getStaticPrefix()
-        val rawPrompt = promptBuilder.buildExtractionPrompt(sender, body)
-        val hasThinking = llamaEngine.hasThinkingMode
-        val chatPrompt = promptBuilder.buildChatPrompt(rawPrompt, enableThinking = hasThinking)
-        val splitIndex = chatPrompt.indexOf(staticPrefix)
-        val cacheLogs = mutableListOf<String>()
-        if (splitIndex != -1) {
-            val prefixString = chatPrompt.substring(0, splitIndex + staticPrefix.length)
-            val prefixHash = llamaEngine.computeSha256(prefixString)
-            val sessionFile = llamaEngine.getSessionFile(prefixHash)
-            val prefixTokens = llamaEngine.tokenize(prefixString, addSpecial = true)
-            if (prefixTokens != null) {
-                cacheLogs.add("Prefix Size: ${prefixTokens.size} tokens")
-                cacheLogs.add("Prefix Hash: ${prefixHash.take(12)}...")
-                if (sessionFile.exists()) {
-                    cacheLogs.add("Session cache file found: ${sessionFile.name}")
-                    cacheLogs.add("Reusing existing KV Cache (Skipped heavy prefill phase!).")
-                } else {
-                    cacheLogs.add("Session cache file not found. Generating new session cache...")
-                }
-            } else {
-                cacheLogs.add("Prefix Hash: ${prefixHash.take(12)}...")
-                if (sessionFile.exists()) {
-                    cacheLogs.add("Session cache file found: ${sessionFile.name}")
-                    cacheLogs.add("Reusing existing KV Cache.")
-                } else {
-                    cacheLogs.add("Session cache file not found. Prefix tokenization bypassed.")
-                }
-            }
-        } else {
-            cacheLogs.add("No static prefix matched in chat prompt.")
-        }
-        return cacheLogs
+        return listOf(
+            "KV cache telemetry is captured from the exact runtime request.",
+            "Historical transactions do not currently persist cache-hit diagnostics."
+        )
     }
 
     fun getSlmPrompt(sender: String, body: String): String {
         val rawPrompt = promptBuilder.buildExtractionPrompt(sender, body)
-        val hasThinking = llamaEngine.hasThinkingMode
+        val hasThinking = slmRuntime.state.value.loadedModel?.hasThinkingMode ?: true
         return promptBuilder.buildChatPrompt(rawPrompt, enableThinking = hasThinking)
     }
 

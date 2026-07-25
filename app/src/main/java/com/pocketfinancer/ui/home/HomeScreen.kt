@@ -504,14 +504,11 @@ fun HomeScreen(
             val finalJsonOutput = if (isActive) {
                 state.syncState.jsonOutput
             } else if (telemetrySms.status == "synced") {
-                """{
-  "amount": ${telemetrySms.parsedAmount ?: 0.0},
-  "counterparty": "${telemetrySms.parsedMerchant ?: "null"}",
-  "type": "debit",
-  "account": "card"
-}"""
+                "Raw JSON output was not retained after sync."
             } else if (telemetrySms.status == "filtered_out") {
-                "null"
+                "No transaction JSON was retained for this message."
+            } else if (telemetrySms.status == "error") {
+                "Inference output is unavailable because extraction failed."
             } else {
                 ""
             }
@@ -528,9 +525,11 @@ fun HomeScreen(
                     ""
                 }
             } else if (telemetrySms.status == "synced") {
-                "amount=${telemetrySms.parsedAmount ?: 0.0}, type=debit, counterparty=${telemetrySms.parsedMerchant ?: "-"}, account=card"
+                "Saved transaction: amount=${telemetrySms.parsedAmount ?: "-"}, counterparty=${telemetrySms.parsedMerchant ?: "-"}"
             } else if (telemetrySms.status == "filtered_out") {
-                "Parsed: null (non-financial)"
+                "No transaction was saved for this message."
+            } else if (telemetrySms.status == "error") {
+                "Extraction failed before a transaction could be saved."
             } else {
                 ""
             }
@@ -553,8 +552,6 @@ fun HomeScreen(
                 val hasThinking = state.syncState.hasThinkingMode
                 val performanceText = if (isActive) {
                     state.syncState.activeSmsPerformance
-                } else if (telemetrySms.status == "synced") {
-                    "28 ms/tok"
                 } else {
                     null
                 }

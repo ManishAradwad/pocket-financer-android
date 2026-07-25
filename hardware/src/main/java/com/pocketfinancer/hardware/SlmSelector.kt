@@ -1,5 +1,7 @@
 package com.pocketfinancer.hardware
 
+import java.io.File
+
 /**
  * Defines available SLM tiers and auto-selects the best one for the
  * device's hardware capabilities.
@@ -231,6 +233,18 @@ fun isUpgradeAvailable(
 }
 
 /**
+ * Returns whether [file] is a published model artifact that can be offered to
+ * the native loader.
+ *
+ * [SlmTier.sizeMb] is intentionally approximate and must not be used as an
+ * integrity boundary. Downloads use a separate `.part` name until transport
+ * verification succeeds, so the final named artifact is published only after
+ * completion. The native GGUF load remains the authoritative format check.
+ */
+fun isPublishedModelArtifact(file: File): Boolean =
+    file.isFile && file.length() > 0L
+
+/**
  * Resolves the active model tier to load, checking saved preference first,
  * then downloaded files on disk, and falling back to hardware recommendation.
  */
@@ -247,8 +261,7 @@ fun resolveActiveSlmTier(
         val savedTier = SlmTier.ALL_TIERS.find { it.id == savedId }
         if (savedTier != null) {
             val file = java.io.File(modelStorageDir, savedTier.modelFile)
-            val expectedMin = savedTier.sizeMb.toLong() * 1024 * 1024 * 90 / 100
-            if (file.exists() && file.length() >= expectedMin) {
+            if (isPublishedModelArtifact(file)) {
                 return savedTier
             }
         }
@@ -257,14 +270,14 @@ fun resolveActiveSlmTier(
     // 2. Try default onboarding SLM tier if valid on disk
     val defaultTier = SlmTier.DEFAULT_ONBOARDING_SLM
     val defaultFile = java.io.File(modelStorageDir, defaultTier.modelFile)
-    if (defaultFile.exists() && defaultFile.length() >= (defaultTier.sizeMb.toLong() * 1024 * 1024 * 90 / 100)) {
+    if (isPublishedModelArtifact(defaultFile)) {
         return defaultTier
     }
 
     // 3. Try any valid downloaded model file on disk in tier priority order
     for (tier in SlmTier.ALL_TIERS) {
         val file = java.io.File(modelStorageDir, tier.modelFile)
-        if (file.exists() && file.length() >= (tier.sizeMb.toLong() * 1024 * 1024 * 90 / 100)) {
+        if (isPublishedModelArtifact(file)) {
             return tier
         }
     }

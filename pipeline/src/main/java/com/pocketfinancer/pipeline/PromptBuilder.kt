@@ -14,8 +14,8 @@ import javax.inject.Singleton
  *
  * This class is a pure string-builder — it does not depend on the JNI bridge
  * so it can be tested without a loaded model. The actual chat-template
- * rendering (Qwen3 Jinja format) is applied by PipelineService using
- * LlamaEngine.applyChatTemplate().
+ * rendering (Qwen3 Jinja format) is applied inside the process-wide SLM
+ * runtime's serialized native operation.
  *
  * Format:
  *   SYSTEM_PROMPT
@@ -78,7 +78,7 @@ class PromptBuilder @Inject constructor(
      * Qwen3 requires chat template rendering with enable_thinking=True for the
      * thinking pass. When the model doesn't have a built-in template, we fall
      * back to the standard Qwen3 format. The primary path is
-     * LlamaEngine.applyChatTemplate() from PipelineService.
+     * the runtime's native chat-template operation.
      */
     fun buildChatPrompt(rawPrompt: String, enableThinking: Boolean = true): String {
         val systemMsg = "You are a helpful financial SMS extraction assistant."

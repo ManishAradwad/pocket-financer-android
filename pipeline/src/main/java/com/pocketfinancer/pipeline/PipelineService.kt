@@ -2,9 +2,15 @@ package com.pocketfinancer.pipeline
 
 import com.pocketfinancer.data.repository.AccountRepository
 import com.pocketfinancer.data.repository.TransactionRepository
-import com.pocketfinancer.inference.LlamaEngine
+import com.pocketfinancer.inference.SlmChatMessage
+import com.pocketfinancer.inference.SlmExtractionRequest
+import com.pocketfinancer.inference.SlmExtractionResult
+import com.pocketfinancer.inference.SlmLease
+import com.pocketfinancer.inference.SlmModelStorage
+import com.pocketfinancer.inference.SlmPerformanceData
 import com.pocketfinancer.sms.SmsReader
-import kotlinx.coroutines.*
+import java.io.File
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -12,239 +18,190 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * Orchestrates the SMS → SLM → Database pipeline.
+ * Builds one extraction request and persists its result.
  *
- * Processes SMS messages sequentially (one at a time) to avoid concurrent
- * LLM access crashes. Each SMS goes through:
- *   1. Build prompt (system + few-shot + sender + body)
- *   2. Apply chat template (Qwen3 Jinja via model, or manual fallback)
- *   3. Two-phase inference (thinking → structured JSON generation)
- *   4. Parse output (null = skip, JSON = save)
- *   5. Save transaction + find-or-create account
+ * Native access is owned exclusively by [SlmLease]. The caller chooses the
+ * residency scope: workers normally hold a temporary lease for one SMS while
+ * foreground batches keep a lease across the batch and call [processSingle]
+ * once per item. A lease prevents eviction but does not reserve the native
+ * execution lane, so independent FIFO requests can run between batch items.
  */
 @Singleton
 class PipelineService @Inject constructor(
-    private val llamaEngine: LlamaEngine,
     private val promptBuilder: PromptBuilder,
     private val extractionParser: ExtractionParser,
     private val transactionRepository: TransactionRepository,
     private val accountRepository: AccountRepository,
     private val smsFilterPipeline: SmsFilterPipeline,
-    private val slmProcessingPreferences: SlmProcessingPreferences
+    private val slmProcessingPreferences: SlmProcessingPreferences,
+    private val modelStorage: SlmModelStorage
 ) {
-    /** Max SMS in queue before dropping. */
-    private val maxQueueLen = 200
-
-    /** Whether the pipeline is currently processing an SMS. */
-    @Volatile
-    private var isProcessing = false
-
-    private val smsQueue = ArrayDeque<SmsReader.SmsMessage>()
-
-    /** Pipeline step events for UI sync strip. */
     private val _pipelineState = MutableStateFlow<PipelineStep?>(null)
     val pipelineState: StateFlow<PipelineStep?> = _pipelineState.asStateFlow()
 
-    /** Loaded GBNF grammar from assets. */
-    private val grammar: String by lazy {
-        llamaEngine.readAsset("sms_extraction.gbnf")
+    private val extractionGrammar: String by lazy {
+        modelStorage.readTextAsset(GRAMMAR_ASSET)
     }
 
     data class PipelineStep(
         val stage: Stage,
         val message: String,
-        val progress: Int = 0,     // 0-100
+        val progress: Int = 0,
         val total: Int = 0,
-        val perf: LlamaEngine.PerformanceData? = null   // timing data when available
+        val perf: SlmPerformanceData? = null
     )
 
     enum class Stage {
-        ENQUEUED, EXTRACTING, EXTRACTED, SKIPPED, SAVED, ERROR
+        EXTRACTING, EXTRACTED, SKIPPED, SAVED, ERROR
+    }
+
+    enum class SkipReason {
+        NOT_TRANSACTION,
+        EXTRACTION_REJECTED
     }
 
     /**
-     * Enqueue an SMS for processing. Drops if queue is full.
+     * A typed pipeline outcome keeps "not a transaction", cancellation, and
+     * operational failure distinct for WorkManager retry and UI reporting.
      */
-    fun enqueue(sms: SmsReader.SmsMessage) {
-        if (!smsFilterPipeline.isTransactional(sms.address, sms.body)) {
-            return
-        }
-        synchronized(smsQueue) {
-            if (smsQueue.size >= maxQueueLen) {
-                return
-            }
-            smsQueue.addLast(sms)
-        }
-        processQueue()
+    sealed interface ProcessingResult {
+        data class Saved(
+            val transaction: ExtractionParser.ExtractedTransaction
+        ) : ProcessingResult
+
+        data class Skipped(val reason: SkipReason) : ProcessingResult
+
+        data object Stopped : ProcessingResult
+
+        data class Failure(
+            val message: String,
+            val retryable: Boolean
+        ) : ProcessingResult
     }
 
     /**
-     * Enqueue multiple SMS messages (e.g., from history sync).
-     */
-    fun enqueueBatch(messages: List<SmsReader.SmsMessage>) {
-        synchronized(smsQueue) {
-            for (sms in messages) {
-                if (!smsFilterPipeline.isTransactional(sms.address, sms.body)) {
-                    continue
-                }
-                if (smsQueue.size >= maxQueueLen) break
-                smsQueue.addLast(sms)
-            }
-        }
-        processQueue()
-    }
-
-    /**
-     * Block until all queued SMS are processed. Used during initial sync.
-     */
-    suspend fun drain(timeoutMs: Long = 30_000) {
-        val deadline = System.currentTimeMillis() + timeoutMs
-        while (System.currentTimeMillis() < deadline) {
-            val shouldWait = synchronized(smsQueue) {
-                smsQueue.isNotEmpty() || isProcessing
-            }
-            if (!shouldWait) {
-                break
-            }
-            delay(100)
-        }
-    }
-
-    val queueSize: Int get() = synchronized(smsQueue) { smsQueue.size }
-
-    // ── Internal ─────────────────────────────────────────────────────────
-
-    private fun processQueue() {
-        synchronized(smsQueue) {
-            if (isProcessing || smsQueue.isEmpty()) return
-            isProcessing = true
-        }
-
-        CoroutineScope(Dispatchers.IO).launch {
-            while (true) {
-                val sms = synchronized(smsQueue) {
-                    if (smsQueue.isEmpty()) {
-                        isProcessing = false
-                        return@launch
-                    }
-                    smsQueue.removeFirst()
-                }
-                try {
-                    processSingle(sms)
-                } catch (e: Exception) {
-                    emit(Stage.ERROR, "Pipeline error: ${e.message}")
-                }
-            }
-        }
-    }
-
-    /**
-     * Apply the chat template to the raw extraction prompt.
+     * Process exactly one SMS using an already-owned residency lease.
      *
-     * Primary path: uses the model's built-in Jinja template via
-     * LlamaEngine.applyChatTemplate(). Falls back to the manual
-     * Qwen3 template (PromptBuilder.buildChatPrompt()) if the
-     * model doesn't have a built-in template.
+     * GBNF is snapshotted before any suspension. Prompt construction and
+     * database work stay outside the coordinator's native slot; chat-template
+     * rendering, token/session work, and inference are performed atomically by
+     * [SlmLease.extract]. The caller must keep [lease] alive until this method
+     * returns so maintenance/reset cannot interleave with persistence.
      */
-    private fun applyChatTemplate(rawPrompt: String): String {
-        // Try model's Jinja template first
-        val messages = listOf(
-            LlamaEngine.ChatMessage("system", "You are a helpful financial SMS extraction assistant."),
-            LlamaEngine.ChatMessage("user", rawPrompt)
-        )
-        val rendered = llamaEngine.applyChatTemplate(messages, addAssistantPrefix = true)
-        if (rendered != null) {
-            return rendered
-        }
-        // Fallback: manual Qwen3 template
-        return promptBuilder.buildChatPrompt(rawPrompt, enableThinking = llamaEngine.hasThinkingMode)
-    }
-
-    suspend fun processSingle(sms: SmsReader.SmsMessage): ExtractionParser.ExtractedTransaction? {
-        // Snapshot once per SMS. Preference changes while inference is running
-        // intentionally apply only to the next SMS.
+    suspend fun processSingle(
+        sms: SmsReader.SmsMessage,
+        lease: SlmLease
+    ): ProcessingResult {
         val gbnfEnabledForSms = slmProcessingPreferences.gbnfGrammarEnabled.value
 
-        if (!llamaEngine.isModelLoaded()) {
-            emit(Stage.ERROR, "Model not loaded, skipping SMS")
-            return null
+        if (!smsFilterPipeline.isTransactional(sms.address, sms.body)) {
+            emit(Stage.SKIPPED, "Not a transactional SMS")
+            return ProcessingResult.Skipped(SkipReason.NOT_TRANSACTION)
         }
 
         emit(Stage.EXTRACTING, "Processing SMS from ${sms.address}")
 
-        // 1. Build raw prompt (system + few-shot + sender + body)
-        val rawPrompt = promptBuilder.buildExtractionPrompt(sms.address, sms.body)
+        return try {
+            val rawPrompt = promptBuilder.buildExtractionPrompt(sms.address, sms.body)
+            val fallbackPrompt = promptBuilder.buildChatPrompt(
+                rawPrompt = rawPrompt,
+                enableThinking = lease.model.hasThinkingMode
+            )
+            val request = SlmExtractionRequest(
+                messages = listOf(
+                    SlmChatMessage(
+                        role = "system",
+                        content = "You are a helpful financial SMS extraction assistant."
+                    ),
+                    SlmChatMessage(role = "user", content = rawPrompt)
+                ),
+                fallbackPrompt = fallbackPrompt,
+                staticPrefix = promptBuilder.getStaticPrefix(),
+                grammar = if (gbnfEnabledForSms) extractionGrammar else null,
+                thinkingTokens = 1024,
+                answerTokens = 256
+            )
 
-        // 2. Apply chat template (model's Jinja or manual fallback)
-        val chatPrompt = applyChatTemplate(rawPrompt)
+            when (val result = lease.extract(request)) {
+                is SlmExtractionResult.Null -> {
+                    emit(Stage.SKIPPED, "Not a financial transaction", result.perf)
+                    ProcessingResult.Skipped(SkipReason.NOT_TRANSACTION)
+                }
 
-        // 3. Run two-phase inference
-        val result = llamaEngine.inferForExtraction(
-            prompt = chatPrompt,
-            grammar = if (gbnfEnabledForSms) grammar else null,
-            staticPrefix = promptBuilder.getStaticPrefix(),
-            thinkingTokens = 1024,
-            answerTokens = 256
+                is SlmExtractionResult.Error -> {
+                    emit(Stage.ERROR, result.message)
+                    ProcessingResult.Failure(result.message, retryable = true)
+                }
+
+                is SlmExtractionResult.Stopped -> {
+                    emit(Stage.ERROR, "Inference stopped")
+                    ProcessingResult.Stopped
+                }
+
+                is SlmExtractionResult.Success -> persistSuccess(sms, result)
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            val message = error.message ?: "Pipeline processing failed"
+            emit(Stage.ERROR, message)
+            ProcessingResult.Failure(message = message, retryable = true)
+        }
+    }
+
+    private suspend fun persistSuccess(
+        sms: SmsReader.SmsMessage,
+        result: SlmExtractionResult.Success
+    ): ProcessingResult {
+        val perfInfo = result.perf?.let { perf ->
+            " | prompt=${perf.tPromptEvalMs}ms gen=${perf.tEvalMs}ms " +
+                "${perf.tokensPerSecond.toInt()}tok/s"
+        }.orEmpty()
+        emit(
+            Stage.EXTRACTED,
+            "Extracted transaction data$perfInfo",
+            perf = result.perf
         )
 
-        return when (result) {
-            is LlamaEngine.InferenceResult.Null -> {
-                emit(Stage.SKIPPED, "Not a financial transaction")
-                null
-            }
-            is LlamaEngine.InferenceResult.Error -> {
-                emit(Stage.ERROR, result.message)
-                null
-            }
-            is LlamaEngine.InferenceResult.Stopped -> {
-                emit(Stage.ERROR, "Inference stopped")
-                null
-            }
-            is LlamaEngine.InferenceResult.Success -> {
-                val perfInfo = result.perf?.let { p ->
-                    " | prompt=${p.tPromptEvalMs}ms gen=${p.tEvalMs}ms ${p.tokensPerSecond.toInt()}tok/s"
-                } ?: ""
-                emit(Stage.EXTRACTED, "Extracted transaction data$perfInfo", perf = result.perf)
-                // Continue to parsing
-                val parsed = extractionParser.parse(result.json)
-                if (parsed == null) {
-                    emit(Stage.SKIPPED, "Nonnull filter rejected extraction")
-                    return null
-                }
-
-                // 4. Resolve account
-                val account = if (parsed.account != null) {
-                    val inferredBank = inferBankFromSender(sms.address)
-                    accountRepository.getOrCreate(parsed.account, inferredBank, "auto-extracted")
-                } else {
-                    accountRepository.ensureDefault()
-                }
-
-                // 5. Save transaction
-                val inferredBank = inferBankFromSender(sms.address)
-                val merchantName = parsed.counterparty?.takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
-                    ?: if (inferredBank != "Unknown Account") "Transaction ($inferredBank)" else "Unknown Merchant"
-
-                transactionRepository.insert(
-                    TransactionRepository.NewTransaction(
-                        amount = parsed.amount,
-                        merchant = merchantName,
-                        date = sms.date,
-                        type = parsed.type,
-                        accountId = account.id,
-                        rawMessage = sms.body,
-                        sender = sms.address,
-                        slmPromptEvalMs = result.perf?.tPromptEvalMs,
-                        slmEvalMs = result.perf?.tEvalMs,
-                        slmNumTokens = result.perf?.nTokens,
-                        slmModelName = llamaEngine.getModelPath()?.let { java.io.File(it).name }
-                    )
-                )
-
-                emit(Stage.SAVED, "Transaction saved: ₹${parsed.amount} ${parsed.type.name}")
-                parsed
-            }
+        val parsed = extractionParser.parse(result.json)
+        if (parsed == null) {
+            emit(Stage.SKIPPED, "Nonnull filter rejected extraction")
+            return ProcessingResult.Skipped(SkipReason.EXTRACTION_REJECTED)
         }
+
+        val inferredBank = inferBankFromSender(sms.address)
+        val account = if (parsed.account != null) {
+            accountRepository.getOrCreate(parsed.account, inferredBank, "auto-extracted")
+        } else {
+            accountRepository.ensureDefault()
+        }
+
+        val merchantName = parsed.counterparty
+            ?.takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
+            ?: if (inferredBank != "Unknown Account") {
+                "Transaction ($inferredBank)"
+            } else {
+                "Unknown Merchant"
+            }
+
+        transactionRepository.insert(
+            TransactionRepository.NewTransaction(
+                amount = parsed.amount,
+                merchant = merchantName,
+                date = sms.date,
+                type = parsed.type,
+                accountId = account.id,
+                rawMessage = sms.body,
+                sender = sms.address,
+                slmPromptEvalMs = result.perf?.tPromptEvalMs,
+                slmEvalMs = result.perf?.tEvalMs,
+                slmNumTokens = result.perf?.nTokens,
+                slmModelName = File(result.model.modelPath).name
+            )
+        )
+
+        emit(Stage.SAVED, "Transaction saved: ₹${parsed.amount} ${parsed.type.name}")
+        return ProcessingResult.Saved(parsed)
     }
 
     private fun inferBankFromSender(sender: String): String {
@@ -259,12 +216,19 @@ class PipelineService @Inject constructor(
         }
     }
 
-    private fun emit(stage: Stage, message: String, perf: LlamaEngine.PerformanceData? = null) {
+    private fun emit(
+        stage: Stage,
+        message: String,
+        perf: SlmPerformanceData? = null
+    ) {
         _pipelineState.value = PipelineStep(
             stage = stage,
             message = message,
-            total = smsQueue.size,
             perf = perf
         )
+    }
+
+    private companion object {
+        const val GRAMMAR_ASSET = "sms_extraction.gbnf"
     }
 }

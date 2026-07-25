@@ -358,7 +358,8 @@ fun TransactionsScreen(
                 state.transactions.groupBy { formatDateKey(it.date) }
             }
 
-            val showEmptyState = state.transactions.isEmpty() && state.syncState.status != HomeSyncState.Status.SYNCING
+            val syncCardSms = state.syncState.syncCardItem()
+            val showEmptyState = state.transactions.isEmpty() && syncCardSms == null
 
             if (showEmptyState) {
                 Box(
@@ -379,27 +380,14 @@ fun TransactionsScreen(
                         .fillMaxSize()
                         .weight(1f)
                 ) {
-                    // Under Processing SMS Card
-                    if (state.syncState.status == HomeSyncState.Status.SYNCING || state.syncState.status == HomeSyncState.Status.DONE) {
-                        val isComplete = state.syncState.status == HomeSyncState.Status.DONE
-                        val activeIndex = if (isComplete) {
-                            (state.syncState.queue.size - 1).coerceAtLeast(0)
-                        } else {
-                            state.syncState.currentIndex ?: 0
-                        }
-                        val activeSms = if (activeIndex < state.syncState.queue.size) {
-                            state.syncState.queue[activeIndex]
-                        } else null
-
-                        if (activeSms != null) {
-                            item {
-                                ActiveSyncCard(
-                                    activeSms = activeSms,
-                                    currentStageIndex = if (isComplete) 4 else (state.syncState.currentStageIndex ?: 0),
-                                    isComplete = isComplete,
-                                    onClick = { selectedProcessingSms = activeSms }
-                                )
-                            }
+                    // Active / latest local pipeline result
+                    if (syncCardSms != null) {
+                        item {
+                            ActiveSyncCard(
+                                activeSms = syncCardSms,
+                                syncState = state.syncState,
+                                onClick = { selectedProcessingSms = syncCardSms }
+                            )
                         }
                     }
 
@@ -1051,14 +1039,11 @@ fun TransactionsScreen(
             val finalJsonOutput = if (isActive) {
                 state.syncState.jsonOutput
             } else if (sms.status == "synced") {
-                """{
-  "amount": ${sms.parsedAmount ?: 0.0},
-  "counterparty": "${sms.parsedMerchant ?: "null"}",
-  "type": "debit",
-  "account": "card"
-}"""
+                "Raw JSON output was not retained after sync."
             } else if (sms.status == "filtered_out") {
-                "null"
+                "No transaction JSON was retained for this message."
+            } else if (sms.status == "error") {
+                "Inference output is unavailable because extraction failed."
             } else {
                 ""
             }
@@ -1075,9 +1060,11 @@ fun TransactionsScreen(
                     ""
                 }
             } else if (sms.status == "synced") {
-                "amount=${sms.parsedAmount ?: 0.0}, type=debit, counterparty=${sms.parsedMerchant ?: "-"}, account=card"
+                "Saved transaction: amount=${sms.parsedAmount ?: "-"}, counterparty=${sms.parsedMerchant ?: "-"}"
             } else if (sms.status == "filtered_out") {
-                "Parsed: null (non-financial)"
+                "No transaction was saved for this message."
+            } else if (sms.status == "error") {
+                "Extraction failed before a transaction could be saved."
             } else {
                 ""
             }
@@ -1100,8 +1087,6 @@ fun TransactionsScreen(
                 val hasThinking = state.syncState.hasThinkingMode
                 val performanceText = if (isActive) {
                     state.syncState.activeSmsPerformance
-                } else if (sms.status == "synced") {
-                    "28 ms/tok"
                 } else {
                     null
                 }
@@ -1380,118 +1365,6 @@ private fun getMerchantIcon(name: String): ImageVector? {
         lower.contains("bank") || lower.contains("paytm") || lower.contains("gpay") || lower.contains("phonepe") || lower.contains("upi") || lower.contains("hdfc") || lower.contains("sbi") || lower.contains("icici") || lower.contains("axis") || lower.contains("transfer") -> Icons.Rounded.AccountBalance
         lower.contains("card") || lower.contains("visa") || lower.contains("mastercard") || lower.contains("amex") || lower.contains("rupay") || lower.contains("credit") -> Icons.Rounded.CreditCard
         else -> null
-    }
-}
-
-@Composable
-fun ActiveSyncCard(
-    activeSms: SyncSmsItem,
-    currentStageIndex: Int,
-    isComplete: Boolean,
-    onClick: () -> Unit
-) {
-    val cardColor = if (isComplete) M3_PosContainer.copy(alpha = 0.2f) else M3_SurfaceContainerLow
-    val borderColor = if (isComplete) M3_Pos.copy(alpha = 0.25f) else Color(0xFFF2C94C).copy(alpha = 0.3f)
-    val indicatorColor = if (isComplete) M3_Pos else Color(0xFFF2C94C)
-
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 6.dp)
-            .clickable(onClick = onClick),
-        shape = RoundedCornerShape(20.dp),
-        colors = CardDefaults.cardColors(containerColor = cardColor),
-        border = BorderStroke(1.dp, borderColor)
-    ) {
-        Column(
-            modifier = Modifier.padding(14.dp)
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(36.dp)
-                            .background(indicatorColor.copy(alpha = 0.1f), RoundedCornerShape(8.dp)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        if (isComplete) {
-                            Icon(
-                                imageVector = Icons.Rounded.CheckCircle,
-                                contentDescription = null,
-                                tint = M3_Pos,
-                                modifier = Modifier.size(16.dp)
-                            )
-                        } else {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(16.dp),
-                                color = Color(0xFFF2C94C),
-                                strokeWidth = 2.dp
-                            )
-                        }
-                    }
-                    Column {
-                        Text(
-                            text = if (isComplete) "LOCAL PIPELINE COMPLETED" else "LOCAL PIPELINE ENGINE RUNNING",
-                            color = indicatorColor,
-                            style = AppTypography.eyebrow
-                        )
-                        Text(
-                            text = if (isComplete) "Finished sync" else "Pending from ${activeSms.sender}",
-                            color = M3_OnSurface,
-                            style = MaterialTheme.typography.titleSmall
-                        )
-                    }
-                }
-                Text(
-                    text = if (isComplete) "COMPLETE" else "PROCESSING",
-                    color = indicatorColor,
-                    style = AppTypography.eyebrow,
-                    modifier = Modifier
-                        .background(indicatorColor.copy(alpha = 0.15f), RoundedCornerShape(4.dp))
-                        .padding(horizontal = 6.dp, vertical = 2.dp)
-                )
-            }
-            Spacer(modifier = Modifier.height(10.dp))
-            Text(
-                text = activeSms.body,
-                color = M3_OnSurfaceVariant,
-                style = AppTypography.monoBody,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            Spacer(modifier = Modifier.height(10.dp))
-            HorizontalDivider(color = M3_OutlineVariant.copy(alpha = 0.15f))
-            Spacer(modifier = Modifier.height(8.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                val stageName = if (isComplete) "Database Persistence" else when (currentStageIndex) {
-                    0 -> "Pre-Filter Check"
-                    1 -> "Phase 1: Thinking Pass"
-                    2 -> "Phase 2: Structured JSON"
-                    else -> "Database Persistence"
-                }
-                Text(
-                    text = "SLM Stage: $stageName",
-                    color = M3_OnSurfaceVariant,
-                    style = AppTypography.eyebrow
-                )
-                Text(
-                    text = "View extraction logs",
-                    color = M3_Primary,
-                    style = AppTypography.eyebrow
-                )
-            }
-        }
     }
 }
 

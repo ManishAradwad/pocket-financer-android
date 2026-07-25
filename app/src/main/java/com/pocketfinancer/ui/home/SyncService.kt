@@ -112,6 +112,9 @@ class SyncService : Service() {
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 showCompletionNotification(totalSynced, totalSkipped, totalErrors)
 
+            } catch (cancelled: CancellationException) {
+                Log.i(TAG, "Sync cancelled and drained")
+                stopForeground(STOP_FOREGROUND_REMOVE)
             } catch (e: Exception) {
                 Log.e(TAG, "Error during sync execution", e)
                 stopForeground(STOP_FOREGROUND_REMOVE)

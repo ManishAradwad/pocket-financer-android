@@ -4,33 +4,42 @@ import com.pocketfinancer.data.model.Account
 import com.pocketfinancer.data.model.TransactionType
 import com.pocketfinancer.data.repository.AccountRepository
 import com.pocketfinancer.data.repository.TransactionRepository
-import com.pocketfinancer.inference.LlamaEngine
+import com.pocketfinancer.inference.SlmExtractionRequest
+import com.pocketfinancer.inference.SlmExtractionResult
+import com.pocketfinancer.inference.SlmLease
+import com.pocketfinancer.inference.SlmModelSpec
+import com.pocketfinancer.inference.SlmModelStorage
 import com.pocketfinancer.sms.SmsReader
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.slot
 import io.mockk.verify
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.async
-import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.runBlocking
-import org.junit.Before
-import org.junit.Test
 import java.util.UUID
 import kotlin.test.assertEquals
-import kotlin.test.assertNotNull
+import kotlin.test.assertFailsWith
+import kotlin.test.assertIs
 import kotlin.test.assertNull
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.test.runTest
+import org.junit.Before
+import org.junit.Test
 
 class PipelineServiceTest {
 
-    private lateinit var llamaEngine: LlamaEngine
+    private lateinit var lease: SlmLease
+    private lateinit var model: SlmModelSpec
     private lateinit var promptBuilder: PromptBuilder
     private lateinit var extractionParser: ExtractionParser
     private lateinit var transactionRepository: TransactionRepository
     private lateinit var accountRepository: AccountRepository
-    private lateinit var slmProcessingPreferences: SlmProcessingPreferences
+    private lateinit var preferences: SlmProcessingPreferences
+    private lateinit var modelStorage: SlmModelStorage
     private lateinit var gbnfEnabled: MutableStateFlow<Boolean>
     private lateinit var pipeline: PipelineService
 
@@ -39,29 +48,34 @@ class PipelineServiceTest {
 
     @Before
     fun setUp() {
-        llamaEngine = mockk(relaxed = true)
+        model = SlmModelSpec(
+            modelId = "test-model",
+            modelPath = "build/test-model.gguf",
+            hasThinkingMode = true
+        )
+        lease = mockk(relaxed = true)
         promptBuilder = mockk(relaxed = true)
         extractionParser = mockk()
         transactionRepository = mockk(relaxed = true)
         accountRepository = mockk()
-        slmProcessingPreferences = mockk()
+        preferences = mockk()
+        modelStorage = mockk()
         gbnfEnabled = MutableStateFlow(true)
 
-        every { llamaEngine.isModelLoaded() } returns true
-        every { promptBuilder.buildExtractionPrompt(any(), any()) } returns "Sender: AX-HDFCBK\nSMS: Rs.500 credited\nOutput:"
-        every { promptBuilder.buildChatPrompt(any(), any()) } returns """<|im_start|>system
-You are a helpful financial SMS extraction assistant.
-<|im_end|>
-<|im_start|>user
-Sender: AX-HDFCBK
-SMS: Rs.500 credited
-Output:
-<|im_end|>
-<|im_start|>assistant
-"""
-        every { llamaEngine.applyChatTemplate(any(), any()) } returns null
-        every { llamaEngine.readAsset("sms_extraction.gbnf") } returns "root ::= ..."
-        every { slmProcessingPreferences.gbnfGrammarEnabled } returns gbnfEnabled
+        every { lease.model } returns model
+        every {
+            promptBuilder.buildExtractionPrompt(any(), any())
+        } returns "Sender: AX-HDFCBK\nSMS: Rs.500 credited\nOutput:"
+        every {
+            promptBuilder.buildChatPrompt(any(), any())
+        } returns "<manual-chat-template>"
+        every { promptBuilder.getStaticPrefix() } returns "<static-prefix>"
+        every {
+            modelStorage.readTextAsset("sms_extraction.gbnf")
+        } returns "root ::= ..."
+        every { preferences.gbnfGrammarEnabled } returns gbnfEnabled
+        every { extractionParser.parse(any()) } returns null
+        coEvery { lease.extract(any()) } returns SlmExtractionResult.Null(model)
 
         val defaultAccount = Account(
             id = UUID.randomUUID().toString(),
@@ -70,7 +84,9 @@ Output:
             type = "auto-extracted"
         )
         coEvery { accountRepository.ensureDefault() } returns defaultAccount
-        coEvery { accountRepository.getOrCreate(any(), any(), any()) } returns Account(
+        coEvery {
+            accountRepository.getOrCreate(any(), any(), any())
+        } returns Account(
             id = UUID.randomUUID().toString(),
             name = "A/c XX0000",
             bank = "HDFC Bank",
@@ -78,327 +94,215 @@ Output:
         )
 
         pipeline = PipelineService(
-            llamaEngine = llamaEngine,
             promptBuilder = promptBuilder,
             extractionParser = extractionParser,
             transactionRepository = transactionRepository,
             accountRepository = accountRepository,
             smsFilterPipeline = SmsFilterPipeline(),
-            slmProcessingPreferences = slmProcessingPreferences
+            slmProcessingPreferences = preferences,
+            modelStorage = modelStorage
         )
     }
 
     @Test
-    fun `pipeline should start with null state`() {
-        runBlocking {
-            val state = pipeline.pipelineState.first()
-            assertNull(state)
+    fun `pipeline starts with null state`() = runTest {
+        assertNull(pipeline.pipelineState.first())
+    }
+
+    @Test
+    fun `enabled grammar is snapshotted and passed in immutable request`() = runTest {
+        val request = slot<SlmExtractionRequest>()
+
+        pipeline.processSingle(transactionSms(), lease)
+
+        coVerify(exactly = 1) { lease.extract(capture(request)) }
+        assertEquals("root ::= ...", request.captured.grammar)
+        verify(exactly = 1) {
+            modelStorage.readTextAsset("sms_extraction.gbnf")
         }
     }
 
     @Test
-    fun `enabled grammar is loaded and passed to inference`() = runBlocking {
-        coEvery {
-            llamaEngine.inferForExtraction(any(), any(), any(), any(), any())
-        } returns LlamaEngine.InferenceResult.Null
-
-        pipeline.processSingle(SmsReader.SmsMessage(testSender, testBody, 1000L, 1))
-
-        verify(exactly = 1) { llamaEngine.readAsset("sms_extraction.gbnf") }
-        coVerify(exactly = 1) {
-            llamaEngine.inferForExtraction(
-                prompt = any(),
-                grammar = "root ::= ...",
-                staticPrefix = any(),
-                thinkingTokens = any(),
-                answerTokens = any()
-            )
-        }
-    }
-
-    @Test
-    fun `disabled grammar skips asset and passes null to inference`() = runBlocking {
+    fun `disabled grammar skips asset and sends null grammar`() = runTest {
         gbnfEnabled.value = false
-        coEvery {
-            llamaEngine.inferForExtraction(any(), null, any(), any(), any())
-        } returns LlamaEngine.InferenceResult.Null
+        val request = slot<SlmExtractionRequest>()
 
-        pipeline.processSingle(SmsReader.SmsMessage(testSender, testBody, 1000L, 1))
+        pipeline.processSingle(transactionSms(), lease)
 
-        verify(exactly = 0) { llamaEngine.readAsset("sms_extraction.gbnf") }
-        coVerify(exactly = 1) {
-            llamaEngine.inferForExtraction(
-                prompt = any(),
-                grammar = null,
-                staticPrefix = any(),
-                thinkingTokens = any(),
-                answerTokens = any()
-            )
+        coVerify(exactly = 1) { lease.extract(capture(request)) }
+        assertNull(request.captured.grammar)
+        verify(exactly = 0) {
+            modelStorage.readTextAsset("sms_extraction.gbnf")
         }
     }
 
     @Test
-    fun `in-flight SMS keeps grammar snapshot and next SMS uses new setting`() = runBlocking {
+    fun `in-flight SMS keeps grammar snapshot and next SMS uses new setting`() = runTest {
         val inferenceStarted = CompletableDeferred<Unit>()
         val releaseFirstInference = CompletableDeferred<Unit>()
         val capturedGrammar = mutableListOf<String?>()
 
-        coEvery {
-            llamaEngine.inferForExtraction(any(), any(), any(), any(), any())
-        } coAnswers {
-            capturedGrammar += secondArg<String?>()
+        coEvery { lease.extract(any()) } coAnswers {
+            val request = firstArg<SlmExtractionRequest>()
+            capturedGrammar += request.grammar
             if (capturedGrammar.size == 1) {
                 inferenceStarted.complete(Unit)
                 releaseFirstInference.await()
             }
-            LlamaEngine.InferenceResult.Null
+            SlmExtractionResult.Null(model)
         }
 
         val firstSms = async {
-            pipeline.processSingle(SmsReader.SmsMessage(testSender, testBody, 1000L, 1))
+            pipeline.processSingle(transactionSms(date = 1_000L), lease)
         }
         inferenceStarted.await()
         gbnfEnabled.value = false
         releaseFirstInference.complete(Unit)
         firstSms.await()
 
-        pipeline.processSingle(SmsReader.SmsMessage(testSender, testBody, 2000L, 1))
+        pipeline.processSingle(transactionSms(date = 2_000L), lease)
 
         assertEquals(listOf("root ::= ...", null), capturedGrammar)
-        verify(exactly = 1) { llamaEngine.readAsset("sms_extraction.gbnf") }
+        verify(exactly = 1) {
+            modelStorage.readTextAsset("sms_extraction.gbnf")
+        }
     }
 
     @Test
-    fun `enqueue should process SMS and emit EXTRACTED for valid transaction`() {
-        runBlocking {
-            every { extractionParser.parse(any()) } returns ExtractionParser.ExtractedTransaction(
-                amount = 500.0,
-                counterparty = "UPI Ref 12345",
-                type = TransactionType.CREDIT,
-                account = "A/c XX0000"
-            )
-            coEvery { llamaEngine.inferForExtraction(any(), any(), any(), any()) } returns
-                LlamaEngine.InferenceResult.Success(
-                    json = """{"amount": 500.0, "type": "credit", "account": "A/c XX0000", "counterparty": "UPI Ref 12345"}""",
-                    perf = null
+    fun `raw messages and fallback prompt are handed to runtime for atomic templating`() =
+        runTest {
+            val request = slot<SlmExtractionRequest>()
+
+            pipeline.processSingle(transactionSms(), lease)
+
+            coVerify { lease.extract(capture(request)) }
+            assertEquals(listOf("system", "user"), request.captured.messages.map { it.role })
+            assertEquals("<manual-chat-template>", request.captured.fallbackPrompt)
+            assertEquals("<static-prefix>", request.captured.staticPrefix)
+            verify {
+                promptBuilder.buildChatPrompt(
+                    rawPrompt = any(),
+                    enableThinking = true
                 )
-            pipeline.enqueue(SmsReader.SmsMessage(testSender, testBody, 1000L, 1))
-            pipeline.drain(timeoutMs = 5000)
-            val finalState = pipeline.pipelineState.first()
-            assertNotNull(finalState)
-        }
-    }
-
-    @Test
-    fun `enqueue should process SMS and emit SKIPPED for null result`() {
-        runBlocking {
-            coEvery { llamaEngine.inferForExtraction(any(), any(), any(), any()) } returns
-                LlamaEngine.InferenceResult.Null
-            pipeline.enqueue(SmsReader.SmsMessage(testSender, testBody, 1000L, 1))
-            pipeline.drain(timeoutMs = 5000)
-            val finalState = pipeline.pipelineState.first()
-            assertNotNull(finalState)
-            assertEquals(PipelineService.Stage.SKIPPED, finalState.stage)
-        }
-    }
-
-    @Test
-    fun `enqueue should emit ERROR when model is not loaded`() {
-        runBlocking {
-            every { llamaEngine.isModelLoaded() } returns false
-            pipeline.enqueue(SmsReader.SmsMessage(testSender, testBody, 1000L, 1))
-            pipeline.drain(timeoutMs = 5000)
-            val finalState = pipeline.pipelineState.first()
-            assertNotNull(finalState)
-            assertEquals(PipelineService.Stage.ERROR, finalState.stage)
-        }
-    }
-
-    @Test
-    fun `enqueue should emit ERROR when inference fails`() {
-        runBlocking {
-            coEvery { llamaEngine.inferForExtraction(any(), any(), any(), any()) } returns
-                LlamaEngine.InferenceResult.Error("OOM: out of memory")
-            pipeline.enqueue(SmsReader.SmsMessage(testSender, testBody, 1000L, 1))
-            pipeline.drain(timeoutMs = 5000)
-            val finalState = pipeline.pipelineState.first()
-            assertNotNull(finalState)
-            assertEquals(PipelineService.Stage.ERROR, finalState.stage)
-        }
-    }
-
-    @Test
-    fun `queue should drop messages beyond max size`() {
-        runBlocking {
-            coEvery { llamaEngine.inferForExtraction(any(), any(), any(), any()) } returns
-                LlamaEngine.InferenceResult.Null
-            for (i in 0..200) {
-                pipeline.enqueue(SmsReader.SmsMessage(testSender, "Rs $i credited to a/c XX0000", i * 1000L, 1))
             }
-            pipeline.drain(timeoutMs = 5000)
-            assert(pipeline.queueSize == 0)
         }
-    }
 
     @Test
-    fun `pipeline should use applyChatTemplate before falling back to manual`() {
-        runBlocking {
-            coEvery { llamaEngine.inferForExtraction(any(), any(), any(), any()) } returns
-                LlamaEngine.InferenceResult.Null
-            pipeline.enqueue(SmsReader.SmsMessage(testSender, testBody, 1000L, 1))
-            pipeline.drain(timeoutMs = 5000)
-            verify(atLeast = 1) { llamaEngine.applyChatTemplate(any(), any()) }
-        }
-    }
-
-    @Test
-    fun `enqueueBatch should process all messages`() {
-        runBlocking {
-            coEvery { llamaEngine.inferForExtraction(any(), any(), any(), any()) } returns
-                LlamaEngine.InferenceResult.Null
-            val messages = (1..5).map { i ->
-                SmsReader.SmsMessage(testSender, "Rs $i credited to a/c XX0000", i * 1000L, 1)
-            }
-            pipeline.enqueueBatch(messages)
-            pipeline.drain(timeoutMs = 5000)
-            val finalState = pipeline.pipelineState.first()
-            assertNotNull(finalState)
-        }
-    }
-
-    @Test
-    fun `SAVED stage should include transaction details`() {
-        runBlocking {
-            every { extractionParser.parse(any()) } returns ExtractionParser.ExtractedTransaction(
-                amount = 1500.0,
-                counterparty = "Amazon Pay",
-                type = TransactionType.DEBIT,
-                account = "A/c XX6254"
+    fun `successful extraction persists outside runtime call with exact model artifact`() =
+        runTest {
+            every { extractionParser.parse(any()) } returns extractedTransaction()
+            coEvery { lease.extract(any()) } returns SlmExtractionResult.Success(
+                json = """{"amount":500.0,"type":"credit"}""",
+                model = model
             )
-            coEvery { llamaEngine.inferForExtraction(any(), any(), any(), any()) } returns
-                LlamaEngine.InferenceResult.Success(
-                    json = """{"amount": 1500.0, "type": "debit", "account": "A/c XX6254", "counterparty": "Amazon Pay"}""",
-                    perf = null
-                )
-            pipeline.enqueue(SmsReader.SmsMessage(testSender, testBody, 1000L, 1))
-            pipeline.drain(timeoutMs = 5000)
-            coVerify(atLeast = 1) { transactionRepository.insert(any()) }
-        }
-    }
 
-    @Test
-    fun `pipeline should process messages sequentially`() {
-        runBlocking {
-            coEvery { llamaEngine.inferForExtraction(any(), any(), any(), any()) } returns
-                LlamaEngine.InferenceResult.Null
-            pipeline.enqueue(SmsReader.SmsMessage(testSender, "Rs 100 credited to a/c XX0000", 1000L, 1))
-            pipeline.enqueue(SmsReader.SmsMessage(testSender, "Rs 200 credited to a/c XX0000", 2000L, 1))
-            pipeline.enqueue(SmsReader.SmsMessage(testSender, "Rs 300 credited to a/c XX0000", 3000L, 1))
-            pipeline.drain(timeoutMs = 5000)
-            assertEquals(0, pipeline.queueSize)
-        }
-    }
+            val result = pipeline.processSingle(transactionSms(), lease)
 
-    @Test
-    fun `enqueue should emit ERROR when inference is stopped`() {
-        runBlocking {
-            coEvery { llamaEngine.inferForExtraction(any(), any(), any(), any(), any(), any()) } returns
-                LlamaEngine.InferenceResult.Stopped
-            pipeline.enqueue(SmsReader.SmsMessage(testSender, testBody, 1000L, 1))
-            pipeline.drain(timeoutMs = 5000)
-            val finalState = pipeline.pipelineState.first()
-            assertNotNull(finalState)
-            assertEquals(PipelineService.Stage.ERROR, finalState.stage)
-            assertEquals("Inference stopped", finalState.message)
-        }
-    }
-
-    @Test
-    fun `enqueue should emit SKIPPED when parsing returns null after success`() {
-        runBlocking {
-            every { extractionParser.parse(any()) } returns null
-            coEvery { llamaEngine.inferForExtraction(any(), any(), any(), any(), any(), any()) } returns
-                LlamaEngine.InferenceResult.Success(
-                    json = """{"amount": null}""",
-                    perf = null
-                )
-            pipeline.enqueue(SmsReader.SmsMessage(testSender, testBody, 1000L, 1))
-            pipeline.drain(timeoutMs = 5000)
-            val finalState = pipeline.pipelineState.first()
-            assertNotNull(finalState)
-            assertEquals(PipelineService.Stage.SKIPPED, finalState.stage)
-            assertEquals("Nonnull filter rejected extraction", finalState.message)
-        }
-    }
-
-    @Test
-    fun `enqueue should silently drop non-transactional SMS`() {
-        runBlocking {
-            val nonTxnSms = SmsReader.SmsMessage("+919999999999", "Hello there, Rs. 500", 1000L, 1)
-            pipeline.enqueue(nonTxnSms)
-            pipeline.drain(timeoutMs = 1000)
-            assertEquals(0, pipeline.queueSize)
-            coVerify(exactly = 0) { llamaEngine.inferForExtraction(any(), any(), any(), any(), any(), any()) }
-        }
-    }
-
-    @Test
-    fun `enqueue should fallback to inferred bank merchant name when counterparty is missing`() {
-        runBlocking {
-            every { extractionParser.parse(any()) } returns ExtractionParser.ExtractedTransaction(
-                amount = 1500.0,
-                counterparty = null,
-                type = TransactionType.DEBIT,
-                account = "A/c XX6254"
-            )
-            coEvery { llamaEngine.inferForExtraction(any(), any(), any(), any(), any(), any()) } returns
-                LlamaEngine.InferenceResult.Success(
-                    json = """{"amount": 1500.0, "type": "debit", "account": "A/c XX6254"}""",
-                    perf = null
-                )
-            pipeline.enqueue(SmsReader.SmsMessage("AX-HDFCBK", testBody, 1000L, 1))
-            pipeline.drain(timeoutMs = 5000)
-            coVerify {
+            assertIs<PipelineService.ProcessingResult.Saved>(result)
+            coVerify(exactly = 1) {
                 transactionRepository.insert(match {
-                    it.merchant == "Transaction (HDFC Bank)"
+                    it.amount == 500.0 &&
+                        it.merchant == "UPI Ref 12345" &&
+                        it.slmModelName == "test-model.gguf"
                 })
             }
+            assertEquals(PipelineService.Stage.SAVED, pipeline.pipelineState.value?.stage)
         }
+
+    @Test
+    fun `null inference is typed as skipped rather than operational failure`() = runTest {
+        val result = pipeline.processSingle(transactionSms(), lease)
+
+        assertEquals(
+            PipelineService.ProcessingResult.Skipped(
+                PipelineService.SkipReason.NOT_TRANSACTION
+            ),
+            result
+        )
+        assertEquals(PipelineService.Stage.SKIPPED, pipeline.pipelineState.value?.stage)
     }
 
     @Test
-    fun `enqueue should fallback to Unknown Merchant when counterparty and bank are unknown`() {
-        runBlocking {
-            every { extractionParser.parse(any()) } returns ExtractionParser.ExtractedTransaction(
-                amount = 1500.0,
-                counterparty = null,
-                type = TransactionType.DEBIT,
-                account = "A/c XX6254"
-            )
-            coEvery { llamaEngine.inferForExtraction(any(), any(), any(), any(), any(), any()) } returns
-                LlamaEngine.InferenceResult.Success(
-                    json = """{"amount": 1500.0, "type": "debit", "account": "A/c XX6254"}""",
-                    perf = null
-                )
-            pipeline.enqueue(SmsReader.SmsMessage("UNKNOWN_SENDER", testBody, 1000L, 1))
-            pipeline.drain(timeoutMs = 5000)
-            coVerify {
-                transactionRepository.insert(match {
-                    it.merchant == "Unknown Merchant"
-                })
-            }
-        }
+    fun `parser rejection is distinguished from model null`() = runTest {
+        coEvery { lease.extract(any()) } returns SlmExtractionResult.Success(
+            json = """{"amount":null}""",
+            model = model
+        )
+
+        val result = pipeline.processSingle(transactionSms(), lease)
+
+        assertEquals(
+            PipelineService.ProcessingResult.Skipped(
+                PipelineService.SkipReason.EXTRACTION_REJECTED
+            ),
+            result
+        )
     }
 
     @Test
-    fun `pipeline should use manual Qwen3 chat template if applyChatTemplate returns null`() {
-        runBlocking {
-            every { llamaEngine.applyChatTemplate(any(), any()) } returns null
-            coEvery { llamaEngine.inferForExtraction(any(), any(), any(), any(), any(), any()) } returns
-                LlamaEngine.InferenceResult.Null
-            pipeline.enqueue(SmsReader.SmsMessage(testSender, testBody, 1000L, 1))
-            pipeline.drain(timeoutMs = 5000)
-            verify(atLeast = 1) { promptBuilder.buildChatPrompt(any(), any()) }
-        }
+    fun `stopped inference has typed stopped result`() = runTest {
+        coEvery { lease.extract(any()) } returns SlmExtractionResult.Stopped(model)
+
+        val result = pipeline.processSingle(transactionSms(), lease)
+
+        assertEquals(PipelineService.ProcessingResult.Stopped, result)
+        assertEquals("Inference stopped", pipeline.pipelineState.value?.message)
     }
+
+    @Test
+    fun `runtime error is retryable typed failure`() = runTest {
+        coEvery { lease.extract(any()) } returns SlmExtractionResult.Error(
+            message = "OOM: out of memory",
+            model = model
+        )
+
+        val result = pipeline.processSingle(transactionSms(), lease)
+
+        assertEquals(
+            PipelineService.ProcessingResult.Failure(
+                message = "OOM: out of memory",
+                retryable = true
+            ),
+            result
+        )
+    }
+
+    @Test
+    fun `cancellation is never converted into pipeline failure`() = runTest {
+        coEvery { lease.extract(any()) } throws CancellationException("cancelled")
+
+        assertFailsWith<CancellationException> {
+            pipeline.processSingle(transactionSms(), lease)
+        }
+        coVerify(exactly = 0) { transactionRepository.insert(any()) }
+    }
+
+    @Test
+    fun `non-transactional SMS never reaches runtime`() = runTest {
+        val sms = SmsReader.SmsMessage(
+            address = "+919999999999",
+            body = "Hello there, Rs. 500",
+            date = 1_000L,
+            type = 1
+        )
+
+        val result = pipeline.processSingle(sms, lease)
+
+        assertIs<PipelineService.ProcessingResult.Skipped>(result)
+        coVerify(exactly = 0) { lease.extract(any()) }
+    }
+
+    private fun transactionSms(date: Long = 1_000L) = SmsReader.SmsMessage(
+        address = testSender,
+        body = testBody,
+        date = date,
+        type = 1
+    )
+
+    private fun extractedTransaction() = ExtractionParser.ExtractedTransaction(
+        amount = 500.0,
+        counterparty = "UPI Ref 12345",
+        type = TransactionType.CREDIT,
+        account = "A/c XX0000"
+    )
 }
