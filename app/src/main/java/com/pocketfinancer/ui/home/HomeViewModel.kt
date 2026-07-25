@@ -1,6 +1,8 @@
 package com.pocketfinancer.ui.home
 
 import android.content.Context
+import android.content.pm.ApplicationInfo
+import android.os.Build
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.pocketfinancer.data.model.Transaction
@@ -15,15 +17,12 @@ import com.pocketfinancer.pipeline.PromptBuilder
 import com.pocketfinancer.pipeline.ExtractionParser
 import com.pocketfinancer.hardware.DeviceCapabilities
 import com.pocketfinancer.hardware.SlmTier
-import com.pocketfinancer.hardware.isUpgradeAvailable
-import com.pocketfinancer.hardware.isPublishedModelArtifact
 import com.pocketfinancer.hardware.resolveActiveSlmTier
-import com.pocketfinancer.hardware.selectSlmForDevice
 import com.pocketfinancer.inference.ModelDownloader
 import com.pocketfinancer.inference.SlmModelStorage
 import com.pocketfinancer.inference.SlmRuntime
+import com.pocketfinancer.ui.onboarding.OnboardingStep
 import com.pocketfinancer.ui.onboarding.OnboardingSyncManager
-import java.io.File
 import java.util.Calendar
 import javax.inject.Inject
 
@@ -41,6 +40,13 @@ data class ModelUpgradeRecommendation(
     val currentSlm: SlmTier? = null,
     val downloadState: ModelDownloader.DownloadState = ModelDownloader.DownloadState(),
     val isDownloading: Boolean = false,
+    val isRunning: Boolean = false,
+    val isCancelling: Boolean = false,
+    val canCancel: Boolean = false,
+    val isApplying: Boolean = false,
+    val statusMessage: String? = null,
+    val error: String? = null,
+    val isDebugEmulatorOverride: Boolean = false,
     val isDismissed: Boolean = false
 )
 
@@ -89,22 +95,63 @@ class HomeViewModel @Inject constructor(
         val periodDataMap = calculatePeriodData(txs)
         val device = deviceCapabilities.assessDevice()
         val currentSlm = resolveActiveSlmTier(context, modelStorage.modelDirectory, device)
-        val recommendedSlm = selectSlmForDevice(device)
-
-        val recommendedFile = recommendedSlm?.let { modelStorage.modelFile(it.modelFile) }
-        val isRecommendedDownloaded =
-            recommendedFile != null && isPublishedModelArtifact(recommendedFile)
-
-        val hasUpgrade = !isRecommendedDownloaded && isUpgradeAvailable(currentSlm, device)
-
-        val activeDs = if (onboardingSyncState.isDownloading) onboardingSyncState.downloadState else downloadState
+        val allowDebugOverride = allowDebugEmulatorOverride()
+        val upgradeTarget = selectModelUpgradeTarget(
+            device = device,
+            allowDebugEmulatorOverride = allowDebugOverride
+        )
+        // Once a model-upgrade operation starts, its target is an immutable
+        // operation snapshot. Keep showing that same target after cancellation
+        // or failure even if live storage changes while the partial/final
+        // artifact is written.
+        val unfinishedManagedTarget =
+            unfinishedModelUpgradeTarget(onboardingSyncState)
+        val recommendedSlm = unfinishedManagedTarget ?: upgradeTarget.tier
+        val hasUpgrade = isHigherQualityModel(currentSlm, recommendedSlm)
+        val isThisUpgradeRun =
+            onboardingSyncState.runPurpose ==
+                OnboardingSyncManager.RunPurpose.MODEL_UPGRADE &&
+                onboardingSyncState.selectedSlm == recommendedSlm
+        val isUpgradeRunning = isThisUpgradeRun && onboardingSyncState.isRunning
+        val activeDs = if (isThisUpgradeRun) {
+            onboardingSyncState.downloadState
+        } else {
+            downloadState
+        }
 
         val upgradeRec = ModelUpgradeRecommendation(
             isUpgradeAvailable = hasUpgrade,
             recommendedSlm = recommendedSlm,
             currentSlm = currentSlm,
             downloadState = activeDs,
-            isDownloading = activeDs.isDownloading || onboardingSyncState.isDownloading,
+            isDownloading =
+                isUpgradeRunning && onboardingSyncState.isDownloading,
+            isRunning = isUpgradeRunning,
+            isCancelling =
+                isUpgradeRunning && onboardingSyncState.isCancelling,
+            canCancel =
+                isUpgradeRunning &&
+                    onboardingSyncState.isCancellationAllowed &&
+                    !onboardingSyncState.isCancelling,
+            isApplying =
+                isUpgradeRunning &&
+                    !onboardingSyncState.isCancelling &&
+                    onboardingSyncState.step == OnboardingStep.SYNCING,
+            statusMessage = onboardingSyncState.syncMessage
+                .takeIf { isThisUpgradeRun && it.isNotBlank() },
+            error = onboardingSyncState.modelLoadError
+                .takeIf { isThisUpgradeRun },
+            isDebugEmulatorOverride =
+                upgradeTarget.isDebugEmulatorOverride ||
+                    (
+                        allowDebugOverride &&
+                            unfinishedManagedTarget ==
+                                SlmTier.QWEN3_1_7B_Q4_K_M &&
+                            selectModelUpgradeTarget(
+                                device = device,
+                                allowDebugEmulatorOverride = false
+                            ).tier == SlmTier.DEFAULT_ONBOARDING_SLM
+                    ),
             isDismissed = isDismissed
         )
 
@@ -149,8 +196,23 @@ class HomeViewModel @Inject constructor(
 
     fun startModelUpgrade() {
         val device = deviceCapabilities.assessDevice()
-        val recommendedSlm = selectSlmForDevice(device) ?: return
-        onboardingSyncManager.startOnboarding(context, recommendedSlm)
+        val recommendedSlm =
+            unfinishedModelUpgradeTarget(onboardingSyncManager.syncState.value)
+                ?: selectModelUpgradeTarget(
+                    device = device,
+                    allowDebugEmulatorOverride = allowDebugEmulatorOverride()
+                ).tier
+                ?: return
+        onboardingSyncManager.startModelUpgrade(context, recommendedSlm)
+    }
+
+    fun cancelModelUpgrade() {
+        val activeRun = onboardingSyncManager.syncState.value
+        if (!canCancelModelUpgrade(activeRun)) return
+
+        // The downloader keeps its partial artifact, so starting the upgrade
+        // again resumes rather than discarding already downloaded bytes.
+        onboardingSyncManager.requestModelUpgradeCancellation(context)
     }
 
     fun dismissUpgradeBanner() {
@@ -278,4 +340,31 @@ class HomeViewModel @Inject constructor(
             "amount=${it.amount}, type=${it.type.name.lowercase()}, counterparty=${it.counterparty ?: "-"}, account=${it.account ?: "-"}"
         } ?: "Parsed: null (non-financial)"
     }
+
+    private fun isProbablyEmulator(): Boolean =
+        Build.FINGERPRINT.startsWith("generic") ||
+            Build.FINGERPRINT.startsWith("unknown") ||
+            Build.MODEL.contains("Emulator", ignoreCase = true) ||
+            Build.MODEL.contains("Android SDK built for", ignoreCase = true) ||
+            Build.PRODUCT.contains("sdk", ignoreCase = true)
+
+    private fun allowDebugEmulatorOverride(): Boolean =
+        (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0 &&
+            isProbablyEmulator()
 }
+
+internal fun canCancelModelUpgrade(
+    state: OnboardingSyncManager.OnboardingSyncState
+): Boolean =
+    state.isRunning &&
+        !state.isCancelling &&
+        state.isCancellationAllowed &&
+        state.runPurpose == OnboardingSyncManager.RunPurpose.MODEL_UPGRADE
+
+internal fun unfinishedModelUpgradeTarget(
+    state: OnboardingSyncManager.OnboardingSyncState
+): SlmTier? =
+    state.selectedSlm.takeIf {
+        state.runPurpose == OnboardingSyncManager.RunPurpose.MODEL_UPGRADE &&
+            state.step != OnboardingStep.COMPLETED
+    }

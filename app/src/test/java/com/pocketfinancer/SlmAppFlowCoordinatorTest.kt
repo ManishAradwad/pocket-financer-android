@@ -107,4 +107,160 @@ class SlmAppFlowCoordinatorTest {
             assertNotNull(admitted)
             admitted!!.release()
         }
+
+    @Test
+    fun `model upgrade waits for old flows and blocks new admission during handoff`() =
+        runTest {
+            val coordinator = SlmAppFlowCoordinator()
+            val oldFlowStarted = CompletableDeferred<Unit>()
+            val finishOldFlow = CompletableDeferred<Unit>()
+
+            val oldFlow = launch {
+                val lease = checkNotNull(
+                    coordinator.tryEnter(SlmRuntimeOwner.HOME_SYNC)
+                )
+                oldFlowStarted.complete(Unit)
+                try {
+                    finishOldFlow.await()
+                } finally {
+                    lease.release()
+                }
+            }
+            oldFlowStarted.await()
+
+            val handoffReady = CompletableDeferred<SlmAppFlowPause>()
+            val finishUpgrade = CompletableDeferred<Unit>()
+            val upgrade = launch {
+                val lease = checkNotNull(
+                    coordinator.tryEnter(SlmRuntimeOwner.MODEL_UPGRADE)
+                )
+                var pause: SlmAppFlowPause? = null
+                try {
+                    pause = checkNotNull(
+                        coordinator.tryPauseAdmissionAndDrainOthers(
+                            SlmRuntimeOwner.MODEL_UPGRADE
+                        )
+                    )
+                    handoffReady.complete(pause)
+                    finishUpgrade.await()
+                } finally {
+                    pause?.release()
+                    lease.release()
+                }
+            }
+            runCurrent()
+
+            assertTrue(coordinator.state.value.admissionPaused)
+            assertFalse(handoffReady.isCompleted)
+            assertEquals(2, coordinator.state.value.activeCount)
+            assertNull(coordinator.tryEnter(SlmRuntimeOwner.SMS_WORKER))
+
+            finishOldFlow.complete(Unit)
+            runCurrent()
+            val admissionPause = handoffReady.await()
+
+            assertTrue(coordinator.state.value.admissionPaused)
+            assertEquals(
+                mapOf(SlmRuntimeOwner.MODEL_UPGRADE to 1),
+                coordinator.state.value.activeByOwner
+            )
+            assertNull(coordinator.tryEnter(SlmRuntimeOwner.HOME_SYNC))
+
+            admissionPause.release()
+            val newlyAdmitted = coordinator.tryEnter(SlmRuntimeOwner.SMS_WORKER)
+            assertNotNull(newlyAdmitted)
+            newlyAdmitted!!.release()
+            finishUpgrade.complete(Unit)
+            upgrade.join()
+            oldFlow.join()
+        }
+
+    @Test
+    fun `cancelled model upgrade handoff reopens admission without cancelling old flow`() =
+        runTest {
+            val coordinator = SlmAppFlowCoordinator()
+            val oldFlowStarted = CompletableDeferred<Unit>()
+            val finishOldFlow = CompletableDeferred<Unit>()
+            val upgradeStarted = CompletableDeferred<Unit>()
+
+            val oldFlow = launch {
+                val lease = checkNotNull(
+                    coordinator.tryEnter(SlmRuntimeOwner.HOME_SYNC)
+                )
+                oldFlowStarted.complete(Unit)
+                try {
+                    finishOldFlow.await()
+                } finally {
+                    lease.release()
+                }
+            }
+            oldFlowStarted.await()
+
+            val upgrade = launch {
+                val lease = checkNotNull(
+                    coordinator.tryEnter(SlmRuntimeOwner.MODEL_UPGRADE)
+                )
+                upgradeStarted.complete(Unit)
+                try {
+                    coordinator.tryPauseAdmissionAndDrainOthers(
+                        SlmRuntimeOwner.MODEL_UPGRADE
+                    )
+                } finally {
+                    lease.release()
+                }
+            }
+            upgradeStarted.await()
+            runCurrent()
+            assertTrue(coordinator.state.value.admissionPaused)
+
+            upgrade.cancel()
+            upgrade.join()
+
+            assertFalse(coordinator.state.value.admissionPaused)
+            assertEquals(
+                mapOf(SlmRuntimeOwner.HOME_SYNC to 1),
+                coordinator.state.value.activeByOwner
+            )
+            val newlyAdmitted = coordinator.tryEnter(SlmRuntimeOwner.SMS_WORKER)
+            assertNotNull(newlyAdmitted)
+            newlyAdmitted!!.release()
+
+            finishOldFlow.complete(Unit)
+            oldFlow.join()
+        }
+
+    @Test
+    fun `foreground service waits for model handoff before admission`() =
+        runTest {
+            val coordinator = SlmAppFlowCoordinator()
+            val pause = checkNotNull(
+                coordinator.tryPauseAndDrain(SlmRuntimeOwner.MODEL_UPGRADE)
+            )
+            val leaseReady = CompletableDeferred<Unit>()
+            val finishService = CompletableDeferred<Unit>()
+
+            val waitingService = launch {
+                val lease =
+                    coordinator.enterWhenAvailable(SlmRuntimeOwner.HOME_SYNC)
+                leaseReady.complete(Unit)
+                try {
+                    finishService.await()
+                } finally {
+                    lease.release()
+                }
+            }
+            runCurrent()
+            assertFalse(leaseReady.isCompleted)
+
+            pause.release()
+            runCurrent()
+            leaseReady.await()
+
+            assertEquals(
+                mapOf(SlmRuntimeOwner.HOME_SYNC to 1),
+                coordinator.state.value.activeByOwner
+            )
+            finishService.complete(Unit)
+            waitingService.join()
+        }
 }

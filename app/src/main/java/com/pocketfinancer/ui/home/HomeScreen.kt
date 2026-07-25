@@ -226,6 +226,7 @@ fun HomeScreen(
                         ModelUpgradeBanner(
                             recommendation = upgradeRec,
                             onUpgrade = { viewModel.startModelUpgrade() },
+                            onCancel = { viewModel.cancelModelUpgrade() },
                             onDismiss = { viewModel.dismissUpgradeBanner() }
                         )
                     }
@@ -1550,10 +1551,19 @@ private fun getAccountShortLabel(label: String?): String {
 fun ModelUpgradeBanner(
     recommendation: ModelUpgradeRecommendation,
     onUpgrade: () -> Unit,
+    onCancel: () -> Unit,
     onDismiss: () -> Unit
 ) {
     val recSlm = recommendation.recommendedSlm ?: return
     val ds = recommendation.downloadState
+    val wasCancelled =
+        !recommendation.isRunning &&
+            recommendation.statusMessage == "Cancelled"
+    val eyebrow = if (recommendation.isDebugEmulatorOverride) {
+        "DEBUG EMULATOR UPGRADE TEST"
+    } else {
+        "ACCURACY UPGRADE AVAILABLE"
+    }
 
     Card(
         modifier = Modifier
@@ -1592,39 +1602,100 @@ fun ModelUpgradeBanner(
                         )
                     }
                     Text(
-                        text = "PERFORMANCE UPGRADE AVAILABLE",
+                        text = eyebrow,
                         color = M3_Primary,
                         style = AppTypography.eyebrow
                     )
                 }
 
-                IconButton(
-                    onClick = onDismiss,
-                    modifier = Modifier.size(24.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Close,
-                        contentDescription = "Dismiss",
-                        tint = M3_OnSurfaceVariant.copy(alpha = 0.7f),
-                        modifier = Modifier.size(16.dp)
-                    )
+                if (!recommendation.isRunning) {
+                    IconButton(
+                        onClick = onDismiss,
+                        modifier = Modifier.size(24.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Close,
+                            contentDescription = "Dismiss model upgrade",
+                            tint = M3_OnSurfaceVariant.copy(alpha = 0.7f),
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
                 }
             }
 
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(
-                    text = "Upgrade Engine to ${recSlm.name}",
+                    text = if (recommendation.isDebugEmulatorOverride) {
+                        "Test ${recSlm.name} on this emulator"
+                    } else {
+                        "Improve accuracy with ${recSlm.name}"
+                    },
                     color = M3_OnSurface,
                     style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
                 )
                 Text(
-                    text = "Your phone supports a higher quality AI model (~${"%.1f".format(recSlm.sizeGb)} GB). Upgrading will improve extraction accuracy and performance.",
+                    text = if (recommendation.isDebugEmulatorOverride) {
+                        "This debug emulator has enough RAM and storage to exercise the larger-model flow (~${"%.1f".format(recSlm.sizeGb)} GB). Inference may be slower than on an accelerated phone."
+                    } else {
+                        "Your phone supports a higher quality local AI model (~${"%.1f".format(recSlm.sizeGb)} GB) that can improve transaction extraction accuracy."
+                    },
                     color = M3_OnSurfaceVariant,
                     style = MaterialTheme.typography.bodySmall
                 )
             }
 
-            if (recommendation.isDownloading) {
+            if (wasCancelled) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(M3_SurfaceContainer, RoundedCornerShape(12.dp))
+                        .padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.PauseCircle,
+                        contentDescription = null,
+                        tint = M3_OnSurfaceVariant,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Text(
+                        text = "Upgrade canceled. Downloaded progress is kept for when you resume.",
+                        color = M3_OnSurfaceVariant,
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                }
+            }
+
+            recommendation.error
+                ?.takeIf { !recommendation.isRunning }
+                ?.let { error ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(
+                                M3_ErrorContainer.copy(alpha = 0.24f),
+                                RoundedCornerShape(12.dp)
+                            )
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.Top,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Warning,
+                            contentDescription = null,
+                            tint = M3_Error,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text(
+                            text = error,
+                            color = M3_OnErrorContainer,
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                    }
+                }
+
+            if (recommendation.isDownloading && !recommendation.isCancelling) {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1638,7 +1709,7 @@ fun ModelUpgradeBanner(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "Downloading in background...",
+                            text = "Downloading model in background...",
                             color = M3_OnSurface,
                             style = MaterialTheme.typography.labelSmall
                         )
@@ -1675,6 +1746,48 @@ fun ModelUpgradeBanner(
                         }
                     }
                 }
+            } else if (recommendation.isRunning) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(M3_SurfaceContainer, RoundedCornerShape(12.dp))
+                        .padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        strokeWidth = 2.dp,
+                        color = M3_Primary,
+                        trackColor = M3_OutlineVariant.copy(alpha = 0.3f)
+                    )
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(
+                            text = when {
+                                recommendation.isCancelling ->
+                                    "Cancelling model upgrade..."
+                                recommendation.isApplying ->
+                                    "Activating model..."
+                                else -> "Preparing model upgrade..."
+                            },
+                            color = M3_OnSurface,
+                            style = AppTypography.bodySmallBold
+                        )
+                        Text(
+                            text = recommendation.statusMessage
+                                ?: when {
+                                    recommendation.isCancelling ->
+                                        "Waiting for model work to stop safely."
+                                    recommendation.isApplying ->
+                                        "Validating the download and safely switching models."
+                                    else ->
+                                        "Starting the background download service."
+                                },
+                            color = M3_OnSurfaceVariant,
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                    }
+                }
             } else {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -1698,9 +1811,35 @@ fun ModelUpgradeBanner(
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = "Upgrade Engine",
+                            text = when {
+                                wasCancelled -> "Resume Upgrade"
+                                recommendation.error != null -> "Retry Upgrade"
+                                else -> "Upgrade Model"
+                            },
                             color = M3_OnPrimary,
                             style = AppTypography.titleSmallBold
+                        )
+                    }
+                }
+            }
+
+            if (recommendation.canCancel) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End
+                ) {
+                    TextButton(onClick = onCancel) {
+                        Icon(
+                            imageVector = Icons.Rounded.Close,
+                            contentDescription = null,
+                            tint = M3_OnSurfaceVariant,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "Cancel upgrade",
+                            color = M3_OnSurfaceVariant,
+                            style = MaterialTheme.typography.labelMedium
                         )
                     }
                 }

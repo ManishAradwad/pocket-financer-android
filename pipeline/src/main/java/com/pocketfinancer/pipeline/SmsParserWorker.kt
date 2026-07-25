@@ -121,19 +121,86 @@ class SmsParserWorker(
         if (!processIncoming) {
             Log.i(TAG, "Background SMS processing is disabled; skipping inference.")
             if (isForeground) {
-                homeSyncDelegate.queueIncomingSms(address, body, date)
+                return routeThroughForegroundSync(
+                    homeSyncDelegate = homeSyncDelegate,
+                    address = address,
+                    body = body,
+                    date = date,
+                    startSyncWhenQueued = false
+                )
             }
             return Result.success()
         }
 
         if (isForeground) {
             Log.i(TAG, "Routing SMS through the foreground sync service.")
-            if (homeSyncDelegate.queueIncomingSms(address, body, date)) {
-                homeSyncDelegate.startSyncService()
-            }
-            return Result.success()
+            return routeThroughForegroundSync(
+                homeSyncDelegate = homeSyncDelegate,
+                address = address,
+                body = body,
+                date = date,
+                startSyncWhenQueued = true
+            )
         }
 
+        return withSmsWorkerFlowAdmission(
+            delegate = homeSyncDelegate,
+            onAdmissionPaused = {
+                Log.i(
+                    TAG,
+                    "Selected-model maintenance owns SMS admission; retrying worker."
+                )
+                Result.retry()
+            }
+        ) {
+            processDirectlyInBackground(
+                entryPoint = entryPoint,
+                smsFilterPipeline = smsFilterPipeline,
+                prefs = prefs,
+                address = address,
+                body = body,
+                date = date,
+                type = type
+            )
+        }
+    }
+
+    private suspend fun routeThroughForegroundSync(
+        homeSyncDelegate: HomeSyncDelegate,
+        address: String,
+        body: String,
+        date: Long,
+        startSyncWhenQueued: Boolean
+    ): Result {
+        val queueResult = homeSyncDelegate.queueIncomingSms(address, body, date)
+        return foldIncomingSmsQueueResult(
+            queueResult = queueResult,
+            onQueuedTransaction = {
+                if (startSyncWhenQueued) {
+                    homeSyncDelegate.startSyncService()
+                }
+                Result.success()
+            },
+            onIgnored = { Result.success() },
+            onAdmissionPaused = {
+                Log.i(
+                    TAG,
+                    "Foreground SMS handoff was paused by selected-model maintenance; retrying."
+                )
+                Result.retry()
+            }
+        )
+    }
+
+    private suspend fun processDirectlyInBackground(
+        entryPoint: ParserWorkerEntryPoint,
+        smsFilterPipeline: SmsFilterPipeline,
+        prefs: SharedPreferences,
+        address: String,
+        body: String,
+        date: Long,
+        type: Int
+    ): Result {
         val sms = SmsReader.SmsMessage(address, body, date, type)
         if (!smsFilterPipeline.isTransactional(address, body)) {
             Log.i(TAG, "SMS from $address is non-transactional; skipping inference.")
@@ -400,6 +467,39 @@ abstract class SmsPipelineModule {
 internal fun isOnboardingCompleteForSmsWork(
     preferences: SharedPreferences
 ): Boolean = preferences.getBoolean("onboarding_completed", false)
+
+internal inline fun <T> foldIncomingSmsQueueResult(
+    queueResult: IncomingSmsQueueResult,
+    onQueuedTransaction: () -> T,
+    onIgnored: () -> T,
+    onAdmissionPaused: () -> T
+): T = when (queueResult) {
+    IncomingSmsQueueResult.QUEUED_TRANSACTION -> onQueuedTransaction()
+    IncomingSmsQueueResult.IGNORED -> onIgnored()
+    IncomingSmsQueueResult.ADMISSION_PAUSED -> onAdmissionPaused()
+}
+
+/**
+ * Holds the app-wide workflow claim from before selected-model resolution
+ * through the worker's inference and persistence path. Admission rejection is
+ * temporary maintenance, so callers return WorkManager retry without consuming
+ * the SMS item.
+ */
+internal suspend fun <T> withSmsWorkerFlowAdmission(
+    delegate: HomeSyncDelegate,
+    onAdmissionPaused: () -> T,
+    block: suspend () -> T
+): T {
+    val flowLease = delegate.tryEnterSmsWorkerFlow()
+        ?: return onAdmissionPaused()
+    return try {
+        block()
+    } finally {
+        withContext(NonCancellable) {
+            flowLease.release()
+        }
+    }
+}
 
 internal suspend fun protectSmsParserChain(
     onFailure: (Exception) -> Unit,

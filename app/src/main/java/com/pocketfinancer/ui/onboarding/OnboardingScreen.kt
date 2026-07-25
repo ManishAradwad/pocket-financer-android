@@ -44,6 +44,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -161,6 +162,7 @@ fun OnboardingScreen(
                             selectedSlm = state.selectedSlm,
                             downloadState = state.downloadState,
                             isDownloading = state.isDownloading,
+                            hasNotificationPermission = state.hasNotificationPermission,
                             onDownload = { viewModel.downloadModel() }
                         )
                         OnboardingStep.SYNCING -> SyncingStepScreen(
@@ -173,7 +175,8 @@ fun OnboardingScreen(
                             transactionalCount = state.syncTransactionalCount,
                             parsedCount = state.syncParsedCount,
                             spendsTotal = state.syncSpendsTotal,
-                            recentTransactions = state.syncRecentTransactions
+                            recentTransactions = state.syncRecentTransactions,
+                            hasNotificationPermission = state.hasNotificationPermission
                         )
                         OnboardingStep.COMPLETED -> Box(modifier = Modifier.fillMaxSize())
                     }
@@ -659,11 +662,59 @@ private fun PermissionsStepScreen(
     }
 }
 
+internal fun backgroundWorkNoticeText(hasNotificationPermission: Boolean): String =
+    if (hasNotificationPermission) {
+        "You can switch apps and track progress in notifications."
+    } else {
+        "You can switch apps and return to Pocket Financer to check progress."
+    }
+
+@Composable
+private fun BackgroundWorkNotice(
+    hasNotificationPermission: Boolean,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier
+            .fillMaxWidth()
+            .semantics(mergeDescendants = true) {},
+        shape = RoundedCornerShape(14.dp),
+        color = M3_SurfaceContainerLow,
+        border = BorderStroke(1.dp, M3_Primary.copy(alpha = 0.2f))
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.Notifications,
+                contentDescription = null,
+                tint = M3_Primary,
+                modifier = Modifier.size(18.dp)
+            )
+            Spacer(modifier = Modifier.width(10.dp))
+            Column {
+                Text(
+                    text = "Works in the background",
+                    color = M3_OnSurface,
+                    style = AppTypography.bodySmallBold
+                )
+                Text(
+                    text = backgroundWorkNoticeText(hasNotificationPermission),
+                    color = M3_OnSurfaceVariant,
+                    style = MaterialTheme.typography.labelSmall
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun DownloadSlmStepScreen(
     selectedSlm: SlmTier?,
     downloadState: ModelDownloader.DownloadState,
     isDownloading: Boolean,
+    hasNotificationPermission: Boolean,
     onDownload: () -> Unit
 ) {
     Column(
@@ -913,21 +964,17 @@ private fun DownloadSlmStepScreen(
                     " • Calculating..."
                 } else ""
 
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text(
-                        text = "$progressPercent%$speedText$etaText",
-                        color = M3_OnSurfaceVariant,
-                        style = AppTypography.eyebrowBold
-                    )
-                    Text(
-                        text = "Do not close the app",
-                        color = M3_OnSurfaceVariant,
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                }
+                Text(
+                    text = "$progressPercent%$speedText$etaText",
+                    color = M3_OnSurfaceVariant,
+                    style = AppTypography.eyebrowBold
+                )
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                BackgroundWorkNotice(
+                    hasNotificationPermission = hasNotificationPermission
+                )
             }
             Spacer(modifier = Modifier.height(16.dp))
         }
@@ -1310,7 +1357,8 @@ private fun SyncingStepScreen(
     transactionalCount: Int,
     parsedCount: Int,
     spendsTotal: Double,
-    recentTransactions: List<ExtractedTxPreview>
+    recentTransactions: List<ExtractedTxPreview>,
+    hasNotificationPermission: Boolean
 ) {
     Column(
         modifier = Modifier
@@ -1414,6 +1462,12 @@ private fun SyncingStepScreen(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.padding(horizontal = 16.dp)
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            BackgroundWorkNotice(
+                hasNotificationPermission = hasNotificationPermission
             )
 
             Spacer(modifier = Modifier.height(16.dp))

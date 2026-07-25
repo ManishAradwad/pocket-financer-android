@@ -1,18 +1,18 @@
 package com.pocketfinancer.ui.onboarding
 
 import android.content.Context
+import android.app.NotificationManager
 import android.os.Build
-import android.util.Log
 import androidx.core.content.ContextCompat
+import androidx.core.app.NotificationManagerCompat
 import android.content.pm.PackageManager
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.pocketfinancer.hardware.DeviceCapabilities
 import com.pocketfinancer.hardware.SlmTier
 import com.pocketfinancer.hardware.isPublishedModelArtifact
-import com.pocketfinancer.hardware.selectSlmForDevice
 import com.pocketfinancer.inference.ModelDownloader
 import com.pocketfinancer.inference.SlmModelStorage
+import com.pocketfinancer.pipeline.SmsNotificationHelper
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -61,7 +61,6 @@ data class OnboardingUiState(
 @HiltViewModel
 class OnboardingViewModel @Inject constructor(
     @ApplicationContext private val context: Context,
-    private val deviceCapabilities: DeviceCapabilities,
     private val modelStorage: SlmModelStorage,
     private val smsRepository: com.pocketfinancer.sms.SmsRepository,
     private val syncManager: OnboardingSyncManager
@@ -72,7 +71,7 @@ class OnboardingViewModel @Inject constructor(
 
     init {
         checkPermissions()
-        assessDeviceHardware()
+        selectStarterModel()
         checkModelDownloadStatus()
 
         // Sync manager state
@@ -121,14 +120,17 @@ class OnboardingViewModel @Inject constructor(
 
     fun checkPermissions() {
         val granted = smsRepository.hasPermissions()
-        val notifGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            ContextCompat.checkSelfPermission(
-                context,
-                android.Manifest.permission.POST_NOTIFICATIONS
-            ) == PackageManager.PERMISSION_GRANTED
-        } else {
-            true
-        }
+        val runtimeNotificationPermission =
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                ContextCompat.checkSelfPermission(
+                    context,
+                    android.Manifest.permission.POST_NOTIFICATIONS
+                ) == PackageManager.PERMISSION_GRANTED
+            } else {
+                true
+            }
+        val notifGranted =
+            runtimeNotificationPermission && progressNotificationsAvailable()
 
         _state.value = _state.value.copy(
             hasPermissions = granted,
@@ -160,14 +162,12 @@ class OnboardingViewModel @Inject constructor(
         )
     }
 
-    private fun assessDeviceHardware() {
-        try {
-            val slm = SlmTier.DEFAULT_ONBOARDING_SLM
-            _state.value = _state.value.copy(selectedSlm = slm)
-        } catch (e: Exception) {
-            Log.e("OnboardingViewModel", "Hardware assessment failed", e)
-            _state.value = _state.value.copy(selectedSlm = SlmTier.DEFAULT_ONBOARDING_SLM)
-        }
+    private fun selectStarterModel() {
+        // Onboarding deliberately optimizes time-to-first-use. Hardware-based
+        // quality upgrades are offered from Home after setup completes.
+        _state.value = _state.value.copy(
+            selectedSlm = SlmTier.DEFAULT_ONBOARDING_SLM
+        )
     }
 
     private fun checkModelDownloadStatus() {
@@ -194,5 +194,16 @@ class OnboardingViewModel @Inject constructor(
 
     private fun getModelFile(slm: SlmTier): File {
         return modelStorage.modelFile(slm.modelFile)
+    }
+
+    private fun progressNotificationsAvailable(): Boolean {
+        if (!NotificationManagerCompat.from(context).areNotificationsEnabled()) {
+            return false
+        }
+        val manager = context.getSystemService(NotificationManager::class.java)
+        val channel = manager?.getNotificationChannel(
+            SmsNotificationHelper.CHANNEL_ID
+        )
+        return channel == null || channel.importance != NotificationManager.IMPORTANCE_NONE
     }
 }

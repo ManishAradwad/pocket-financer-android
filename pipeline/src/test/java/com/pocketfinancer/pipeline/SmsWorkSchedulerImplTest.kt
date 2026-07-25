@@ -8,6 +8,8 @@ import androidx.work.ListenableWorker
 import androidx.work.OneTimeWorkRequest
 import androidx.work.Operation
 import androidx.work.WorkManager
+import io.mockk.coEvery
+import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkObject
@@ -230,6 +232,97 @@ class SmsWorkSchedulerImplTest {
 }
 
 class SmsParserWorkerPolicyTest {
+
+    @Test
+    fun `foreground admission pause maps to retry without starting sync`() {
+        val success = Any()
+        val retry = Any()
+        var started = false
+
+        val result = foldIncomingSmsQueueResult(
+            queueResult = IncomingSmsQueueResult.ADMISSION_PAUSED,
+            onQueuedTransaction = {
+                started = true
+                success
+            },
+            onIgnored = { success },
+            onAdmissionPaused = { retry }
+        )
+
+        assertSame(retry, result)
+        assertFalse(started)
+    }
+
+    @Test
+    fun `ignored foreground message remains terminal`() {
+        val success = Any()
+        val retry = Any()
+
+        val result = foldIncomingSmsQueueResult(
+            queueResult = IncomingSmsQueueResult.IGNORED,
+            onQueuedTransaction = { error("Ignored SMS must not start foreground sync") },
+            onIgnored = { success },
+            onAdmissionPaused = { retry }
+        )
+
+        assertSame(success, result)
+    }
+
+    @Test
+    fun `direct worker does not run while model maintenance owns admission`() = runTest {
+        val delegate = mockk<HomeSyncDelegate>()
+        val retry = Any()
+        var processed = false
+        coEvery { delegate.tryEnterSmsWorkerFlow() } returns null
+
+        val result = withSmsWorkerFlowAdmission(
+            delegate = delegate,
+            onAdmissionPaused = { retry }
+        ) {
+            processed = true
+            Any()
+        }
+
+        assertSame(retry, result)
+        assertFalse(processed)
+    }
+
+    @Test
+    fun `direct worker holds and releases admission across processing`() = runTest {
+        val delegate = mockk<HomeSyncDelegate>()
+        val flowLease = mockk<SmsWorkerFlowLease>()
+        coEvery { delegate.tryEnterSmsWorkerFlow() } returns flowLease
+        coEvery { flowLease.release() } returns Unit
+
+        val result = withSmsWorkerFlowAdmission(
+            delegate = delegate,
+            onAdmissionPaused = { error("Admission should be available") }
+        ) {
+            "processed"
+        }
+
+        assertEquals("processed", result)
+        coVerify(exactly = 1) { flowLease.release() }
+    }
+
+    @Test
+    fun `direct worker releases admission when processing fails`() = runTest {
+        val delegate = mockk<HomeSyncDelegate>()
+        val flowLease = mockk<SmsWorkerFlowLease>()
+        coEvery { delegate.tryEnterSmsWorkerFlow() } returns flowLease
+        coEvery { flowLease.release() } returns Unit
+
+        assertFailsWith<IllegalStateException> {
+            withSmsWorkerFlowAdmission(
+                delegate = delegate,
+                onAdmissionPaused = { error("Admission should be available") }
+            ) {
+                throw IllegalStateException("processing failed")
+            }
+        }
+
+        coVerify(exactly = 1) { flowLease.release() }
+    }
 
     @Test
     fun `persisted parser work is terminal when onboarding was reset`() {

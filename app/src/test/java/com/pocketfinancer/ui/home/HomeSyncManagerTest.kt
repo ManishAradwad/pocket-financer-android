@@ -2,6 +2,7 @@ package com.pocketfinancer.ui.home
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.util.Log
 import com.pocketfinancer.SlmAppFlowCoordinator
 import com.pocketfinancer.data.repository.AccountRepository
 import com.pocketfinancer.data.repository.TransactionRepository
@@ -16,6 +17,7 @@ import com.pocketfinancer.inference.SlmRuntime
 import com.pocketfinancer.inference.SlmRuntimeOwner
 import com.pocketfinancer.inference.SlmRuntimeState
 import com.pocketfinancer.pipeline.ExtractionParser
+import com.pocketfinancer.pipeline.IncomingSmsQueueResult
 import com.pocketfinancer.pipeline.PromptBuilder
 import com.pocketfinancer.pipeline.SlmProcessingPreferences
 import com.pocketfinancer.pipeline.SmsFilterPipeline
@@ -24,12 +26,12 @@ import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.mockkStatic
+import io.mockk.unmockkStatic
 import java.io.File
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class HomeSyncManagerTest {
@@ -39,6 +41,8 @@ class HomeSyncManagerTest {
         val modelDirectory = createTempDir(prefix = "home-sync-models")
         val modelFile = File(modelDirectory, SlmTier.QWEN3_0_6B_Q8_0.modelFile)
         modelFile.writeBytes(byteArrayOf(1))
+        mockkStatic(Log::class)
+        every { Log.i(any(), any()) } returns 0
         try {
             val context = mockk<Context>()
             val sharedPreferences = mockk<SharedPreferences>()
@@ -126,13 +130,33 @@ class HomeSyncManagerTest {
             coVerify(exactly = 1) { lease.release() }
 
             assertEquals(HomeSyncState.Status.DONE, manager.syncState.value.status)
-            val admittedAfterCompletion = manager.queueIncomingSms(
+            val queuedAfterCompletion = manager.queueIncomingSms(
                 address = "AX-HDFCBK",
                 body = "Rs.900 debited from a/c XX0000",
                 date = 3000L
             )
-            assertTrue(admittedAfterCompletion)
+            assertEquals(
+                IncomingSmsQueueResult.QUEUED_TRANSACTION,
+                queuedAfterCompletion
+            )
             assertEquals(HomeSyncState.Status.IDLE, manager.syncState.value.status)
+
+            val duplicateResult = manager.queueIncomingSms(
+                address = "AX-HDFCBK",
+                body = "Rs.900 debited from a/c XX0000",
+                date = 3000L
+            )
+            assertEquals(IncomingSmsQueueResult.IGNORED, duplicateResult)
+
+            val nonTransactionResult = manager.queueIncomingSms(
+                address = "VK-SHOP",
+                body = "Your OTP is 123456. Do not share it.",
+                date = 3500L
+            )
+            assertEquals(
+                IncomingSmsQueueResult.IGNORED,
+                nonTransactionResult
+            )
 
             val queueBeforePause = manager.syncState.value.queue
             val pause = appFlowCoordinator.tryPauseAndDrain(
@@ -143,10 +167,14 @@ class HomeSyncManagerTest {
                 body = "Rs.1,100 debited from a/c XX0000",
                 date = 4000L
             )
-            assertFalse(admittedDuringReset)
+            assertEquals(
+                IncomingSmsQueueResult.ADMISSION_PAUSED,
+                admittedDuringReset
+            )
             assertEquals(queueBeforePause, manager.syncState.value.queue)
             pause!!.release()
         } finally {
+            unmockkStatic(Log::class)
             modelDirectory.deleteRecursively()
         }
     }

@@ -205,6 +205,59 @@ class OnboardingRunGenerationStoreTest {
         assertEquals(state.downloadState.error, state.modelLoadError)
     }
 
+    @Test
+    fun `cancellation is terminal only after service cleanup completes`() {
+        val manager = managerBackedBy(5L)
+        manager.updateState {
+            it.copy(
+                isRunning = true,
+                isCancelling = true,
+                isCancellationAllowed = false,
+                runPurpose = OnboardingSyncManager.RunPurpose.MODEL_UPGRADE,
+                step = OnboardingStep.DOWNLOAD_SLM,
+                isDownloading = true,
+                syncMessage = "Cancelling model upgrade...",
+                downloadState = ModelDownloader.DownloadState(
+                    isDownloading = true,
+                    progress = 0.4f,
+                    downloadedMb = 400f,
+                    totalMb = 1_000f
+                )
+            )
+        }
+
+        assertTrue(manager.syncState.value.isRunning)
+        manager.completeCancellationIfRequested()
+
+        val state = manager.syncState.value
+        assertFalse(state.isRunning)
+        assertFalse(state.isCancelling)
+        assertFalse(state.isDownloading)
+        assertFalse(state.downloadState.isDownloading)
+        assertEquals(0.4f, state.downloadState.progress)
+        assertEquals("Cancelled", state.syncMessage)
+    }
+
+    @Test
+    fun `durable model commit closes cancellation before preferences change`() {
+        val manager = managerBackedBy(5L)
+        manager.updateState {
+            it.copy(
+                isRunning = true,
+                isCancellationAllowed = true,
+                runPurpose = OnboardingSyncManager.RunPurpose.MODEL_UPGRADE
+            )
+        }
+
+        assertTrue(manager.tryBeginModelUpgradeCommit())
+        assertFalse(manager.syncState.value.isCancellationAllowed)
+        assertEquals(
+            "Finishing model activation...",
+            manager.syncState.value.syncMessage
+        )
+        assertFalse(manager.tryBeginModelUpgradeCommit())
+    }
+
     private fun managerBackedBy(generation: Long): OnboardingSyncManager =
         OnboardingSyncManager(
             runGenerationStore = storeBackedBy(AtomicLong(generation)),

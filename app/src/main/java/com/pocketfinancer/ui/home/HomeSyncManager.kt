@@ -15,6 +15,7 @@ import com.pocketfinancer.inference.SlmModelStorage
 import com.pocketfinancer.inference.SlmRuntime
 import com.pocketfinancer.inference.SlmRuntimeOwner
 import com.pocketfinancer.pipeline.ExtractionParser
+import com.pocketfinancer.pipeline.IncomingSmsQueueResult
 import com.pocketfinancer.pipeline.PromptBuilder
 import com.pocketfinancer.pipeline.SlmProcessingPreferences
 import com.pocketfinancer.pipeline.SmsFilterPipeline
@@ -135,8 +136,11 @@ class HomeSyncManager @Inject constructor(
     @Suppress("UNUSED_PARAMETER")
     suspend fun executeSync(serviceContext: Context) = withContext(Dispatchers.IO) {
         executionMutex.withLock {
-            val flowLease = appFlowCoordinator.tryEnter(SlmRuntimeOwner.HOME_SYNC)
-                ?: return@withLock
+            // SyncService is already a foreground service. Wait through the
+            // short selected-model handoff instead of returning and posting a
+            // false completion while queued incoming SMS remain unprocessed.
+            val flowLease =
+                appFlowCoordinator.enterWhenAvailable(SlmRuntimeOwner.HOME_SYNC)
             try {
                 val onboardingComplete = context
                     .getSharedPreferences(APP_SETTINGS, Context.MODE_PRIVATE)
@@ -371,27 +375,29 @@ class HomeSyncManager @Inject constructor(
         address: String,
         body: String,
         date: Long
-    ): Boolean = withContext(Dispatchers.IO) {
+    ): IncomingSmsQueueResult = withContext(Dispatchers.IO) {
         val flowLease = appFlowCoordinator.tryEnter(SlmRuntimeOwner.HOME_SYNC)
-            ?: return@withContext false
+            ?: return@withContext IncomingSmsQueueResult.ADMISSION_PAUSED
         try {
             val onboardingComplete = context
                 .getSharedPreferences(APP_SETTINGS, Context.MODE_PRIVATE)
                 .getBoolean(ONBOARDING_COMPLETED, false)
-            if (!onboardingComplete) return@withContext false
+            if (!onboardingComplete) {
+                return@withContext IncomingSmsQueueResult.IGNORED
+            }
             val isTransaction = smsFilterPipeline.isTransactional(address, body)
             if (transactionRepository.exists(address, date)) {
                 Log.i(
                     TAG,
                     "Transaction for incoming SMS from $address at $date already exists. Skipping."
                 )
-                return@withContext false
+                return@withContext IncomingSmsQueueResult.IGNORED
             }
 
             val queue = _syncState.value.queue.toMutableList()
             if (queue.any { it.sender == address && it.date == date }) {
                 Log.i(TAG, "Incoming SMS from $address at $date already queued. Skipping.")
-                return@withContext false
+                return@withContext IncomingSmsQueueResult.IGNORED
             }
             queue += SyncSmsItem(
                 id = UUID.randomUUID().toString(),
@@ -414,7 +420,11 @@ class HomeSyncManager @Inject constructor(
             } else {
                 currentState.copy(queue = queue)
             }
-            isTransaction
+            if (isTransaction) {
+                IncomingSmsQueueResult.QUEUED_TRANSACTION
+            } else {
+                IncomingSmsQueueResult.IGNORED
+            }
         } finally {
             withContext(NonCancellable) {
                 flowLease.release()

@@ -8,6 +8,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.nio.file.FileAlreadyExistsException
 import java.nio.file.Files
+import java.util.IdentityHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CancellationException
@@ -69,8 +70,11 @@ class ModelDownloader {
     // even if two UI/service callers reach it at the same time.
     private val downloadMutex = Mutex()
 
-    @Volatile
-    private var downloadJob: Job? = null
+    // Identity, rather than Job equality, is the cancellation authority. A
+    // request is registered before waiting on downloadMutex so a queued owner
+    // can cancel itself without affecting the active owner.
+    private val requestJobsLock = Any()
+    private val requestJobs = IdentityHashMap<Job, Int>()
 
     /**
      * Download [url] to [destFile] without ever writing to [destFile].
@@ -81,80 +85,78 @@ class ModelDownloader {
      * remains in `<filename>.part` for a later resume.
      */
     suspend fun download(url: String, destFile: File): Result<String> =
-        downloadMutex.withLock {
-            withContext(Dispatchers.IO) {
-                val currentJob = currentCoroutineContext()[Job]
-                downloadJob = currentJob
-                _state.value = DownloadState(isDownloading = true, progress = 0f)
+        withDownloadRequest {
+            downloadMutex.withLock {
+                withContext(Dispatchers.IO) {
+                    _state.value = DownloadState(isDownloading = true, progress = 0f)
 
-                try {
-                    val finalFile = destFile.absoluteFile
-                    val parent = finalFile.parentFile
-                        ?: throw IOException("Model destination has no parent directory.")
-                    if (!parent.exists() && !parent.mkdirs() && !parent.isDirectory) {
-                        throw IOException("Could not create model directory: ${parent.absolutePath}")
-                    }
-                    if (!parent.isDirectory) {
-                        throw IOException("Model destination parent is not a directory.")
-                    }
+                    try {
+                        val finalFile = destFile.absoluteFile
+                        val parent = finalFile.parentFile
+                            ?: throw IOException("Model destination has no parent directory.")
+                        if (!parent.exists() && !parent.mkdirs() && !parent.isDirectory) {
+                            throw IOException(
+                                "Could not create model directory: ${parent.absolutePath}"
+                            )
+                        }
+                        if (!parent.isDirectory) {
+                            throw IOException("Model destination parent is not a directory.")
+                        }
 
-                    val partFile = File(parent, "${finalFile.name}.part")
-                    val remoteSize = fetchContentLength(url)
+                        val partFile = File(parent, "${finalFile.name}.part")
+                        val remoteSize = fetchContentLength(url)
 
-                    existingFinalResult(finalFile, remoteSize)?.let { existing ->
-                        _state.value = completedState(finalFile, finalFile.length())
-                        return@withContext Result.success(existing)
-                    }
+                        existingFinalResult(finalFile, remoteSize)?.let { existing ->
+                            _state.value = completedState(finalFile, finalFile.length())
+                            return@withContext Result.success(existing)
+                        }
 
-                    if (finalFile.exists()) {
-                        throw existingArtifactError(finalFile, remoteSize)
-                    }
+                        if (finalFile.exists()) {
+                            throw existingArtifactError(finalFile, remoteSize)
+                        }
 
-                    val startByte = when {
-                        !partFile.exists() -> 0L
-                        remoteSize > 0L && partFile.length() <= remoteSize ->
-                            partFile.length()
-                        remoteSize <= 0L -> partFile.length()
-                        // A partial artifact is disposable; a final artifact is
-                        // not. A response from byte zero safely refreshes only
-                        // this private staging path.
-                        else -> 0L
-                    }
+                        val startByte = when {
+                            !partFile.exists() -> 0L
+                            remoteSize > 0L && partFile.length() <= remoteSize ->
+                                partFile.length()
+                            remoteSize <= 0L -> partFile.length()
+                            // A partial artifact is disposable; a final artifact is
+                            // not. A response from byte zero safely refreshes only
+                            // this private staging path.
+                            else -> 0L
+                        }
 
-                    if (remoteSize > 0L && startByte == remoteSize) {
+                        if (remoteSize > 0L && startByte == remoteSize) {
+                            promoteCompletedPart(partFile, finalFile)
+                            _state.value = completedState(finalFile, remoteSize)
+                            return@withContext Result.success(finalFile.absolutePath)
+                        }
+
+                        val totalBytes = performDownload(
+                            urlStr = url,
+                            partFile = partFile,
+                            expectedTotalBytes = remoteSize,
+                            requestedStartByte = startByte
+                        )
+                        currentCoroutineContext().ensureActive()
                         promoteCompletedPart(partFile, finalFile)
-                        _state.value = completedState(finalFile, remoteSize)
-                        return@withContext Result.success(finalFile.absolutePath)
-                    }
-
-                    val totalBytes = performDownload(
-                        urlStr = url,
-                        partFile = partFile,
-                        expectedTotalBytes = remoteSize,
-                        requestedStartByte = startByte
-                    )
-                    currentCoroutineContext().ensureActive()
-                    promoteCompletedPart(partFile, finalFile)
-                    _state.value = completedState(finalFile, totalBytes)
-                    Result.success(finalFile.absolutePath)
-                } catch (cancelled: CancellationException) {
-                    // Deliberately retain the `.part` artifact for resumption.
-                    _state.value = DownloadState(error = "Download cancelled")
-                    throw cancelled
-                } catch (error: IOException) {
-                    _state.value = DownloadState(
-                        error = error.message?.let { "Download failed: $it" }
-                            ?: "Download failed"
-                    )
-                    Result.failure(error)
-                } catch (error: Exception) {
-                    _state.value = DownloadState(
-                        error = "Download failed: ${error.message}"
-                    )
-                    Result.failure(error)
-                } finally {
-                    if (downloadJob === currentJob) {
-                        downloadJob = null
+                        _state.value = completedState(finalFile, totalBytes)
+                        Result.success(finalFile.absolutePath)
+                    } catch (cancelled: CancellationException) {
+                        // Deliberately retain the `.part` artifact for resumption.
+                        _state.value = DownloadState(error = "Download cancelled")
+                        throw cancelled
+                    } catch (error: IOException) {
+                        _state.value = DownloadState(
+                            error = error.message?.let { "Download failed: $it" }
+                                ?: "Download failed"
+                        )
+                        Result.failure(error)
+                    } catch (error: Exception) {
+                        _state.value = DownloadState(
+                            error = "Download failed: ${error.message}"
+                        )
+                        Result.failure(error)
                     }
                 }
             }
@@ -173,24 +175,62 @@ class ModelDownloader {
     suspend fun prepareForNativeValidation(
         url: String,
         destFile: File
-    ): Result<String> {
-        val cached = downloadMutex.withLock {
-            withContext(Dispatchers.IO) {
-                val finalFile = destFile.absoluteFile
-                if (finalFile.isFile && finalFile.length() > 0L) {
-                    _state.value = completedState(finalFile, finalFile.length())
-                    Result.success(finalFile.absolutePath)
+    ): Result<String> =
+        withDownloadRequest {
+            val cached = downloadMutex.withLock {
+                withContext(Dispatchers.IO) {
+                    val finalFile = destFile.absoluteFile
+                    if (finalFile.isFile && finalFile.length() > 0L) {
+                        _state.value = completedState(finalFile, finalFile.length())
+                        Result.success(finalFile.absolutePath)
+                    } else {
+                        null
+                    }
+                }
+            }
+            cached ?: download(url, destFile)
+        }
+
+    /**
+     * Cancels only the coroutine that owns a download request.
+     *
+     * [ownerJob] must be the exact non-null [Job] in the calling coroutine's
+     * context (normally the value returned by its `launch`). It is cancelled
+     * only while it is executing or waiting for [download] or
+     * [prepareForNativeValidation]. This also cancels a request waiting on
+     * [downloadMutex], without touching the active request owned by another
+     * caller. An active request retains its `.part` artifact for resumption.
+     */
+    fun cancel(ownerJob: Job) {
+        synchronized(requestJobsLock) {
+            if (requestJobs.containsKey(ownerJob)) {
+                ownerJob.cancel(
+                    CancellationException("Model download cancelled by its owner")
+                )
+            }
+        }
+    }
+
+    private suspend fun <T> withDownloadRequest(
+        block: suspend () -> T
+    ): T {
+        val ownerJob = currentCoroutineContext()[Job]
+            ?: error("A model download requires a coroutine Job.")
+        synchronized(requestJobsLock) {
+            requestJobs[ownerJob] = (requestJobs[ownerJob] ?: 0) + 1
+        }
+        try {
+            return block()
+        } finally {
+            synchronized(requestJobsLock) {
+                val remainingRegistrations = (requestJobs[ownerJob] ?: 1) - 1
+                if (remainingRegistrations == 0) {
+                    requestJobs.remove(ownerJob)
                 } else {
-                    null
+                    requestJobs[ownerJob] = remainingRegistrations
                 }
             }
         }
-        return cached ?: download(url, destFile)
-    }
-
-    /** Cancels the one active download. A caller waiting on the mutex is not affected. */
-    fun cancel() {
-        downloadJob?.cancel()
     }
 
     private fun existingFinalResult(finalFile: File, remoteSize: Long): String? =

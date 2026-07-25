@@ -13,6 +13,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.withContext
 
@@ -39,8 +40,9 @@ interface SlmAppFlowPause {
  *
  * Native operations are still serialized by [com.pocketfinancer.inference.SlmRuntime].
  * This coordinator covers the larger app workflow (scanning, inference, and
- * persistence), allowing destructive reset to atomically stop admission,
- * cancel every admitted workflow, and wait for their cleanup to finish.
+ * persistence). It lets destructive reset atomically cancel/drain all work,
+ * and lets selected-model upgrades pause admission while older snapshots
+ * finish naturally before the durable model handoff.
  */
 @Singleton
 class SlmAppFlowCoordinator @Inject constructor() {
@@ -75,6 +77,20 @@ class SlmAppFlowCoordinator @Inject constructor() {
     }
 
     /**
+     * Waits through a temporary maintenance pause, then atomically admits the
+     * workflow. Intended for already-running foreground services that must not
+     * falsely report completion merely because a short model handoff owns the
+     * gate.
+     */
+    suspend fun enterWhenAvailable(owner: SlmRuntimeOwner): SlmAppFlowLease {
+        while (true) {
+            currentCoroutineContext().ensureActive()
+            tryEnter(owner)?.let { return it }
+            state.first { appState -> !appState.admissionPaused }
+        }
+    }
+
+    /**
      * Atomically pauses admission, then cancels and joins every flow that was
      * admitted before the pause. Returns null if another pause already owns the
      * gate. If the acquiring coroutine is cancelled while draining, cleanup is
@@ -102,6 +118,50 @@ class SlmAppFlowCoordinator @Inject constructor() {
                 }
                 jobs.joinAll()
             }
+            currentCoroutineContext().ensureActive()
+            val lease = PauseLease(token, owner, ::releasePause)
+            handedOff = true
+            return lease
+        } finally {
+            if (!handedOff) {
+                withContext(NonCancellable) {
+                    releasePause(token)
+                }
+            }
+        }
+    }
+
+    /**
+     * Blocks new workflow admission and waits for every already-admitted flow
+     * except the caller to finish naturally.
+     *
+     * This is the selected-model handoff boundary: old-model work admitted
+     * before the boundary finishes with its immutable snapshot, no new work
+     * can resolve the old persisted selection, and the caller can then load and
+     * durably commit the new selection without producing conflicting leases.
+     */
+    suspend fun tryPauseAdmissionAndDrainOthers(
+        owner: SlmRuntimeOwner
+    ): SlmAppFlowPause? {
+        val caller = currentCoroutineContext()[Job]
+            ?: error("An app SLM flow pause must run in a coroutine Job")
+        val token = nextId.getAndIncrement()
+        val jobs = synchronized(lock) {
+            if (pause != null) return null
+            check(active.values.any { it.job === caller }) {
+                "Only an admitted app SLM flow can drain other workflows"
+            }
+            pause = ActivePause(token, owner)
+            publishLocked()
+            active.values
+                .map { it.job }
+                .filter { it !== caller }
+                .distinct()
+        }
+
+        var handedOff = false
+        try {
+            jobs.joinAll()
             currentCoroutineContext().ensureActive()
             val lease = PauseLease(token, owner, ::releasePause)
             handedOff = true

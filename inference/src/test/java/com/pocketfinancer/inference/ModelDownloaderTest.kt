@@ -8,6 +8,8 @@ import java.net.URL
 import java.nio.file.Files
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -134,7 +136,7 @@ class ModelDownloaderTest {
     }
 
     @Test
-    fun `cancellation retains partial and never publishes final`() = runBlocking {
+    fun `active owner cancellation retains partial and never publishes final`() = runBlocking {
         val remote = "resumable-model".toByteArray()
         val initialPart = remote.copyOfRange(0, 5)
         val final = File(testDirectory, "model.gguf")
@@ -153,14 +155,85 @@ class ModelDownloaderTest {
         }
         assertTrue(blockingInput.readEntered.await(5, TimeUnit.SECONDS))
 
-        downloader.cancel()
+        downloader.cancel(download)
         blockingInput.allowRead.countDown()
         download.join()
 
+        assertTrue(download.isCancelled)
         assertFalse(final.exists())
         assertArrayEquals(initialPart, part.readBytes())
         assertEquals("Download cancelled", downloader.state.value.error)
     }
+
+    @Test
+    fun `cancelling queued upgrade does not cancel active settings download`() = runBlocking {
+        val remote = "settings-owned-model".toByteArray()
+        val settingsFinal = File(testDirectory, "settings-model.gguf")
+        val upgradeFinal = File(testDirectory, "upgrade-model.gguf")
+        val blockingInput = BlockingInputStream(remote)
+        val downloader = ModelDownloader(
+            FakeServer(
+                remoteBytes = remote,
+                inputFactory = { blockingInput }
+            )
+        )
+
+        val settingsDownload = launch(Dispatchers.Default) {
+            downloader.download(TEST_URL, settingsFinal)
+        }
+        assertTrue(blockingInput.readEntered.await(5, TimeUnit.SECONDS))
+
+        // UNDISPATCHED reaches the locked mutex before returning, proving this
+        // request is queued behind the Settings-owned download.
+        val queuedUpgrade = launch(
+            context = Dispatchers.Default,
+            start = CoroutineStart.UNDISPATCHED
+        ) {
+            downloader.prepareForNativeValidation(TEST_URL, upgradeFinal)
+        }
+
+        try {
+            downloader.cancel(queuedUpgrade)
+            queuedUpgrade.join()
+
+            assertTrue(queuedUpgrade.isCancelled)
+            assertTrue(settingsDownload.isActive)
+            assertTrue(downloader.state.value.isDownloading)
+            assertFalse(settingsFinal.exists())
+            assertFalse(upgradeFinal.exists())
+        } finally {
+            blockingInput.allowRead.countDown()
+        }
+        settingsDownload.join()
+
+        assertArrayEquals(remote, settingsFinal.readBytes())
+        assertFalse(upgradeFinal.exists())
+        assertTrue(downloader.state.value.isComplete)
+    }
+
+    @Test
+    fun `cancellation token stops owning job only while downloader request is pending`() =
+        runBlocking {
+            val remote = "completed-model".toByteArray()
+            val final = File(testDirectory, "completed-model.gguf")
+            val requestCompleted = CompletableDeferred<Unit>()
+            val finishOwnerWork = CompletableDeferred<Unit>()
+            val downloader = ModelDownloader(FakeServer(remote))
+
+            val ownerJob = launch(Dispatchers.Default) {
+                downloader.download(TEST_URL, final)
+                requestCompleted.complete(Unit)
+                finishOwnerWork.await()
+            }
+            requestCompleted.await()
+
+            downloader.cancel(ownerJob)
+
+            assertTrue(ownerJob.isActive)
+            finishOwnerWork.complete(Unit)
+            ownerJob.join()
+            assertFalse(ownerJob.isCancelled)
+        }
 
     @Test
     fun `final appearing before promotion is preserved and partial remains`() = runBlocking {

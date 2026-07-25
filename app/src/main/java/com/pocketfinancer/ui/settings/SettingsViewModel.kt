@@ -280,7 +280,7 @@ class SettingsViewModel @Inject constructor(
     }
 
     fun cancelDownload() {
-        modelDownloader.cancel()
+        downloadJob?.let(modelDownloader::cancel)
     }
 
     fun loadSelectedModel() {

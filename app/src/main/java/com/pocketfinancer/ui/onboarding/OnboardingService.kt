@@ -40,6 +40,8 @@ class OnboardingService : Service() {
     companion object {
         private const val TAG = "OnboardingService"
         private const val NOTIFICATION_ID = 10001
+        private const val TERMINAL_NOTIFICATION_ID = 10002
+        private const val TERMINAL_NOTIFICATION_TIMEOUT_MS = 5_000L
     }
 
     @Inject
@@ -99,11 +101,20 @@ class OnboardingService : Service() {
 
         val slmId = intent?.getStringExtra("EXTRA_SLM_ID")
         val slm = SlmTier.ALL_TIERS.find { it.id == slmId } ?: SlmTier.DEFAULT_ONBOARDING_SLM
+        val runPurpose = intent
+            ?.getStringExtra(OnboardingSyncManager.EXTRA_RUN_PURPOSE)
+            ?.let { value ->
+                OnboardingSyncManager.RunPurpose.entries
+                    .firstOrNull { it.name == value }
+            }
+            ?: OnboardingSyncManager.RunPurpose.INITIAL_SETUP
 
-        Log.i(TAG, "Starting onboarding for SLM: ${slm.name}")
+        getSystemService(NotificationManager::class.java)
+            .cancel(TERMINAL_NOTIFICATION_ID)
+        Log.i(TAG, "Starting $runPurpose for SLM: ${slm.name}")
 
         // Start Foreground immediately to satisfy OS requirements
-        val initialNotification = buildInitialNotification(slm)
+        val initialNotification = buildInitialNotification(slm, runPurpose)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
                 NOTIFICATION_ID,
@@ -129,17 +140,42 @@ class OnboardingService : Service() {
         // request. Starting a replacement before the old JNI call returned
         // would allow two onboarding workflows to race over model residency.
         workJob?.cancel()
-        workJob = serviceScope.launch {
+        val launchedJob = serviceScope.launch {
             workflowMutex.withLock {
-                val flowLease = appFlowCoordinator.tryEnter(SlmRuntimeOwner.ONBOARDING)
+                val flowOwner = when (runPurpose) {
+                    OnboardingSyncManager.RunPurpose.INITIAL_SETUP ->
+                        SlmRuntimeOwner.ONBOARDING
+                    OnboardingSyncManager.RunPurpose.MODEL_UPGRADE ->
+                        SlmRuntimeOwner.MODEL_UPGRADE
+                }
+                val flowLease = appFlowCoordinator.tryEnter(flowOwner)
                 if (flowLease == null) {
-                    Log.i(TAG, "Onboarding start rejected while app-flow admission is paused")
-                    syncManager.updateState { it.copy(isRunning = false) }
+                    Log.i(TAG, "$runPurpose start rejected while app-flow admission is paused")
+                    syncManager.updateState {
+                        it.copy(
+                            isRunning = false,
+                            isCancelling = false,
+                            isCancellationAllowed = false,
+                            isDownloading = false,
+                            modelLoadError = if (
+                                runPurpose ==
+                                    OnboardingSyncManager.RunPurpose.MODEL_UPGRADE
+                            ) {
+                                "Model upgrade is temporarily paused while other model maintenance completes."
+                            } else {
+                                "Onboarding start is paused while reset completes."
+                            }
+                        )
+                    }
+                    showTerminalNotification(
+                        title = "Model Work Paused",
+                        text = "Open Pocket Financer to try again."
+                    )
                     stopSelfResult(startId)
                     return@withLock
                 }
                 try {
-                    runOnboardingWorkflow(slm)
+                    runOnboardingWorkflow(slm, runPurpose)
                 } catch (e: CancellationException) {
                     Log.i(TAG, "Onboarding workflow cancelled")
                 } catch (e: Exception) {
@@ -147,9 +183,23 @@ class OnboardingService : Service() {
                     syncManager.updateState {
                         it.copy(
                             modelLoadError = e.message ?: "Unknown service error",
-                            isRunning = false
+                            isRunning = false,
+                            isCancelling = false,
+                            isCancellationAllowed = false,
+                            isDownloading = false
                         )
                     }
+                    showTerminalNotification(
+                        title = if (
+                            runPurpose ==
+                                OnboardingSyncManager.RunPurpose.MODEL_UPGRADE
+                        ) {
+                            "AI Model Upgrade Failed"
+                        } else {
+                            "Pocket Financer Setup Paused"
+                        },
+                        text = "Open Pocket Financer to try again."
+                    )
                 } finally {
                     withContext(NonCancellable) {
                         flowLease.release()
@@ -158,6 +208,14 @@ class OnboardingService : Service() {
                     // replacement workflow that is waiting on the mutex.
                     stopSelfResult(startId)
                 }
+            }
+        }
+        workJob = launchedJob
+        launchedJob.invokeOnCompletion {
+            // Also covers cancellation before the coroutine first runs. A
+            // replaced older start cannot finish cancellation for its successor.
+            if (workJob === launchedJob) {
+                syncManager.completeCancellationIfRequested()
             }
         }
 
@@ -195,11 +253,65 @@ class OnboardingService : Service() {
         }
     }
 
-    private fun buildInitialNotification(slm: SlmTier): Notification {
+    /**
+     * Ends foreground progress immediately, then posts a short-lived,
+     * dismissible result without a progress bar. Keeping the terminal result
+     * on a separate ID prevents service destruction from reviving or retaining
+     * the old ongoing foreground notification.
+     */
+    private suspend fun showTerminalNotification(
+        title: String,
+        text: String
+    ) {
+        lastNotificationTitle = title
+        lastNotificationText = text
+        lastNotificationProgress = 1f
+
+        withContext(Dispatchers.Main) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            val notification = NotificationCompat.Builder(
+                this@OnboardingService,
+                SmsNotificationHelper.CHANNEL_ID
+            )
+                .setSmallIcon(android.R.drawable.stat_sys_download_done)
+                .setContentTitle(title)
+                .setContentText(text)
+                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .setOngoing(false)
+                .setAutoCancel(true)
+                .setOnlyAlertOnce(true)
+                .setProgress(0, 0, false)
+                .setTimeoutAfter(TERMINAL_NOTIFICATION_TIMEOUT_MS)
+                .setContentIntent(getAppPendingIntent())
+                .build()
+
+            runCatching {
+                getSystemService(NotificationManager::class.java)
+                    .notify(TERMINAL_NOTIFICATION_ID, notification)
+            }.onFailure { error ->
+                Log.w(TAG, "Could not post terminal model-work notification", error)
+            }
+        }
+    }
+
+    private fun buildInitialNotification(
+        slm: SlmTier,
+        runPurpose: OnboardingSyncManager.RunPurpose
+    ): Notification {
+        val title = when (runPurpose) {
+            OnboardingSyncManager.RunPurpose.INITIAL_SETUP ->
+                "Preparing Onboarding"
+            OnboardingSyncManager.RunPurpose.MODEL_UPGRADE ->
+                "Preparing AI Model Upgrade"
+        }
+        val text = "Preparing ${slm.name}..."
+        lastNotificationTitle = title
+        lastNotificationText = text
+        lastNotificationProgress = 0f
         return NotificationCompat.Builder(this, SmsNotificationHelper.CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_sys_download)
-            .setContentTitle("Preparing Onboarding")
-            .setContentText("Initializing local SLM engine for ${slm.name}...")
+            .setContentTitle(title)
+            .setContentText(text)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setOngoing(true)
             .setAutoCancel(false)
@@ -259,7 +371,10 @@ class OnboardingService : Service() {
         }
     }
 
-    private suspend fun runOnboardingWorkflow(slm: SlmTier) {
+    private suspend fun runOnboardingWorkflow(
+        slm: SlmTier,
+        runPurpose: OnboardingSyncManager.RunPurpose
+    ) {
         val destFile = getModelFile(slm)
 
         // 1. Use an immutable cached final artifact or download through the
@@ -311,6 +426,17 @@ class OnboardingService : Service() {
                 errorMessage = errorMsg,
                 terminalDownloadState = modelDownloader.state.value
             )
+            showTerminalNotification(
+                title = if (
+                    runPurpose ==
+                        OnboardingSyncManager.RunPurpose.MODEL_UPGRADE
+                ) {
+                    "AI Model Download Paused"
+                } else {
+                    "Setup Download Paused"
+                },
+                text = "Open Pocket Financer to retry."
+            )
             return
         }
 
@@ -318,9 +444,110 @@ class OnboardingService : Service() {
         // `step`, so this also removes the Download action before sync starts.
         syncManager.modelPreparationCompleted(destFile)
 
-        // 2. Perform syncing phase
-        Log.i(TAG, "Starting sync phase...")
-        runOnboardingSync(slm, destFile)
+        when (runPurpose) {
+            OnboardingSyncManager.RunPurpose.INITIAL_SETUP -> {
+                // Initial setup continues into the one-time inbox scan.
+                Log.i(TAG, "Starting sync phase...")
+                runOnboardingSync(slm, destFile)
+            }
+            OnboardingSyncManager.RunPurpose.MODEL_UPGRADE -> {
+                // A post-onboarding model upgrade must not unexpectedly re-run
+                // the historical SMS import. Native loading and durable
+                // selection are the complete consistency boundary.
+                Log.i(TAG, "Activating model upgrade...")
+                activateModelUpgrade(slm)
+            }
+        }
+    }
+
+    private suspend fun activateModelUpgrade(slm: SlmTier) {
+        syncManager.updateState {
+            it.copy(
+                step = OnboardingStep.SYNCING,
+                syncProgress = 0.94f,
+                syncMessage = "Waiting for active AI work to finish...",
+                modelLoadError = null
+            )
+        }
+        runOnWorkflowProgress(
+            title = "Upgrading Local AI Model",
+            text = "Waiting for active AI work to finish...",
+            progress = 0.94f
+        )
+
+        // Downloading may coexist with foreground/background extraction. The
+        // persisted model selection changes only after every already-admitted
+        // workflow finishes, while this pause blocks new workflows from
+        // resolving the old selection. One extraction therefore never runs
+        // partly against the old model and partly against the new model.
+        val admissionPause = checkNotNull(
+            appFlowCoordinator.tryPauseAdmissionAndDrainOthers(
+                SlmRuntimeOwner.MODEL_UPGRADE
+            )
+        ) {
+            "Another model maintenance operation is already in progress"
+        }
+
+        var provisionalPin: com.pocketfinancer.ProvisionalSelectedModelPin? = null
+        try {
+            syncManager.updateState {
+                it.copy(
+                    syncProgress = 0.96f,
+                    syncMessage = "Activating ${slm.name}..."
+                )
+            }
+            runOnWorkflowProgress(
+                title = "Upgrading Local AI Model",
+                text = "Validating and activating ${slm.name}...",
+                progress = 0.96f
+            )
+
+            val spec = slm.toModelSpec(
+                modelStorage,
+                deviceCapabilities.assessDevice()
+            )
+            val handoff = selectedModelResidency.beginProvisionalPin(
+                spec = spec,
+                persistedFallback = resolvePersistedSelectedModelSpec()
+            )
+            provisionalPin = handoff
+            if (!syncManager.tryBeginModelUpgradeCommit()) {
+                throw CancellationException(
+                    "Model upgrade cancellation won before durable commit"
+                )
+            }
+            val committed = withContext(NonCancellable) {
+                handoff.commit {
+                    persistSelectedModel(slm)
+                }
+            }
+            check(committed) {
+                "Selected-model ownership changed before the upgrade completed"
+            }
+
+            syncManager.updateState {
+                it.copy(
+                    step = OnboardingStep.COMPLETED,
+                    isRunning = false,
+                    isCancelling = false,
+                    isCancellationAllowed = false,
+                    isDownloading = false,
+                    isModelLoaded = true,
+                    syncProgress = 1f,
+                    syncMessage = "${slm.name} is ready",
+                    modelLoadError = null
+                )
+            }
+            showTerminalNotification(
+                title = "AI Model Upgrade Complete",
+                text = "${slm.name} is ready to use."
+            )
+        } finally {
+            withContext(NonCancellable) {
+                provisionalPin?.rollbackUnlessCommitted()
+                admissionPause.release()
+            }
+        }
     }
 
     private suspend fun runOnboardingSync(slm: SlmTier, modelFile: File) {
@@ -381,6 +608,10 @@ class OnboardingService : Service() {
                     "Selected-model ownership changed before onboarding completed"
                 }
                 publishOnboardingCompleted()
+                showTerminalNotification(
+                    title = "Pocket Financer Setup Complete",
+                    text = "Your local AI model and SMS sync are ready."
+                )
             }
 
             addLog("Model: Loaded successfully on device CPU.")
@@ -560,8 +791,6 @@ class OnboardingService : Service() {
                 syncMessage = "Synchronization completed!"
             )
         }
-        runOnWorkflowProgress("Syncing Transactions", "Completed successfully!", 1.0f)
-        delay(600)
         completeSuccessfully()
         } finally {
             withContext(NonCancellable) {
@@ -575,6 +804,13 @@ class OnboardingService : Service() {
         val prefs = getSharedPreferences(".app_settings", Context.MODE_PRIVATE)
         return prefs.edit()
             .putBoolean("onboarding_completed", true)
+            .putString("selected_slm_id", slm.id)
+            .commit()
+    }
+
+    private fun persistSelectedModel(slm: SlmTier): Boolean {
+        val prefs = getSharedPreferences(".app_settings", Context.MODE_PRIVATE)
+        return prefs.edit()
             .putString("selected_slm_id", slm.id)
             .commit()
     }
@@ -607,11 +843,24 @@ class OnboardingService : Service() {
 
     override fun onDestroy() {
         Log.i(TAG, "OnboardingService Destroyed")
-        modelDownloader.cancel()
+        workJob?.let(modelDownloader::cancel)
         downloadObserverJob?.cancel()
         workJob?.cancel()
         serviceScope.cancel()
-        syncManager.updateState { it.copy(isRunning = false) }
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        syncManager.updateState {
+            if (it.isCancelling) {
+                // The workflow's non-cancellable finally block owns the
+                // terminal Cancelled transition after rollback/gate release.
+                it.copy(isDownloading = false)
+            } else {
+                it.copy(
+                    isRunning = false,
+                    isCancellationAllowed = false,
+                    isDownloading = false
+                )
+            }
+        }
         super.onDestroy()
     }
 }

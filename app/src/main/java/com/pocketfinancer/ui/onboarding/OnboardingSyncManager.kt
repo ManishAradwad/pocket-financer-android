@@ -2,7 +2,6 @@ package com.pocketfinancer.ui.onboarding
 
 import android.content.Context
 import android.content.Intent
-import android.os.Build
 import com.pocketfinancer.SlmAppFlowCoordinator
 import com.pocketfinancer.hardware.SlmTier
 import com.pocketfinancer.inference.ModelDownloader
@@ -20,8 +19,16 @@ class OnboardingSyncManager @Inject constructor(
     private val appFlowCoordinator: SlmAppFlowCoordinator
 ) {
 
+    enum class RunPurpose {
+        INITIAL_SETUP,
+        MODEL_UPGRADE
+    }
+
     data class OnboardingSyncState(
         val isRunning: Boolean = false,
+        val isCancelling: Boolean = false,
+        val isCancellationAllowed: Boolean = false,
+        val runPurpose: RunPurpose = RunPurpose.INITIAL_SETUP,
         val step: OnboardingStep = OnboardingStep.WELCOME,
         val selectedSlm: SlmTier? = null,
         val downloadState: ModelDownloader.DownloadState = ModelDownloader.DownloadState(),
@@ -47,6 +54,20 @@ class OnboardingSyncManager @Inject constructor(
     val syncState: StateFlow<OnboardingSyncState> = _syncState.asStateFlow()
 
     fun startOnboarding(context: Context, slm: SlmTier) {
+        startRun(context, slm, RunPurpose.INITIAL_SETUP)
+    }
+
+    fun startModelUpgrade(context: Context, slm: SlmTier) {
+        startRun(context, slm, RunPurpose.MODEL_UPGRADE)
+    }
+
+    private fun startRun(
+        context: Context,
+        slm: SlmTier,
+        purpose: RunPurpose
+    ) {
+        if (_syncState.value.isRunning) return
+
         // Capture before checking the in-memory gate. If reset pauses after the
         // check, this old captured value becomes stale when reset commits. If
         // reset pauses before the check, admissionPaused rejects scheduling.
@@ -57,37 +78,119 @@ class OnboardingSyncManager @Inject constructor(
             _syncState.value = _syncState.value.copy(
                 isRunning = false,
                 isDownloading = false,
-                modelLoadError = "Onboarding start is paused while reset completes."
+                modelLoadError = if (purpose == RunPurpose.MODEL_UPGRADE) {
+                    "Model upgrade is temporarily paused while other model maintenance completes."
+                } else {
+                    "Onboarding start is paused while reset completes."
+                }
             )
             return
         }
-        _syncState.value = _syncState.value.copy(
+        _syncState.value = OnboardingSyncState(
             isRunning = true,
+            isCancellationAllowed = purpose == RunPurpose.MODEL_UPGRADE,
+            runPurpose = purpose,
             selectedSlm = slm,
             step = OnboardingStep.DOWNLOAD_SLM,
-            modelLoadError = null
+            syncMessage = if (purpose == RunPurpose.MODEL_UPGRADE) {
+                "Starting the background model download..."
+            } else {
+                ""
+            }
         )
         val intent = Intent(context, OnboardingService::class.java).apply {
             putExtra("EXTRA_SLM_ID", slm.id)
+            putExtra(EXTRA_RUN_PURPOSE, purpose.name)
         }
         runGenerationStore.stamp(intent, requestedGeneration)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        try {
             context.startForegroundService(intent)
-        } else {
-            context.startService(intent)
+        } catch (error: Exception) {
+            _syncState.value = _syncState.value.copy(
+                isRunning = false,
+                isDownloading = false,
+                isCancellationAllowed = false,
+                modelLoadError =
+                    error.message ?: "Could not start background model work."
+            )
         }
     }
 
-    fun cancelOnboarding(context: Context) {
-        val intent = Intent(context, OnboardingService::class.java)
-        context.stopService(intent)
-        _syncState.value = _syncState.value.copy(
-            isRunning = false,
-            isDownloading = false,
-            downloadState = ModelDownloader.DownloadState(),
-            syncProgress = 0f,
-            syncMessage = "Cancelled"
+    /**
+     * Requests cancellation without claiming that cleanup has already
+     * completed. The service publishes the terminal Cancelled state only after
+     * downloader cancellation, selected-model rollback, and app-flow admission
+     * release have all drained.
+     */
+    fun requestModelUpgradeCancellation(context: Context): Boolean {
+        while (true) {
+            val current = _syncState.value
+            if (!current.isRunning ||
+                current.isCancelling ||
+                !current.isCancellationAllowed ||
+                current.runPurpose != RunPurpose.MODEL_UPGRADE
+            ) {
+                return false
+            }
+            val cancelling = current.copy(
+                isCancelling = true,
+                isCancellationAllowed = false,
+                syncMessage = "Cancelling model upgrade...",
+                modelLoadError = null
+            )
+            if (_syncState.compareAndSet(current, cancelling)) break
+        }
+
+        val serviceWasRunning = context.stopService(
+            Intent(context, OnboardingService::class.java)
         )
+        if (!serviceWasRunning) {
+            completeCancellationIfRequested()
+        }
+        return true
+    }
+
+    /**
+     * Linearization point between a cancellable activation and its short,
+     * non-cancellable durable commit. Exactly one of cancellation or commit
+     * can win the state compare-and-set.
+     */
+    internal fun tryBeginModelUpgradeCommit(): Boolean {
+        while (true) {
+            val current = _syncState.value
+            if (!current.isRunning ||
+                current.isCancelling ||
+                !current.isCancellationAllowed ||
+                current.runPurpose != RunPurpose.MODEL_UPGRADE
+            ) {
+                return false
+            }
+            val committing = current.copy(
+                isCancellationAllowed = false,
+                syncMessage = "Finishing model activation..."
+            )
+            if (_syncState.compareAndSet(current, committing)) return true
+        }
+    }
+
+    internal fun completeCancellationIfRequested() {
+        _syncState.update { current ->
+            if (!current.isCancelling) {
+                current
+            } else {
+                current.copy(
+                    isRunning = false,
+                    isCancelling = false,
+                    isCancellationAllowed = false,
+                    isDownloading = false,
+                    downloadState = current.downloadState.copy(
+                        isDownloading = false,
+                        error = null
+                    ),
+                    syncMessage = "Cancelled"
+                )
+            }
+        }
     }
 
     internal fun modelPreparationCompleted(modelFile: File) {
@@ -119,6 +222,8 @@ class OnboardingSyncManager @Inject constructor(
                 step = OnboardingStep.DOWNLOAD_SLM,
                 modelLoadError = visibleError,
                 isRunning = false,
+                isCancelling = false,
+                isCancellationAllowed = false,
                 isDownloading = false,
                 downloadState = terminalDownloadState.copy(
                     isDownloading = false,
@@ -137,7 +242,9 @@ class OnboardingSyncManager @Inject constructor(
         _syncState.value = OnboardingSyncState()
     }
 
-    private companion object {
-        const val BYTES_PER_MEBIBYTE = 1_048_576f
+    companion object {
+        private const val BYTES_PER_MEBIBYTE = 1_048_576f
+        internal const val EXTRA_RUN_PURPOSE =
+            "com.pocketfinancer.ui.onboarding.EXTRA_RUN_PURPOSE"
     }
 }
