@@ -5,7 +5,6 @@
 [![Platform](https://img.shields.io/badge/Platform-Android_8.0%2B_%28API_26%2B%29-3DDC84?style=flat-square&logo=android&logoColor=white)](https://developer.android.com/)
 [![Language](https://img.shields.io/badge/Language-Kotlin_100%25-7F52FF?style=flat-square&logo=kotlin&logoColor=white)](https://kotlinlang.org/)
 [![Database](https://img.shields.io/badge/Database-SQLCipher_Room_AES--256-005C8A?style=flat-square&logo=sqlite&logoColor=white)](https://www.zetetic.net/sqlcipher/)
-[![License](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](LICENSE)
 
 Pocket Financer is a secure, **privacy-first, on-device financial tracking and analytics application** designed specifically for Indian bank and card SMS notifications. It reads transactional alerts (such as bank debits, credit card swipes, UPI transfers, and deposits) and automatically populates a local dashboard.
 
@@ -211,9 +210,13 @@ To test the onboarding sync visual elements repeatedly:
 
 ---
 
-## 📄 License
+## Copyright and Usage
 
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+Copyright © 2026 Manish Aradwad. All rights reserved.
+
+This repository is **not open source at this time**. No license is granted to
+use, modify, or redistribute its code or assets. The licensing model may be
+reconsidered in the future.
 
 ---
 
