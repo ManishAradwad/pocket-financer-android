@@ -25,8 +25,10 @@ custody, hotfix procedure, and incident recovery.
   accompanied by a SHA-256 checksum.
 - A failed draft release can be rebuilt from its immutable tag with the
   corrected workflow from `main`.
-- No AI service, AI reviewer, model API, or AI approval is part of CI,
-  repository protection, version calculation, signing, or publication.
+- Required CI, repository protection, version calculation, signing, and
+  publication do not depend on an AI service, AI reviewer, model API, or AI
+  approval. An optional account-level GitHub Copilot review may also run on
+  pull requests, but it is non-gating.
 
 ## Delivery flow
 
@@ -305,11 +307,18 @@ CI/CD and repository governance are deterministic and tool-agnostic:
 
 - No OpenAI or Codex action runs in GitHub.
 - No hosted model API or AI key is required.
-- No AI reviewer or AI approval is required.
+- No AI reviewer or AI approval is required by branch protection.
 - Branch protection does not inspect the branch author or require a
   `codex/*` prefix.
 - CI behavior is identical regardless of whether a human, IDE, script, or
   coding assistant prepared the pull request.
+
+The repository owner's personal GitHub setting currently requests GitHub
+Copilot code review on pull requests authored by that account. Copilot's review
+is optional: it is not a required status check, it does not approve the pull
+request, and its result is not consumed by versioning, signing, publication, or
+any Pocket Financer workflow. The owner can disable it independently in GitHub
+Copilot settings without changing this repository.
 
 Repository documentation contains a Codex-oriented contributor workflow because
 Codex uses `codex/*` branches when it prepares changes. That is a contributor
