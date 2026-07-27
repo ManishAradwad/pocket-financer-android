@@ -2,11 +2,15 @@
 
 [![Build Status](https://img.shields.io/github/actions/workflow/status/ManishAradwad/pocket-financer-android/ci.yml?branch=main&style=flat-square&logo=github)](https://github.com/ManishAradwad/pocket-financer-android/actions)
 [![Download APK](https://img.shields.io/github/v/release/ManishAradwad/pocket-financer-android?style=flat-square&label=Download%20APK&logo=android&color=green)](https://github.com/ManishAradwad/pocket-financer-android/releases/latest)
-[![Platform](https://img.shields.io/badge/Platform-Android_8.0%2B_%28API_26%2B%29-3DDC84?style=flat-square&logo=android&logoColor=white)](https://developer.android.com/)
+[![Platform](https://img.shields.io/badge/Platform-Android_8.0%2B_64--bit-3DDC84?style=flat-square&logo=android&logoColor=white)](https://developer.android.com/)
 [![Language](https://img.shields.io/badge/Language-Kotlin_100%25-7F52FF?style=flat-square&logo=kotlin&logoColor=white)](https://kotlinlang.org/)
 [![Database](https://img.shields.io/badge/Database-SQLCipher_Room_AES--256-005C8A?style=flat-square&logo=sqlite&logoColor=white)](https://www.zetetic.net/sqlcipher/)
 
 Pocket Financer is a secure, **privacy-first, on-device financial tracking and analytics application** designed specifically for Indian bank and card SMS notifications. It reads transactional alerts (such as bank debits, credit card swipes, UPI transfers, and deposits) and automatically populates a local dashboard.
+
+The downloadable APK supports 64-bit ARM Android devices running Android 8.0
+or newer. The x86_64 build included in the universal APK supports emulators;
+32-bit-only devices are not supported.
 
 By leveraging a local **Small Language Model (SLM)** backed by `llama.cpp` via a native JNI bridge, Pocket Financer runs its entire natural language extraction process 100% offline. **No data ever leaves your device. No cloud servers, no marketing trackers, no external APIs.**
 
@@ -177,9 +181,19 @@ cd pocket-financer-android
 # 3. Compile and generate debug APK
 ./gradlew :app:assembleDebug
 
-# 4. Generate release build
-./gradlew :app:assembleRelease
+# Stable release APKs are built, signed, and published only by the protected
+# release workflow described in docs/releasing.md.
 ```
+
+---
+
+## Development and releases
+
+Pocket Financer uses short-lived `codex/*` branches, required pull-request CI,
+Conventional Commit titles, and an automated Release Please pull request as the
+explicit publication gate. Start with [CONTRIBUTING.md](CONTRIBUTING.md) for
+feature development and [docs/releasing.md](docs/releasing.md) for versioning,
+signing, stable APK publication, and recovery.
 
 ---
 

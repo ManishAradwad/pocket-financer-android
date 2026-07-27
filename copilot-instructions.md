@@ -91,10 +91,10 @@ Deploy the debug APK and control the process on the active Android Emulator (`em
 & "C:\Users\manis\AppData\Local\Android\Sdk\platform-tools\adb.exe" -s emulator-5554 install -r app/build/outputs/apk/debug/app-debug.apk
 
 # Force-stop the app process
-& "C:\Users\manis\AppData\Local\Android\Sdk\platform-tools\adb.exe" -s emulator-5554 shell am force-stop com.pocketfinancer
+& "C:\Users\manis\AppData\Local\Android\Sdk\platform-tools\adb.exe" -s emulator-5554 shell am force-stop com.pocketfinancer.debug
 
 # Start the application's MainActivity launcher
-& "C:\Users\manis\AppData\Local\Android\Sdk\platform-tools\adb.exe" -s emulator-5554 shell am start -n com.pocketfinancer/com.pocketfinancer.MainActivity
+& "C:\Users\manis\AppData\Local\Android\Sdk\platform-tools\adb.exe" -s emulator-5554 shell am start -n com.pocketfinancer.debug/com.pocketfinancer.MainActivity
 ```
 
 ### 3. UI Interactions & Element Coordinates
@@ -115,7 +115,7 @@ Inspect the current screen layout or simulate gestures:
 Check model storage paths and read device warning or crash logs:
 ```powershell
 # List contents in the app secure storage (requires run-as)
-& "C:\Users\manis\AppData\Local\Android\Sdk\platform-tools\adb.exe" -s emulator-5554 shell run-as com.pocketfinancer ls -la files/models/
+& "C:\Users\manis\AppData\Local\Android\Sdk\platform-tools\adb.exe" -s emulator-5554 shell run-as com.pocketfinancer.debug ls -la files/models/
 
 # Monitor current runtime logs (filtered/cleared)
 & "C:\Users\manis\AppData\Local\Android\Sdk\platform-tools\adb.exe" -s emulator-5554 logcat -d

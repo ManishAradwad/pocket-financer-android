@@ -14,3 +14,10 @@
 
 # Keep llama.cpp JNI
 -keep class com.pocketfinancer.inference.** { *; }
+
+# Tink references these compile-time-only Error Prone annotations. They are
+# intentionally absent from the packaged runtime and safe for R8 to ignore.
+-dontwarn com.google.errorprone.annotations.CanIgnoreReturnValue
+-dontwarn com.google.errorprone.annotations.CheckReturnValue
+-dontwarn com.google.errorprone.annotations.Immutable
+-dontwarn com.google.errorprone.annotations.RestrictedApi

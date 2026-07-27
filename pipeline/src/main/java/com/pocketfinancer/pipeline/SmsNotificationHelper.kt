@@ -1,13 +1,17 @@
 package com.pocketfinancer.pipeline
 
+import android.Manifest
+import android.annotation.SuppressLint
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
 
 object SmsNotificationHelper {
 
@@ -51,6 +55,34 @@ object SmsNotificationHelper {
         )
     }
 
+    @SuppressLint("MissingPermission")
+    private fun notifyIfPermitted(
+        context: Context,
+        notificationId: Int,
+        notification: android.app.Notification
+    ) {
+        if (
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            return
+        }
+
+        val notificationManager = NotificationManagerCompat.from(context)
+        if (!notificationManager.areNotificationsEnabled()) {
+            return
+        }
+
+        try {
+            notificationManager.notify(notificationId, notification)
+        } catch (_: SecurityException) {
+            // Permission may have been revoked between the check and notify call.
+        }
+    }
+
     /**
      * Post a notification indicating that an SMS has been skipped because it is non-transactional.
      */
@@ -67,12 +99,7 @@ object SmsNotificationHelper {
             .setAutoCancel(true)
             .setContentIntent(getAppPendingIntent(context))
 
-        try {
-            val notificationManager = NotificationManagerCompat.from(context)
-            notificationManager.notify(notificationId, builder.build())
-        } catch (e: SecurityException) {
-            // Permission not granted
-        }
+        notifyIfPermitted(context, notificationId, builder.build())
     }
 
     /**
@@ -96,12 +123,55 @@ object SmsNotificationHelper {
             .setAutoCancel(false)
             .setContentIntent(getAppPendingIntent(context))
 
-        try {
-            val notificationManager = NotificationManagerCompat.from(context)
-            notificationManager.notify(notificationId, builder.build())
-        } catch (e: SecurityException) {
-            // Permission not granted
-        }
+        notifyIfPermitted(context, notificationId, builder.build())
+    }
+
+    /**
+     * Replace an in-progress notification with a truthful prerequisite state.
+     */
+    fun showWaitingForModelNotification(
+        context: Context,
+        sender: String,
+        date: Long
+    ) {
+        createNotificationChannel(context)
+        val notificationId = getNotificationId(sender, date)
+
+        val builder = NotificationCompat.Builder(context, CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.stat_notify_sync_noanim)
+            .setContentTitle("Transaction alert saved securely")
+            .setContentText(
+                "Prepare the on-device model to process it. The alert will remain queued."
+            )
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setOngoing(false)
+            .setAutoCancel(true)
+            .setContentIntent(getAppPendingIntent(context))
+
+        notifyIfPermitted(context, notificationId, builder.build())
+    }
+
+    /**
+     * Replace an in-progress notification when a recoverable local error occurs.
+     */
+    fun showRetryNotification(
+        context: Context,
+        sender: String,
+        date: Long
+    ) {
+        createNotificationChannel(context)
+        val notificationId = getNotificationId(sender, date)
+
+        val builder = NotificationCompat.Builder(context, CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.stat_notify_sync_noanim)
+            .setContentTitle("Transaction alert queued")
+            .setContentText("Local processing paused. Pocket Financer will retry.")
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setOngoing(false)
+            .setAutoCancel(true)
+            .setContentIntent(getAppPendingIntent(context))
+
+        notifyIfPermitted(context, notificationId, builder.build())
     }
 
     /**
@@ -126,12 +196,7 @@ object SmsNotificationHelper {
             .setAutoCancel(true)
             .setContentIntent(getAppPendingIntent(context))
 
-        try {
-            val notificationManager = NotificationManagerCompat.from(context)
-            notificationManager.notify(notificationId, builder.build())
-        } catch (e: SecurityException) {
-            // Permission not granted
-        }
+        notifyIfPermitted(context, notificationId, builder.build())
     }
 
     /**
@@ -155,11 +220,23 @@ object SmsNotificationHelper {
             .setAutoCancel(true)
             .setContentIntent(getAppPendingIntent(context))
 
+        notifyIfPermitted(context, notificationId, builder.build())
+    }
+
+    /**
+     * Clear a processing notification when this worker no longer owns work.
+     */
+    fun cancelCandidateNotification(
+        context: Context,
+        sender: String,
+        date: Long
+    ) {
         try {
-            val notificationManager = NotificationManagerCompat.from(context)
-            notificationManager.notify(notificationId, builder.build())
-        } catch (e: SecurityException) {
-            // Permission not granted
+            NotificationManagerCompat.from(context).cancel(
+                getNotificationId(sender, date)
+            )
+        } catch (_: Exception) {
+            // Notification cleanup must not change durable work settlement.
         }
     }
 

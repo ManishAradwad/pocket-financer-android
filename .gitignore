@@ -1,5 +1,6 @@
 # ── Gradle ──────────────────────────────────────────────────────────────────
 .gradle/
+.kotlin/
 build/
 !gradle/wrapper/gradle-wrapper.jar
 
@@ -32,6 +33,7 @@ Thumbs.db
 .env
 *.env
 google-services.json
+/.release-secrets/
 
 # ── Room schema exports (versioned in repo) ─────────────────────────────────
 # Keep: data/schemas/

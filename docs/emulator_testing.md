@@ -26,10 +26,10 @@ You can compile and manage the app packages using the project Gradle wrapper dir
 Force-stops and restarts the application by invoking its primary launcher activity:
 ```powershell
 # Force-stop the application
-adb -s emulator-5554 shell am force-stop com.pocketfinancer
+adb -s emulator-5554 shell am force-stop com.pocketfinancer.debug
 
 # Start MainActivity
-adb -s emulator-5554 shell am start -n com.pocketfinancer/com.pocketfinancer.MainActivity
+adb -s emulator-5554 shell am start -n com.pocketfinancer.debug/com.pocketfinancer.MainActivity
 ```
 
 ---
@@ -94,7 +94,7 @@ adb -s emulator-5554 shell input swipe 500 500 500 1500
 Executes secure directory file listing within the application's private storage directory using Android's `run-as`:
 ```powershell
 # List the downloaded model file details
-adb -s emulator-5554 shell run-as com.pocketfinancer ls -la files/models/
+adb -s emulator-5554 shell run-as com.pocketfinancer.debug ls -la files/models/
 ```
 
 ---
