@@ -5,6 +5,122 @@ can continue quickly on short-lived pull requests, while a release is published
 only when the repository owner chooses to merge the automated release pull
 request.
 
+This is also the durable CI/CD reference for future maintainers and agents. It
+was last verified against the repository files and live GitHub settings on
+2026-07-27. Executable configuration is the final authority; when it changes,
+update this guide in the same pull request.
+
+## Live automation reference
+
+### Pull-request CI
+
+`.github/workflows/ci.yml` runs for pushes to `main`, pull requests targeting
+`main`, and manual dispatches. Its required job is named
+`Build, lint, and unit tests` and runs:
+
+```text
+./gradlew testDebugUnitTest --no-daemon --stacktrace
+./gradlew lintDebug --no-daemon --stacktrace
+./gradlew :app:assembleDebug --no-daemon --stacktrace
+```
+
+It uses JDK 17, Android platform 36, NDK `27.3.13750724`, and validated Gradle
+wrapper/caching on `ubuntu-latest`. Test reports, lint reports, and the debug
+APK are retained for 14 days. Missing reports are tolerated so failures retain
+diagnostics; a missing debug APK fails CI. Superseded runs on the same pull
+request or ref are cancelled.
+
+### Version and release automation
+
+`version.txt` contains stable `major.minor.patch` SemVer. Gradle derives:
+
+```text
+versionName = major.minor.patch
+versionCode = major * 1,000,000 + minor * 1,000 + patch
+```
+
+Minor and patch components must be between 0 and 999, and the derived
+`versionCode` must be between 1 and 2,100,000,000. Debug builds use application
+ID `com.pocketfinancer.debug` and a `-debug` version suffix; stable builds use
+`com.pocketfinancer`.
+
+`.github/workflows/release.yml`, `release-please-config.json`, and
+`.release-please-manifest.json` own normal releases:
+
+- `fix:` requests a patch, `feat:` a minor, and `!` or
+  `BREAKING CHANGE:` a major release.
+- Non-release Conventional Commit types do not request a version by themselves.
+- Release Please maintains one release pull request, then creates a draft
+  `v<version>` GitHub Release when that pull request is explicitly merged.
+- With no optional `RELEASE_PLEASE_TOKEN`, the workflow uses `GITHUB_TOKEN` and
+  explicitly dispatches `ci.yml` on the release pull-request branch.
+- The Release Please job has `actions`, `contents`, `issues`, and pull-request
+  write permissions. The signed publication job has only `contents: write`.
+- Normal and recovery runs share the non-cancelling `stable-release`
+  concurrency group, so publications cannot race.
+
+The 75-minute publication job checks out the exact release commit or recovery
+tag, validates tag/version/SHA agreement, decodes the production keystore,
+runs debug unit tests, release lint, and the minified release build, and rejects
+missing, unsigned, wrongly versioned, or wrongly signed APKs. It verifies the
+APK with `apksigner`, compares its signer against
+`release-signing-cert.sha256`, emits a versioned APK and SHA-256 file, and only
+then publishes the draft as stable and latest. Release diagnostics are retained
+for 90 days, and temporary signing material is removed even after failure.
+
+Signed app artifact tasks fail closed when signing configuration is absent.
+`lintRelease` alone does not require signing. A failed publication can be
+recovered only from an existing draft tag through the Release workflow's
+`release_tag` input; the recovery path validates the immutable tag and commit
+before rebuilding.
+
+### Repository and dependency controls
+
+The live GitHub controls at the last verification were:
+
+- `main` requires pull requests and a current
+  `Build, lint, and unit tests` result.
+- Protection applies to administrators; the required approval count is zero,
+  and review conversations must be resolved.
+- Linear history is required; force pushes and branch deletion are disabled.
+- Only squash merge is enabled, and merged source branches are deleted.
+- Default Actions token permission is read-only.
+- GitHub Actions may create pull requests so Release Please can operate. GitHub
+  presents this as a combined create/approve setting, but no repository
+  workflow submits pull-request approvals.
+- The `release` environment currently has no required reviewer. The explicit
+  release-pull-request merge is the human publication gate.
+
+`.github/dependabot.yml` checks Gradle and GitHub Actions weekly on Monday in
+`Asia/Kolkata`. Minor and patch updates are grouped into at most one open pull
+request per ecosystem. Major updates are ignored by automated version-update
+PRs and require an intentional compatibility change. Nothing auto-merges.
+
+Required signing secret names are:
+
+- `ANDROID_RELEASE_KEYSTORE_BASE64`
+- `ANDROID_RELEASE_STORE_PASSWORD`
+- `ANDROID_RELEASE_KEY_ALIAS`
+- `ANDROID_RELEASE_KEY_PASSWORD`
+
+All four names existed at the last verification. Their values and the keystore
+must never be stored in Markdown, logs, issues, or repository files.
+`RELEASE_PLEASE_TOKEN` is optional and was not configured at the last
+verification.
+
+### Optional Copilot review
+
+The repository owner's personal GitHub setting currently requests GitHub
+Copilot code review for pull requests authored by that account. This review is
+accepted but non-gating: it is not required by branch protection, does not
+approve the pull request, and is not consumed by versioning, signing,
+publication, or any Pocket Financer workflow.
+
+No OpenAI or Codex action runs in GitHub, no hosted model API or AI key is
+required for CI/CD, and branch protection does not require a `codex/*` author or
+branch. The Android app's local `llama.cpp`/GGUF inference is product runtime,
+not release governance.
+
 ## Release model
 
 1. A `codex/*` pull request passes CI and is squash-merged into `main`.
@@ -102,13 +218,19 @@ secret names exist:
 gh secret list
 ```
 
-### 3. Configure the release automation token
+### 3. Optionally configure a dedicated release automation token
 
-Create a fine-grained GitHub personal access token owned by the repository
-owner, restricted to this repository, with the minimum access needed to create
-and update release pull requests, tags, and releases. At minimum, grant
-read/write access to repository contents and pull requests. If the repository's
-label rules require it, grant issues read/write access as well.
+The active workflow can use the built-in `GITHUB_TOKEN`. When that token creates
+or updates a release pull request, the Release workflow explicitly dispatches
+`ci.yml` on the release branch so the required check starts without a personal
+token.
+
+If repository policy later requires a dedicated identity, create a fine-grained
+GitHub personal access token owned by the repository owner, restricted to this
+repository, with the minimum access needed to create and update release pull
+requests, tags, and releases. At minimum, grant read/write access to repository
+contents and pull requests. If the repository's label rules require it, grant
+issues read/write access as well.
 
 Store it as:
 
@@ -116,9 +238,9 @@ Store it as:
 gh secret set RELEASE_PLEASE_TOKEN
 ```
 
-The dedicated token is required because events produced by the default
-`GITHUB_TOKEN` do not start all downstream workflows. Rotate it before expiry
-and update the secret without changing any repository files.
+When configured, rotate the dedicated token before expiry and update the secret
+without changing repository files. When it is absent, preserve the Release
+workflow's `actions: write` permission and explicit CI dispatch fallback.
 
 ### 4. Protect `main`
 
@@ -172,12 +294,28 @@ encrypted database, downloaded model, and settings, and Android cannot restore
 them automatically. Put this warning prominently in the `v1.0.0` release
 notes. Do not imply that an in-place upgrade from the prerelease is supported.
 
+The verified production baseline published on 2026-07-27 is:
+
+- Release:
+  <https://github.com/ManishAradwad/pocket-financer-android/releases/tag/v1.0.0>
+- Tag commit: `b97c09cf5b12e8f59c9613ebc866a479ac2e475e`
+- Package/version: `com.pocketfinancer`, version `1.0.0`, version code `1000000`
+- APK size: `98,541,947` bytes
+- APK SHA-256:
+  `5E1E55621FCDEEB6514A2A43B50AE6EAE90D47B5DA4822FCD49502902512891B`
+- Signer certificate SHA-256:
+  `08:65:6A:08:56:A1:C1:4E:30:4E:8E:C9:F6:06:82:F8:EC:7C:E4:09:DB:CC:A9:61:07:75:D5:2F:BC:88:45:B1`
+- APK Signature Scheme v2 verification passed; the release is stable, latest,
+  not draft, and not a prerelease.
+
 Before merging the first automated release pull request, verify:
 
 - Its proposed version is exactly `1.0.0`.
 - `CHANGELOG.md` accurately describes the stable baseline and notable changes.
 - All required CI checks pass at the release pull-request head.
-- All four Android signing secrets and `RELEASE_PLEASE_TOKEN` are configured.
+- All four Android signing secrets are configured. If
+  `RELEASE_PLEASE_TOKEN` is absent, the built-in-token CI dispatch fallback is
+  intact.
 - The production keystore has verified offline backups.
 - The certificate SHA-256 fingerprint is recorded privately.
 - The migration warning above is present in the release notes.
@@ -278,8 +416,11 @@ artifacts being immutable.
 ## Recovery and troubleshooting
 
 - **Release PR does not appear:** confirm the merged squash title is `feat:`,
-  `fix:`, or breaking; inspect the Release Please workflow; confirm the token is
-  present and unexpired. Do not create a tag manually.
+  `fix:`, or breaking, and inspect the Release Please workflow. If
+  `RELEASE_PLEASE_TOKEN` is configured, confirm that dedicated token remains
+  valid. Otherwise confirm the workflow still uses `github.token`, GitHub
+  Actions may create pull requests, and the job retains its documented
+  permissions. Do not create a tag manually.
 - **Release PR CI does not start:** with the built-in `GITHUB_TOKEN`, the
   Release workflow explicitly dispatches `ci.yml` on the updated release
   branch. Confirm the release job still has `actions: write`, `ci.yml` still
