@@ -143,7 +143,9 @@ jobs:
 
           actual_fingerprint="$(
             printf '%s\n' "$verification" |
-              sed -n 's/^Signer #1 certificate SHA-256 digest: //p' |
+              sed -n -E \
+                's/^(Signer #[0-9]+|V[0-9.]+ Signer):? certificate SHA-256 digest: //p' |
+              head -n 1 |
               tr -d ':[:space:]' |
               tr '[:upper:]' '[:lower:]'
           )"
