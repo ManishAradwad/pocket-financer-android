@@ -8,6 +8,13 @@ import androidx.work.ListenableWorker
 import androidx.work.OneTimeWorkRequest
 import androidx.work.Operation
 import androidx.work.WorkManager
+import com.google.common.util.concurrent.ListenableFuture
+import com.pocketfinancer.data.model.QueuedSmsCandidate
+import com.pocketfinancer.data.model.SmsCandidateOrigin
+import com.pocketfinancer.data.model.SmsSourceIdentity
+import com.pocketfinancer.data.repository.SmsIngestionRepository
+import com.pocketfinancer.sms.SmsReader
+import com.pocketfinancer.sms.SmsScheduleResult
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
@@ -18,7 +25,6 @@ import io.mockk.slot
 import io.mockk.unmockkObject
 import io.mockk.unmockkStatic
 import io.mockk.verify
-import com.google.common.util.concurrent.ListenableFuture
 import java.util.concurrent.CancellationException
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executor
@@ -27,24 +33,24 @@ import java.util.concurrent.TimeoutException
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertIs
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
-import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.async
-import kotlinx.coroutines.test.advanceUntilIdle
-import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Before
 import org.junit.Test
 
-@OptIn(ExperimentalCoroutinesApi::class)
 class SmsWorkSchedulerImplTest {
-
     private val context = mockk<Context>()
     private val workManager = mockk<WorkManager>()
-    private lateinit var completedEnqueue: Operation
-    private lateinit var completedCancel: Operation
+    private val ingestionRepository = mockk<SmsIngestionRepository>()
+    private val automaticPreferences = mockk<AutomaticProcessingPreferences>()
+    private val enabled = MutableStateFlow(true)
+    private lateinit var enqueueOperation: Operation
 
     @Before
     fun setUp() {
@@ -52,17 +58,30 @@ class SmsWorkSchedulerImplTest {
         mockkStatic(Log::class)
         every { Log.i(any(), any()) } returns 0
         every { WorkManager.getInstance(context) } returns workManager
-
-        completedEnqueue = completedOperation()
-        completedCancel = completedOperation()
+        every { automaticPreferences.enabled } returns enabled
+        coEvery {
+            automaticPreferences.withConsistencyBoundary<Any?>(any())
+        } coAnswers {
+            firstArg<suspend (Boolean) -> Any?>().invoke(enabled.value)
+        }
+        enqueueOperation = completedOperation()
         every {
             workManager.enqueueUniqueWork(
                 any(),
                 any<ExistingWorkPolicy>(),
                 any<OneTimeWorkRequest>()
             )
-        } returns completedEnqueue
-        every { workManager.cancelUniqueWork(any()) } returns completedCancel
+        } returns enqueueOperation
+        coEvery {
+            ingestionRepository.admit(any())
+        } returns SmsIngestionRepository.AdmissionResult.Admitted(
+            candidateKey = "sms_opaque",
+            newlyCreated = true
+        )
+        coEvery { ingestionRepository.discardPendingAutomatic() } returns 0
+        coEvery {
+            ingestionRepository.pendingAutomaticCandidateKeys()
+        } returns emptyList()
     }
 
     @After
@@ -72,111 +91,56 @@ class SmsWorkSchedulerImplTest {
     }
 
     @Test
-    fun `all parser requests append to one unique secondary defence chain`() {
+    fun `WorkData contains only opaque candidate key`() = runTest {
         val request = slot<OneTimeWorkRequest>()
-        val scheduler = SmsWorkSchedulerImpl(context, SmsWorkAdmissionGate())
-
-        scheduler.scheduleSmsParsing(
-            address = "AX-HDFCBK",
-            body = "Rs.500 credited",
-            date = 1234L
+        val scheduler = SmsWorkSchedulerImpl(
+            context,
+            SmsWorkAdmissionGate(),
+            ingestionRepository,
+            automaticPreferences
         )
 
-        verify(exactly = 1) {
+        val result = scheduler.scheduleSmsParsing(transactionSms())
+
+        assertEquals(SmsScheduleResult.SCHEDULED, result)
+        verify {
             workManager.enqueueUniqueWork(
-                SmsWorkSchedulerImpl.UNIQUE_SMS_PARSER_WORK,
-                ExistingWorkPolicy.APPEND_OR_REPLACE,
+                SmsParserWorker.uniqueWorkName("sms_opaque"),
+                ExistingWorkPolicy.KEEP,
                 capture(request)
             )
         }
-        assertEquals("AX-HDFCBK", request.captured.workSpec.input.getString("address"))
-        assertEquals("Rs.500 credited", request.captured.workSpec.input.getString("body"))
-        assertEquals(1234L, request.captured.workSpec.input.getLong("date", 0L))
+        val input = request.captured.workSpec.input
+        assertEquals("sms_opaque", input.getString(SmsParserWorker.KEY_CANDIDATE_KEY))
+        assertNull(input.getString("address"))
+        assertNull(input.getString("body"))
+        assertEquals(0L, input.getLong("date", 0L))
+        assertEquals(
+            setOf(SmsParserWorker.KEY_CANDIDATE_KEY),
+            input.keyValueMap.keys
+        )
     }
 
     @Test
-    fun `pause waits for admitted enqueue and drops all enqueue attempts until release`() =
+    fun `disabled intake stores no new candidate and prunes pending automatic work`() =
         runTest {
-            val enqueueFuture = TestListenableFuture<Operation.State.SUCCESS>()
-            val pendingEnqueue = operation(enqueueFuture)
-            every {
-                workManager.enqueueUniqueWork(
-                    any(),
-                    any<ExistingWorkPolicy>(),
-                    any<OneTimeWorkRequest>()
-                )
-            } returns pendingEnqueue
+            enabled.value = false
+            val scheduler = SmsWorkSchedulerImpl(
+                context,
+                SmsWorkAdmissionGate(),
+                ingestionRepository,
+                automaticPreferences
+            )
 
-            val gate = SmsWorkAdmissionGate()
-            val scheduler = SmsWorkSchedulerImpl(context, gate)
-            val controller = WorkManagerSmsWorkController(context, gate)
+            assertEquals(
+                SmsScheduleResult.AUTOMATIC_DISABLED,
+                scheduler.scheduleSmsParsing(transactionSms())
+            )
 
-            scheduler.scheduleSmsParsing("AX-HDFCBK", "Rs.500 credited", 1234L)
-            val pause = controller.pauseAdmissions()
-            val cancellation = async {
-                pause.cancelPending()
+            coVerify(exactly = 1) {
+                ingestionRepository.discardPendingAutomatic()
             }
-            runCurrent()
-
-            assertFalse(cancellation.isCompleted)
-            verify(exactly = 0) { workManager.cancelUniqueWork(any()) }
-
-            scheduler.scheduleSmsParsing("AX-ICICI", "Rs.200 debited", 2345L)
-            verify(exactly = 1) {
-                workManager.enqueueUniqueWork(
-                    any(),
-                    any<ExistingWorkPolicy>(),
-                    any<OneTimeWorkRequest>()
-                )
-            }
-
-            enqueueFuture.complete(Operation.SUCCESS)
-            advanceUntilIdle()
-            cancellation.await()
-            assertFalse(pause.isReleased)
-            verify(exactly = 1) {
-                workManager.cancelUniqueWork(
-                    SmsWorkSchedulerImpl.UNIQUE_SMS_PARSER_WORK
-                )
-            }
-
-            scheduler.scheduleSmsParsing("AX-SBI", "Rs.300 debited", 3456L)
-            verify(exactly = 1) {
-                workManager.enqueueUniqueWork(
-                    any(),
-                    any<ExistingWorkPolicy>(),
-                    any<OneTimeWorkRequest>()
-                )
-            }
-
-            pause.release()
-            pause.release()
-            assertTrue(pause.isReleased)
-
-            scheduler.scheduleSmsParsing("AX-KOTAK", "Rs.400 debited", 4567L)
-            verify(exactly = 2) {
-                workManager.enqueueUniqueWork(
-                    any(),
-                    any<ExistingWorkPolicy>(),
-                    any<OneTimeWorkRequest>()
-                )
-            }
-        }
-
-    @Test
-    fun `nested pause handles keep admission closed until every handle releases`() =
-        runTest {
-            val gate = SmsWorkAdmissionGate()
-            val scheduler = SmsWorkSchedulerImpl(context, gate)
-            val controller = WorkManagerSmsWorkController(context, gate)
-
-            val first = controller.pauseAdmissions()
-            first.cancelPending()
-            val second = controller.pauseAdmissions()
-            second.cancelPending()
-            first.release()
-
-            scheduler.scheduleSmsParsing("AX-HDFC", "Rs.100 credited", 1000L)
+            coVerify(exactly = 0) { ingestionRepository.admit(any()) }
             verify(exactly = 0) {
                 workManager.enqueueUniqueWork(
                     any(),
@@ -184,10 +148,133 @@ class SmsWorkSchedulerImplTest {
                     any<OneTimeWorkRequest>()
                 )
             }
+        }
 
-            second.release()
-            scheduler.scheduleSmsParsing("AX-HDFC", "Rs.200 credited", 2000L)
-            verify(exactly = 1) {
+    @Test
+    fun `already saved source does not enqueue duplicate work`() = runTest {
+        coEvery {
+            ingestionRepository.admit(any())
+        } returns SmsIngestionRepository.AdmissionResult.AlreadySaved(
+            transactionId = "transaction-id",
+            candidateKey = "sms_opaque"
+        )
+        val scheduler = SmsWorkSchedulerImpl(
+            context,
+            SmsWorkAdmissionGate(),
+            ingestionRepository,
+            automaticPreferences
+        )
+
+        assertEquals(
+            SmsScheduleResult.ALREADY_SAVED,
+            scheduler.scheduleSmsParsing(transactionSms())
+        )
+        verify(exactly = 0) {
+            workManager.enqueueUniqueWork(
+                any(),
+                any<ExistingWorkPolicy>(),
+                any<OneTimeWorkRequest>()
+            )
+        }
+    }
+
+    @Test
+    fun `reset admission pause drops encrypted pending automatic candidate`() =
+        runTest {
+            val gate = SmsWorkAdmissionGate()
+            val pause = gate.pause()
+            val scheduler = SmsWorkSchedulerImpl(
+                context,
+                gate,
+                ingestionRepository,
+                automaticPreferences
+            )
+
+            assertEquals(
+                SmsScheduleResult.ADMISSION_PAUSED,
+                scheduler.scheduleSmsParsing(transactionSms())
+            )
+            coVerify(exactly = 1) {
+                ingestionRepository.discardPendingAutomatic()
+            }
+            verify(exactly = 0) {
+                workManager.enqueueUniqueWork(
+                    any(),
+                    any<ExistingWorkPolicy>(),
+                    any<OneTimeWorkRequest>()
+                )
+            }
+            pause.release()
+        }
+
+    @Test
+    fun `startup recovery enqueues each pending automatic candidate with KEEP`() =
+        runTest {
+            coEvery {
+                ingestionRepository.pendingAutomaticCandidateKeys()
+            } returns listOf("oldest", "newest")
+            val requests = mutableListOf<OneTimeWorkRequest>()
+            val names = mutableListOf<String>()
+            every {
+                workManager.enqueueUniqueWork(
+                    capture(names),
+                    ExistingWorkPolicy.KEEP,
+                    capture(requests)
+                )
+            } returns enqueueOperation
+            val scheduler = SmsWorkSchedulerImpl(
+                context,
+                SmsWorkAdmissionGate(),
+                ingestionRepository,
+                automaticPreferences
+            )
+
+            scheduler.reconcilePendingAutomaticWork()
+
+            assertEquals(
+                listOf(
+                    SmsParserWorker.uniqueWorkName("oldest"),
+                    SmsParserWorker.uniqueWorkName("newest")
+                ),
+                names
+            )
+            assertEquals(
+                listOf("oldest", "newest"),
+                requests.map {
+                    it.workSpec.input.getString(SmsParserWorker.KEY_CANDIDATE_KEY)
+                }
+            )
+            assertTrue(
+                requests.all {
+                    it.workSpec.input.keyValueMap.keys ==
+                        setOf(SmsParserWorker.KEY_CANDIDATE_KEY)
+                }
+            )
+        }
+
+    @Test
+    fun `startup recovery discards pending automatic candidates when disabled`() =
+        runTest {
+            enabled.value = false
+            coEvery {
+                ingestionRepository.pendingAutomaticCandidateKeys()
+            } returns listOf("must-not-enqueue")
+            val scheduler = SmsWorkSchedulerImpl(
+                context,
+                SmsWorkAdmissionGate(),
+                ingestionRepository,
+                automaticPreferences
+            )
+
+            scheduler.reconcilePendingAutomaticWork()
+
+            coVerify(exactly = 1) {
+                ingestionRepository.discardPendingAutomatic()
+            }
+            coVerify(exactly = 0) {
+                ingestionRepository.pendingAutomaticCandidateKeys()
+            }
+            verify(exactly = 0) {
                 workManager.enqueueUniqueWork(
                     any(),
                     any<ExistingWorkPolicy>(),
@@ -197,41 +284,211 @@ class SmsWorkSchedulerImplTest {
         }
 
     @Test
-    fun `standalone cancellation waits for WorkManager acknowledgement`() = runTest {
-        val cancellationFuture = TestListenableFuture<Operation.State.SUCCESS>()
-        every {
-            workManager.cancelUniqueWork(
-                SmsWorkSchedulerImpl.UNIQUE_SMS_PARSER_WORK
+    fun `startup recovery stops and discards remaining pending work if disabled mid pass`() =
+        runTest {
+            coEvery {
+                ingestionRepository.pendingAutomaticCandidateKeys()
+            } returns listOf("claimed-boundary", "still-pending")
+            every {
+                workManager.enqueueUniqueWork(
+                    any(),
+                    ExistingWorkPolicy.KEEP,
+                    any<OneTimeWorkRequest>()
+                )
+            } answers {
+                enabled.value = false
+                enqueueOperation
+            }
+            val scheduler = SmsWorkSchedulerImpl(
+                context,
+                SmsWorkAdmissionGate(),
+                ingestionRepository,
+                automaticPreferences
             )
-        } returns operation(cancellationFuture)
-        val controller = WorkManagerSmsWorkController(
-            context,
-            SmsWorkAdmissionGate()
-        )
 
-        val cancellation = async { controller.cancelPending() }
-        runCurrent()
+            scheduler.reconcilePendingAutomaticWork()
 
-        assertFalse(cancellation.isCompleted)
-        cancellationFuture.complete(Operation.SUCCESS)
-        advanceUntilIdle()
-        assertTrue(cancellation.isCompleted)
-    }
+            verify(exactly = 1) {
+                workManager.enqueueUniqueWork(
+                    SmsParserWorker.uniqueWorkName("claimed-boundary"),
+                    ExistingWorkPolicy.KEEP,
+                    any<OneTimeWorkRequest>()
+                )
+            }
+            coVerify(exactly = 1) {
+                ingestionRepository.discardPendingAutomatic()
+            }
+        }
+
+    private fun transactionSms() = SmsReader.SmsMessage(
+        address = "AX-HDFCBK",
+        body = "Rs.500 credited to A/c XX1234",
+        date = 1234L,
+        type = 1,
+        providerMessageId = "42"
+    )
 
     private fun completedOperation(): Operation {
         val future = TestListenableFuture<Operation.State.SUCCESS>()
         future.complete(Operation.SUCCESS)
-        return operation(future)
-    }
-
-    private fun operation(
-        future: TestListenableFuture<Operation.State.SUCCESS>
-    ): Operation = mockk {
-        every { result } returns future
+        return mockk {
+            every { result } returns future
+        }
     }
 }
 
 class SmsParserWorkerPolicyTest {
+    @Test
+    fun `automatic OFF that wins the boundary prevents claim`() =
+        runTest {
+            val ingestionRepository = mockk<SmsIngestionRepository>()
+            val automaticPreferences =
+                mockk<AutomaticProcessingPreferences>()
+            coEvery {
+                automaticPreferences
+                    .withConsistencyBoundary<SmsCandidateClaimDecision>(any())
+            } coAnswers {
+                firstArg<suspend (Boolean) -> SmsCandidateClaimDecision>()
+                    .invoke(false)
+            }
+            coEvery {
+                ingestionRepository.discardAutomaticBeforeClaim(
+                    "opaque-key",
+                    "work-id"
+                )
+            } returns true
+
+            assertIs<SmsCandidateClaimDecision.AutomaticDisabled>(
+                claimSmsCandidateForRun(
+                    candidate = queuedCandidate(SmsCandidateOrigin.AUTOMATIC),
+                    claimToken = "work-id",
+                    automaticProcessingPreferences = automaticPreferences,
+                    ingestionRepository = ingestionRepository
+                )
+            )
+            coVerify(exactly = 0) { ingestionRepository.claim(any(), any()) }
+            coVerify(exactly = 1) {
+                ingestionRepository.discardAutomaticBeforeClaim(
+                    "opaque-key",
+                    "work-id"
+                )
+            }
+        }
+
+    @Test
+    fun `automatic claim that wins boundary is not deleted by later OFF`() =
+        runTest {
+            val ingestionRepository = mockk<SmsIngestionRepository>()
+            val automaticPreferences =
+                mockk<AutomaticProcessingPreferences>()
+            val claimed = queuedCandidate(SmsCandidateOrigin.AUTOMATIC)
+                .copy(claimToken = "work-a")
+            coEvery {
+                automaticPreferences
+                    .withConsistencyBoundary<SmsCandidateClaimDecision>(any())
+            } coAnswers {
+                firstArg<suspend (Boolean) -> SmsCandidateClaimDecision>()
+                    .invoke(true)
+            }
+            coEvery {
+                ingestionRepository.claim(
+                    "opaque-key",
+                    "work-a",
+                    any(),
+                    any()
+                )
+            } returns claimed
+
+            val decision = assertIs<SmsCandidateClaimDecision.Claimed>(
+                claimSmsCandidateForRun(
+                    candidate = queuedCandidate(SmsCandidateOrigin.AUTOMATIC),
+                    claimToken = "work-a",
+                    automaticProcessingPreferences = automaticPreferences,
+                    ingestionRepository = ingestionRepository
+                )
+            )
+
+            assertNotNull(decision.candidate)
+            coVerify(exactly = 0) {
+                ingestionRepository.discardClaimed(any(), any())
+            }
+        }
+
+    @Test
+    fun `manual claim bypasses automatic OFF boundary`() = runTest {
+        val ingestionRepository = mockk<SmsIngestionRepository>()
+        val automaticPreferences =
+            mockk<AutomaticProcessingPreferences>()
+        val manual = queuedCandidate(SmsCandidateOrigin.MANUAL)
+            .copy(claimToken = "manual-work")
+        coEvery {
+            ingestionRepository.claim(
+                "opaque-key",
+                "manual-work",
+                any(),
+                any()
+            )
+        } returns manual
+
+        val decision = assertIs<SmsCandidateClaimDecision.Claimed>(
+            claimSmsCandidateForRun(
+                candidate = queuedCandidate(SmsCandidateOrigin.MANUAL),
+                claimToken = "manual-work",
+                automaticProcessingPreferences = automaticPreferences,
+                ingestionRepository = ingestionRepository
+            )
+        )
+
+        assertNotNull(decision.candidate)
+        coVerify(exactly = 0) {
+            automaticPreferences.withConsistencyBoundary<Any?>(any())
+        }
+    }
+
+    @Test
+    fun `stale owner terminal cleanup cannot delete replacement evidence`() =
+        runTest {
+            val ingestionRepository = mockk<SmsIngestionRepository>()
+            coEvery {
+                ingestionRepository.discardClaimed(
+                    candidateKey = "opaque-key",
+                    claimToken = "stale-owner"
+                )
+            } returns false
+
+            assertFalse(
+                discardOwnedTerminalCandidate(
+                    ingestionRepository = ingestionRepository,
+                    candidateKey = "opaque-key",
+                    claimToken = "stale-owner"
+                )
+            )
+            coVerify(exactly = 0) {
+                ingestionRepository.discardTerminal(any())
+            }
+        }
+
+    private fun queuedCandidate(
+        origin: SmsCandidateOrigin
+    ): QueuedSmsCandidate = QueuedSmsCandidate(
+        candidateKey = "opaque-key",
+        sourceIdentity = SmsSourceIdentity.androidSms(
+            providerMessageId = "provider-id",
+            sender = "AX-HDFCBK",
+            body = "Rs 500 debited",
+            sourceTimestamp = 1_000L,
+            messageType = 1,
+            receivedTimestamp = 1_100L
+        ),
+        sender = "AX-HDFCBK",
+        rawMessage = "Rs 500 debited",
+        date = 1_100L,
+        sourceTimestamp = 1_000L,
+        messageType = 1,
+        origin = origin,
+        claimToken = null,
+        attemptCount = 0
+    )
 
     @Test
     fun `foreground admission pause maps to retry without starting sync`() {
@@ -251,40 +508,6 @@ class SmsParserWorkerPolicyTest {
 
         assertSame(retry, result)
         assertFalse(started)
-    }
-
-    @Test
-    fun `ignored foreground message remains terminal`() {
-        val success = Any()
-        val retry = Any()
-
-        val result = foldIncomingSmsQueueResult(
-            queueResult = IncomingSmsQueueResult.IGNORED,
-            onQueuedTransaction = { error("Ignored SMS must not start foreground sync") },
-            onIgnored = { success },
-            onAdmissionPaused = { retry }
-        )
-
-        assertSame(success, result)
-    }
-
-    @Test
-    fun `direct worker does not run while model maintenance owns admission`() = runTest {
-        val delegate = mockk<HomeSyncDelegate>()
-        val retry = Any()
-        var processed = false
-        coEvery { delegate.tryEnterSmsWorkerFlow() } returns null
-
-        val result = withSmsWorkerFlowAdmission(
-            delegate = delegate,
-            onAdmissionPaused = { retry }
-        ) {
-            processed = true
-            Any()
-        }
-
-        assertSame(retry, result)
-        assertFalse(processed)
     }
 
     @Test
@@ -335,52 +558,22 @@ class SmsParserWorkerPolicyTest {
     }
 
     @Test
-    fun `parser work remains eligible after completed onboarding`() {
-        val preferences = mockk<SharedPreferences>()
-        every {
-            preferences.getBoolean("onboarding_completed", false)
-        } returns true
-
-        assertTrue(isOnboardingCompleteForSmsWork(preferences))
-    }
-
-    @Test
-    fun `second onboarding read observes reset committed while runtime acquire waited`() {
-        val preferences = mockk<SharedPreferences>()
-        every {
-            preferences.getBoolean("onboarding_completed", false)
-        } returnsMany listOf(true, false)
-
-        assertTrue(isOnboardingCompleteForSmsWork(preferences))
-        assertFalse(isOnboardingCompleteForSmsWork(preferences))
-        verify(exactly = 2) {
-            preferences.getBoolean("onboarding_completed", false)
+    fun `exception boundary retries and still propagates cancellation`() = runTest {
+        val retry = ListenableWorker.Result.retry()
+        var reported: Exception? = null
+        val result = protectSmsParserChain(
+            onFailure = { reported = it },
+            retryOrFinishChain = { retry }
+        ) {
+            throw IllegalStateException("delegate failed")
         }
-    }
+        assertEquals("delegate failed", reported?.message)
+        assertSame(retry, result)
 
-    @Test
-    fun `exception from foreground delegate or filter cannot poison appended work`() =
-        runTest {
-            val retry = ListenableWorker.Result.retry()
-            var reported: Exception? = null
-
-            val result = protectSmsParserChain(
-                onFailure = { reported = it },
-                retryOrFinishChain = { retry }
-            ) {
-                throw IllegalStateException("delegate failed")
-            }
-
-            assertEquals("delegate failed", reported?.message)
-            assertSame(retry, result)
-        }
-
-    @Test
-    fun `chain boundary still propagates worker cancellation`() = runTest {
         assertFailsWith<CancellationException> {
             protectSmsParserChain(
-                onFailure = { error("Cancellation must not be reported as failure") },
-                retryOrFinishChain = { ListenableWorker.Result.retry() }
+                onFailure = { error("Cancellation must not be reported") },
+                retryOrFinishChain = { retry }
             ) {
                 throw CancellationException("worker stopped")
             }
@@ -397,75 +590,60 @@ private class TestListenableFuture<T> : ListenableFuture<T> {
     private var failure: Throwable? = null
 
     fun complete(result: T) {
-        finish(result = result, failure = null, wasCancelled = false)
+        finish(result, null, false)
     }
 
     override fun addListener(listener: Runnable, executor: Executor) {
-        val executeImmediately = synchronized(monitor) {
-            if (completed) {
-                true
-            } else {
-                listeners += listener to executor
-                false
-            }
+        val immediate = synchronized(monitor) {
+            if (completed) true else false.also { listeners += listener to executor }
         }
-        if (executeImmediately) {
-            executor.execute(listener)
-        }
+        if (immediate) executor.execute(listener)
     }
 
     override fun cancel(mayInterruptIfRunning: Boolean): Boolean {
         synchronized(monitor) {
             if (completed) return false
         }
-        finish(result = null, failure = null, wasCancelled = true)
+        finish(null, null, true)
         return true
     }
 
     override fun isCancelled(): Boolean = synchronized(monitor) { cancelled }
-
     override fun isDone(): Boolean = synchronized(monitor) { completed }
 
     override fun get(): T {
         synchronized(monitor) {
-            while (!completed) {
-                monitor.wait()
-            }
+            while (!completed) monitor.wait()
             return resolvedValue()
         }
     }
 
     override fun get(timeout: Long, unit: TimeUnit): T {
-        val deadlineNanos = System.nanoTime() + unit.toNanos(timeout)
+        val deadline = System.nanoTime() + unit.toNanos(timeout)
         synchronized(monitor) {
             while (!completed) {
-                val remainingNanos = deadlineNanos - System.nanoTime()
-                if (remainingNanos <= 0) throw TimeoutException()
-                val millis = TimeUnit.NANOSECONDS.toMillis(remainingNanos)
-                val nanos = (remainingNanos - TimeUnit.MILLISECONDS.toNanos(millis)).toInt()
+                val remaining = deadline - System.nanoTime()
+                if (remaining <= 0) throw TimeoutException()
+                val millis = TimeUnit.NANOSECONDS.toMillis(remaining)
+                val nanos =
+                    (remaining - TimeUnit.MILLISECONDS.toNanos(millis)).toInt()
                 monitor.wait(millis, nanos)
             }
             return resolvedValue()
         }
     }
 
-    private fun finish(
-        result: T?,
-        failure: Throwable?,
-        wasCancelled: Boolean
-    ) {
+    private fun finish(result: T?, error: Throwable?, wasCancelled: Boolean) {
         val callbacks = synchronized(monitor) {
             if (completed) return
             completed = true
             cancelled = wasCancelled
             value = result
-            this.failure = failure
+            failure = error
             monitor.notifyAll()
             listeners.toList().also { listeners.clear() }
         }
-        callbacks.forEach { (listener, executor) ->
-            executor.execute(listener)
-        }
+        callbacks.forEach { (listener, executor) -> executor.execute(listener) }
     }
 
     @Suppress("UNCHECKED_CAST")

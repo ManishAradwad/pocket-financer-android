@@ -3,13 +3,22 @@ package com.pocketfinancer.data.db.entity
 import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
+import com.pocketfinancer.data.model.SmsSourceIdentity
 
 @Entity(
     tableName = "transactions",
     indices = [
         Index(value = ["accountId"]),
         Index(value = ["date"]),
-        Index(value = ["type"])
+        Index(value = ["type"]),
+        Index(
+            value = ["sourceConnector", "sourceMessageId"],
+            unique = true
+        ),
+        Index(
+            value = ["sourceConnector", "sourceFingerprint"],
+            unique = true
+        )
     ]
 )
 data class TransactionEntity(
@@ -28,5 +37,22 @@ data class TransactionEntity(
     val slmPromptEvalMs: Long? = null,
     val slmEvalMs: Long? = null,
     val slmNumTokens: Int? = null,
-    val slmModelName: String? = null
+    val slmModelName: String? = null,
+    val sourceConnector: String = SmsSourceIdentity.ANDROID_SMS_CONNECTOR,
+    val sourceProviderMessageId: String? = null,
+    val sourceMessageId: String = SmsSourceIdentity.androidSms(
+        providerMessageId = sourceProviderMessageId,
+        sender = sender,
+        body = rawMessage,
+        sourceTimestamp = date,
+        messageType = 1
+    ).messageId,
+    val sourceFingerprint: String = SmsSourceIdentity.androidSms(
+        providerMessageId = sourceProviderMessageId,
+        sender = sender,
+        body = rawMessage,
+        sourceTimestamp = date,
+        messageType = 1
+    ).fallbackFingerprint,
+    val sourceAlternateFingerprint: String? = null
 )

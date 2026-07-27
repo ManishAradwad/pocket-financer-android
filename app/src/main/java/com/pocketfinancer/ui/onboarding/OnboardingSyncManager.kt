@@ -5,6 +5,10 @@ import android.content.Intent
 import com.pocketfinancer.SlmAppFlowCoordinator
 import com.pocketfinancer.hardware.SlmTier
 import com.pocketfinancer.inference.ModelDownloader
+import com.pocketfinancer.setup.AdaptiveHistoryScanPolicy
+import com.pocketfinancer.setup.SetupActionableError
+import com.pocketfinancer.setup.SetupImportStatus
+import com.pocketfinancer.setup.SetupImportStore
 import java.io.File
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -16,8 +20,10 @@ import javax.inject.Singleton
 @Singleton
 class OnboardingSyncManager @Inject constructor(
     private val runGenerationStore: OnboardingRunGenerationStore,
-    private val appFlowCoordinator: SlmAppFlowCoordinator
+    private val appFlowCoordinator: SlmAppFlowCoordinator,
+    private val setupImportStore: SetupImportStore? = null
 ) {
+    private val historyScanPolicy = AdaptiveHistoryScanPolicy()
 
     enum class RunPurpose {
         INITIAL_SETUP,
@@ -57,6 +63,40 @@ class OnboardingSyncManager @Inject constructor(
         startRun(context, slm, RunPurpose.INITIAL_SETUP)
     }
 
+    fun startHistoricalImport(
+        context: Context,
+        slm: SlmTier,
+        coveredWindowDays: Int?
+    ) {
+        startRun(
+            context = context,
+            slm = slm,
+            purpose = RunPurpose.INITIAL_SETUP,
+            coveredWindowDays = coveredWindowDays
+        )
+    }
+
+    /**
+     * Re-checks the last durably verified window after an interrupted run.
+     *
+     * Candidates live only in process memory during the foreground historical
+     * import, so advancing immediately beyond [resumeWindowDays] after process
+     * death could skip a candidate that had been discovered but not saved.
+     * Atomic source identity makes this conservative re-read idempotent.
+     */
+    fun resumeHistoricalImport(
+        context: Context,
+        slm: SlmTier,
+        resumeWindowDays: Int
+    ) {
+        startRun(
+            context = context,
+            slm = slm,
+            purpose = RunPurpose.INITIAL_SETUP,
+            resumeWindowDays = resumeWindowDays
+        )
+    }
+
     fun startModelUpgrade(context: Context, slm: SlmTier) {
         startRun(context, slm, RunPurpose.MODEL_UPGRADE)
     }
@@ -64,9 +104,26 @@ class OnboardingSyncManager @Inject constructor(
     private fun startRun(
         context: Context,
         slm: SlmTier,
-        purpose: RunPurpose
+        purpose: RunPurpose,
+        coveredWindowDays: Int? = null,
+        resumeWindowDays: Int? = null
     ) {
         if (_syncState.value.isRunning) return
+        val durableSetup = setupImportStore?.state?.value
+        if (
+            purpose == RunPurpose.INITIAL_SETUP &&
+            durableSetup != null &&
+            !durableSetup.modelPrepared &&
+            !durableSetup.modelDownloadConfirmed
+        ) {
+            _syncState.value = _syncState.value.copy(
+                isRunning = false,
+                isDownloading = false,
+                modelLoadError =
+                    "Confirm the approximately 700 MB model download first."
+            )
+            return
+        }
 
         // Capture before checking the in-memory gate. If reset pauses after the
         // check, this old captured value becomes stale when reset commits. If
@@ -98,9 +155,34 @@ class OnboardingSyncManager @Inject constructor(
                 ""
             }
         )
+        if (purpose == RunPurpose.INITIAL_SETUP) {
+            val requestedWindowDays = initialHistoryWindowDays(
+                policy = historyScanPolicy,
+                coveredWindowDays = coveredWindowDays,
+                resumeWindowDays = resumeWindowDays
+            )
+            setupImportStore?.update { setup ->
+                setup.copy(
+                    status = if (setup.modelPrepared) {
+                        SetupImportStatus.SCANNING
+                    } else {
+                        SetupImportStatus.DOWNLOADING
+                    },
+                    activeScanWindowDays = requestedWindowDays,
+                    pauseReason = null,
+                    actionableError = null
+                )
+            }
+        }
         val intent = Intent(context, OnboardingService::class.java).apply {
             putExtra("EXTRA_SLM_ID", slm.id)
             putExtra(EXTRA_RUN_PURPOSE, purpose.name)
+            coveredWindowDays?.let {
+                putExtra(EXTRA_COVERED_HISTORY_WINDOW_DAYS, it)
+            }
+            resumeWindowDays?.let {
+                putExtra(EXTRA_RESUME_HISTORY_WINDOW_DAYS, it)
+            }
         }
         runGenerationStore.stamp(intent, requestedGeneration)
         try {
@@ -113,6 +195,19 @@ class OnboardingSyncManager @Inject constructor(
                 modelLoadError =
                     error.message ?: "Could not start background model work."
             )
+            if (purpose == RunPurpose.INITIAL_SETUP) {
+                setupImportStore?.update {
+                    it.copy(
+                        status = SetupImportStatus.FAILED,
+                        actionableError = SetupActionableError(
+                            code = "BACKGROUND_START_FAILED",
+                            message = error.message
+                                ?: "Could not start background setup work.",
+                            actionLabel = "Try again"
+                        )
+                    )
+                }
+            }
         }
     }
 
@@ -232,6 +327,18 @@ class OnboardingSyncManager @Inject constructor(
                 )
             )
         }
+        if (_syncState.value.runPurpose == RunPurpose.INITIAL_SETUP) {
+            setupImportStore?.update {
+                it.copy(
+                    status = SetupImportStatus.FAILED,
+                    actionableError = SetupActionableError(
+                        code = "MODEL_PREPARATION_FAILED",
+                        message = visibleError,
+                        actionLabel = "Retry download"
+                    )
+                )
+            }
+        }
     }
 
     fun updateState(transform: (OnboardingSyncState) -> OnboardingSyncState) {
@@ -246,5 +353,9 @@ class OnboardingSyncManager @Inject constructor(
         private const val BYTES_PER_MEBIBYTE = 1_048_576f
         internal const val EXTRA_RUN_PURPOSE =
             "com.pocketfinancer.ui.onboarding.EXTRA_RUN_PURPOSE"
+        internal const val EXTRA_COVERED_HISTORY_WINDOW_DAYS =
+            "com.pocketfinancer.ui.onboarding.EXTRA_COVERED_HISTORY_WINDOW_DAYS"
+        internal const val EXTRA_RESUME_HISTORY_WINDOW_DAYS =
+            "com.pocketfinancer.ui.onboarding.EXTRA_RESUME_HISTORY_WINDOW_DAYS"
     }
 }

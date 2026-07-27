@@ -135,7 +135,7 @@ class TransactionDaoTest {
     }
 
     @Test
-    fun `insert with same id should replace`() {
+    fun `explicit update changes editable fields without replace semantics`() {
         runBlocking {
             val id = UUID.randomUUID().toString()
             val original = TransactionEntity(
@@ -145,12 +145,12 @@ class TransactionDaoTest {
             )
             dao.insert(original)
 
-            val updated = TransactionEntity(
-                id = id, amount = 999.0, merchant = "Updated",
-                date = 1000L, type = "credit", accountId = "a1",
-                rawMessage = "updated", sender = "AX-BANK"
+            val updated = original.copy(
+                amount = 999.0,
+                merchant = "Updated",
+                type = "credit"
             )
-            dao.insert(updated)
+            dao.update(updated)
 
             val loaded = dao.getById(id)
             assertNotNull(loaded)

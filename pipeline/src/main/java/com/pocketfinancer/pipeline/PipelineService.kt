@@ -66,7 +66,8 @@ class PipelineService @Inject constructor(
      */
     sealed interface ProcessingResult {
         data class Saved(
-            val transaction: ExtractionParser.ExtractedTransaction
+            val transaction: ExtractionParser.ExtractedTransaction,
+            val newlyInserted: Boolean = true
         ) : ProcessingResult
 
         data class Skipped(val reason: SkipReason) : ProcessingResult
@@ -184,7 +185,7 @@ class PipelineService @Inject constructor(
                 "Unknown Merchant"
             }
 
-        transactionRepository.insert(
+        val insertion = transactionRepository.insertIfAbsent(
             TransactionRepository.NewTransaction(
                 amount = parsed.amount,
                 merchant = merchantName,
@@ -196,12 +197,20 @@ class PipelineService @Inject constructor(
                 slmPromptEvalMs = result.perf?.tPromptEvalMs,
                 slmEvalMs = result.perf?.tEvalMs,
                 slmNumTokens = result.perf?.nTokens,
-                slmModelName = File(result.model.modelPath).name
+                slmModelName = File(result.model.modelPath).name,
+                sourceIdentity = sms.sourceIdentity
             )
         )
 
-        emit(Stage.SAVED, "Transaction saved: ₹${parsed.amount} ${parsed.type.name}")
-        return ProcessingResult.Saved(parsed)
+        if (insertion.inserted) {
+            emit(Stage.SAVED, "Transaction saved")
+        } else {
+            emit(Stage.SAVED, "Transaction already saved")
+        }
+        return ProcessingResult.Saved(
+            transaction = parsed,
+            newlyInserted = insertion.inserted
+        )
     }
 
     private fun inferBankFromSender(sender: String): String {

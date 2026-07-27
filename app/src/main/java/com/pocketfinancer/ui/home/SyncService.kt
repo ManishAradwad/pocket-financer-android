@@ -12,6 +12,7 @@ import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.pocketfinancer.pipeline.SmsNotificationHelper
+import com.pocketfinancer.ui.onboarding.OnboardingRunGenerationStore
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.*
 import javax.inject.Inject
@@ -22,20 +23,35 @@ class SyncService : Service() {
     @Inject
     lateinit var syncManager: HomeSyncManager
 
+    @Inject
+    lateinit var runGenerationStore: OnboardingRunGenerationStore
+
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var job: Job? = null
 
     companion object {
         private const val TAG = "SyncService"
         private const val NOTIFICATION_ID = 20002
+        private const val APP_SETTINGS = ".app_settings"
+        private const val ONBOARDING_COMPLETED = "onboarding_completed"
 
         fun start(context: Context) {
-            val intent = Intent(context, SyncService::class.java)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
+            // Capture before Android accepts the start. A reset racing after
+            // this read advances the generation atomically with relocking the
+            // shell, so delayed delivery cannot repopulate erased data.
+            val generation = context
+                .getSharedPreferences(APP_SETTINGS, Context.MODE_PRIVATE)
+                .getLong(
+                    OnboardingRunGenerationStore.PREFERENCE_KEY,
+                    OnboardingRunGenerationStore.INITIAL_GENERATION
+                )
+            val intent = Intent(context, SyncService::class.java).apply {
+                putExtra(
+                    OnboardingRunGenerationStore.EXTRA_RUN_GENERATION,
+                    generation
+                )
             }
+            context.startForegroundService(intent)
         }
 
         fun stop(context: Context) {
@@ -69,6 +85,23 @@ class SyncService : Service() {
             startForeground(NOTIFICATION_ID, initialNotification)
         }
 
+        val shellUnlocked = getSharedPreferences(
+            APP_SETTINGS,
+            Context.MODE_PRIVATE
+        ).getBoolean(ONBOARDING_COMPLETED, false)
+        if (
+            !manualSyncStartAllowed(
+                shellUnlocked = shellUnlocked,
+                generationIsCurrent = runGenerationStore.isCurrent(intent)
+            )
+        ) {
+            Log.i(TAG, "Rejecting stale, unstamped, or pre-shell sync start")
+            if (stopSelfResult(startId)) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            }
+            return START_NOT_STICKY
+        }
+
         job = serviceScope.launch {
             try {
                 // Listen to HomeSyncManager progress to dynamically update the notification text and bar
@@ -100,11 +133,36 @@ class SyncService : Service() {
 
                 // Check again for unsynced messages and run execution
                 syncManager.checkForUnsyncedSms()
+                val scannedState = syncManager.syncState.value
+                when (scannedState.recentScanOutcome) {
+                    HomeSyncState.RecentScanOutcome.FAILED ->
+                        error(
+                            scannedState.scanError
+                                ?: "The recent SMS scan failed."
+                        )
+                    HomeSyncState.RecentScanOutcome.PERMISSION_NEEDED ->
+                        error("SMS access is required to scan recent alerts.")
+                    HomeSyncState.RecentScanOutcome.NOT_RUN ->
+                        error(
+                            scannedState.scanError
+                                ?: "The recent SMS scan did not start."
+                        )
+                    HomeSyncState.RecentScanOutcome.SUCCESS -> Unit
+                }
+                if (scannedState.queue.none { it.status == "pending" }) {
+                    flowJob.cancel()
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    showNoEligibleNotification(
+                        scannedState.recentScanWindowDays
+                    )
+                    return@launch
+                }
                 syncManager.executeSync(this@SyncService)
                 flowJob.cancel()
 
                 // Gather sync metrics
                 val finalState = syncManager.syncState.value
+                finalState.syncError?.let { error(it) }
                 val totalSynced = finalState.queue.count { it.status == "synced" }
                 val totalSkipped = finalState.queue.count { it.status == "filtered_out" }
                 val totalErrors = finalState.queue.count { it.status == "error" }
@@ -169,6 +227,21 @@ class SyncService : Service() {
         nm.notify(NOTIFICATION_ID, builder.build())
     }
 
+    private fun showNoEligibleNotification(windowDays: Int?) {
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val range = windowDays?.let { " in the last $it days" }.orEmpty()
+        val builder = NotificationCompat.Builder(this, SmsNotificationHelper.CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.stat_sys_download_done)
+            .setContentTitle("Recent SMS Scan Finished")
+            .setContentText("No new eligible transaction alerts were found$range.")
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setOngoing(false)
+            .setAutoCancel(true)
+            .setContentIntent(getAppPendingIntent())
+
+        nm.notify(NOTIFICATION_ID, builder.build())
+    }
+
     private fun showErrorNotification(error: String) {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val builder = NotificationCompat.Builder(this, SmsNotificationHelper.CHANNEL_ID)
@@ -205,3 +278,8 @@ class SyncService : Service() {
         super.onDestroy()
     }
 }
+
+internal fun manualSyncStartAllowed(
+    shellUnlocked: Boolean,
+    generationIsCurrent: Boolean
+): Boolean = shellUnlocked && generationIsCurrent

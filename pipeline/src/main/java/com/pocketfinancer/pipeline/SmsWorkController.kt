@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.work.Operation
 import androidx.work.WorkManager
 import androidx.work.await
+import com.pocketfinancer.data.repository.SmsIngestionRepository
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
@@ -52,6 +53,15 @@ interface SmsWorkController {
      * already held. It must not be used alone to establish a reset boundary.
      */
     suspend fun cancelPending()
+
+    /**
+     * Applies the automatic-processing consistency boundary without cancelling
+     * a running worker. Pending automatic candidates are deleted atomically;
+     * claimed candidates have already snapshotted ON and finish normally.
+     *
+     * @return number of encrypted pending candidates removed.
+     */
+    suspend fun discardPendingAutomaticWork(): Int
 }
 
 /**
@@ -125,7 +135,8 @@ internal class SmsWorkAdmissionGate @Inject constructor() {
 @Singleton
 class WorkManagerSmsWorkController @Inject internal constructor(
     @ApplicationContext private val context: Context,
-    private val admissionGate: SmsWorkAdmissionGate
+    private val admissionGate: SmsWorkAdmissionGate,
+    private val ingestionRepository: SmsIngestionRepository
 ) : SmsWorkController {
     override fun pauseAdmissions(): SmsWorkAdmissionPause =
         WorkManagerAdmissionPause(
@@ -137,9 +148,12 @@ class WorkManagerSmsWorkController @Inject internal constructor(
         cancelUniqueWork().await()
     }
 
+    override suspend fun discardPendingAutomaticWork(): Int =
+        ingestionRepository.discardPendingAutomatic()
+
     private fun cancelUniqueWork(): Operation =
         WorkManager.getInstance(context)
-            .cancelUniqueWork(SmsWorkSchedulerImpl.UNIQUE_SMS_PARSER_WORK)
+            .cancelAllWorkByTag(SmsParserWorker.WORK_TAG)
 
     private class WorkManagerAdmissionPause(
         private val gatePause: SmsWorkAdmissionGate.GatePause,

@@ -1,7 +1,6 @@
 package com.pocketfinancer.sms
 
 import android.Manifest
-import android.app.Activity
 import android.content.Context
 import android.content.pm.PackageManager
 import androidx.core.content.ContextCompat
@@ -56,14 +55,6 @@ class SmsRepository @Inject constructor(
             kotlinx.coroutines.delay(intervalMs)
         }
     }
-
-    /**
-     * Listen for real-time incoming SMS via BroadcastReceiver.
-     * Returns cold Flow — starts emitting when collected.
-     */
-    fun listenForIncomingSms(): Flow<SmsReader.SmsMessage> {
-        return SmsReceiver.incomingSmsFlow()
-    }
 }
 
 /**
@@ -71,6 +62,32 @@ class SmsRepository @Inject constructor(
  * Decoupled from the worker implementation to avoid circular module dependencies.
  */
 interface SmsWorkScheduler {
-    fun scheduleSmsParsing(address: String, body: String, date: Long)
+    suspend fun scheduleSmsParsing(message: SmsReader.SmsMessage): SmsScheduleResult
+
+    /**
+     * Restores the encrypted candidate -> WorkManager handoff after process
+     * death. Implementations must enqueue by opaque key only.
+     */
+    suspend fun reconcilePendingAutomaticWork()
+
+    suspend fun scheduleSmsParsing(
+        address: String,
+        body: String,
+        date: Long
+    ): SmsScheduleResult = scheduleSmsParsing(
+        SmsReader.SmsMessage(
+            address = address,
+            body = body,
+            date = date,
+            type = 1
+        )
+    )
+}
+
+enum class SmsScheduleResult {
+    SCHEDULED,
+    ALREADY_SAVED,
+    AUTOMATIC_DISABLED,
+    ADMISSION_PAUSED
 }
 

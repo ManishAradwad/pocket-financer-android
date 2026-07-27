@@ -219,7 +219,12 @@ class TransactionRepositoryTest {
             .allowMainThreadQueries()
             .build()
         mockAccountRepo = AccountRepository(db.accountDao(), db.transactionDao(), runConsolidationOnInit = false)
-        repo = TransactionRepository(db, db.transactionDao(), mockAccountRepo)
+        repo = TransactionRepository(
+            db,
+            db.transactionDao(),
+            mockAccountRepo,
+            db.queuedSmsCandidateDao()
+        )
     }
 
     @After

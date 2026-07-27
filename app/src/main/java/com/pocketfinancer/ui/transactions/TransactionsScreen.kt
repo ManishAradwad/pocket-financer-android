@@ -42,7 +42,6 @@ import com.pocketfinancer.data.model.Transaction
 import com.pocketfinancer.data.model.TransactionType
 import com.pocketfinancer.data.model.Account
 import com.pocketfinancer.ui.home.HomeSyncState
-import com.pocketfinancer.ui.home.SyncSmsItem
 import com.pocketfinancer.ui.theme.*
 import java.text.SimpleDateFormat
 import java.util.*
@@ -54,7 +53,7 @@ fun TransactionsScreen(
     viewModel: TransactionsViewModel = hiltViewModel()
 ) {
     val state by viewModel.uiState.collectAsState()
-    var selectedProcessingSms by remember { mutableStateOf<SyncSmsItem?>(null) }
+    var selectedProcessingSmsId by remember { mutableStateOf<String?>(null) }
     var isSearching by remember { mutableStateOf(false) }
     var sortMenuExpanded by remember { mutableStateOf(false) }
     val focusRequester = remember { FocusRequester() }
@@ -386,7 +385,9 @@ fun TransactionsScreen(
                             ActiveSyncCard(
                                 activeSms = syncCardSms,
                                 syncState = state.syncState,
-                                onClick = { selectedProcessingSms = syncCardSms }
+                                onClick = {
+                                    selectedProcessingSmsId = syncCardSms.id
+                                }
                             )
                         }
                     }
@@ -1013,9 +1014,13 @@ fun TransactionsScreen(
         }
 
         // ── Telemetry Details Bottom Sheet ──
+        val selectedProcessingSms =
+            selectedProcessingSmsId?.let { selectedId ->
+                state.syncState.queue.firstOrNull { it.id == selectedId }
+            }
         if (selectedProcessingSms != null) {
-            val sms = selectedProcessingSms!!
-            
+            val sms = selectedProcessingSms
+
             val currentIndex = state.syncState.currentIndex
             val isActive = state.syncState.status == HomeSyncState.Status.SYNCING &&
                     currentIndex != null &&
@@ -1024,7 +1029,11 @@ fun TransactionsScreen(
 
             val activeStageIndex = if (isActive) {
                 state.syncState.currentStageIndex ?: 0
-            } else if (sms.status == "synced" || sms.status == "filtered_out") {
+            } else if (
+                sms.status == "synced" ||
+                sms.status == "already_saved" ||
+                sms.status == "filtered_out"
+            ) {
                 4
             } else {
                 0
@@ -1040,6 +1049,8 @@ fun TransactionsScreen(
                 state.syncState.jsonOutput
             } else if (sms.status == "synced") {
                 "Raw JSON output was not retained after sync."
+            } else if (sms.status == "already_saved") {
+                "Raw JSON output was not retained for an existing transaction."
             } else if (sms.status == "filtered_out") {
                 "No transaction JSON was retained for this message."
             } else if (sms.status == "error") {
@@ -1061,6 +1072,8 @@ fun TransactionsScreen(
                 }
             } else if (sms.status == "synced") {
                 "Saved transaction: amount=${sms.parsedAmount ?: "-"}, counterparty=${sms.parsedMerchant ?: "-"}"
+            } else if (sms.status == "already_saved") {
+                "The encrypted ledger already owns this source evidence."
             } else if (sms.status == "filtered_out") {
                 "No transaction was saved for this message."
             } else if (sms.status == "error") {
@@ -1070,7 +1083,7 @@ fun TransactionsScreen(
             }
 
             ModalBottomSheet(
-                onDismissRequest = { selectedProcessingSms = null },
+                onDismissRequest = { selectedProcessingSmsId = null },
                 sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
                 containerColor = M3_SurfaceContainerLow,
                 contentColor = M3_OnSurface,
@@ -1100,13 +1113,13 @@ fun TransactionsScreen(
                     activeStageIndex = activeStageIndex,
                     thinkingOutput = finalThinkingOutput,
                     jsonOutput = finalJsonOutput,
-                    filterLogs = viewModel.getFilterLogs(sms.sender, sms.body),
-                    kvLogs = viewModel.getKvCacheLogs(sms.sender, sms.body),
-                    slmPrompt = viewModel.getSlmPrompt(sms.sender, sms.body),
+                    filterLogs = viewModel.getFilterLogs(sms),
+                    kvLogs = viewModel.getKvCacheLogs(sms),
+                    slmPrompt = viewModel.getSlmPrompt(sms),
                     parsedOutput = finalParsedOutput,
                     performanceText = performanceText,
                     activeModelName = state.syncState.activeModelName,
-                    onClose = { selectedProcessingSms = null }
+                    onClose = { selectedProcessingSmsId = null }
                 )
             }
         }

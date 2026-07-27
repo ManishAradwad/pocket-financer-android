@@ -17,10 +17,16 @@ import com.pocketfinancer.pipeline.PromptBuilder
 import com.pocketfinancer.pipeline.ExtractionParser
 import com.pocketfinancer.hardware.DeviceCapabilities
 import com.pocketfinancer.hardware.SlmTier
+import com.pocketfinancer.hardware.isPublishedModelArtifact
 import com.pocketfinancer.hardware.resolveActiveSlmTier
 import com.pocketfinancer.inference.ModelDownloader
 import com.pocketfinancer.inference.SlmModelStorage
 import com.pocketfinancer.inference.SlmRuntime
+import com.pocketfinancer.setup.SetupImportState
+import com.pocketfinancer.setup.SetupImportStatus
+import com.pocketfinancer.setup.SetupImportStore
+import com.pocketfinancer.setup.reconcileSetupModelAvailability
+import com.pocketfinancer.sms.SmsRepository
 import com.pocketfinancer.ui.onboarding.OnboardingStep
 import com.pocketfinancer.ui.onboarding.OnboardingSyncManager
 import java.util.Calendar
@@ -29,8 +35,8 @@ import javax.inject.Inject
 data class PeriodData(
     val amount: Double = 0.0,
     val txnCount: Int = 0,
-    val deltaDir: String = "less", // "less" | "more"
-    val deltaLabel: String = "Same as previous",
+    val deltaDir: String = "same", // "less" | "more" | "same"
+    val deltaLabel: String = "No spending in either period",
     val recent: List<Transaction> = emptyList()
 )
 
@@ -53,8 +59,10 @@ data class ModelUpgradeRecommendation(
 data class HomeUiState(
     val selectedPeriod: String = "Day", // "Day" | "Week" | "Month"
     val periodData: Map<String, PeriodData> = emptyMap(),
+    val totalTransactionCount: Int = 0,
     val syncState: HomeSyncState = HomeSyncState(),
-    val upgradeRecommendation: ModelUpgradeRecommendation = ModelUpgradeRecommendation()
+    val upgradeRecommendation: ModelUpgradeRecommendation = ModelUpgradeRecommendation(),
+    val setupImportState: SetupImportState = SetupImportState()
 )
 
 @HiltViewModel
@@ -69,7 +77,9 @@ class HomeViewModel @Inject constructor(
     private val extractionParser: ExtractionParser,
     private val deviceCapabilities: DeviceCapabilities,
     private val modelDownloader: ModelDownloader,
-    private val onboardingSyncManager: OnboardingSyncManager
+    private val onboardingSyncManager: OnboardingSyncManager,
+    private val smsRepository: SmsRepository,
+    private val setupImportStore: SetupImportStore
 ) : ViewModel() {
 
     private val _selectedPeriod = MutableStateFlow("Day")
@@ -82,7 +92,8 @@ class HomeViewModel @Inject constructor(
         syncManager.syncState,
         modelDownloader.state,
         onboardingSyncManager.syncState,
-        _isDismissed
+        _isDismissed,
+        setupImportStore.state
     ) { flows ->
         @Suppress("UNCHECKED_CAST")
         val txs = flows[0] as List<Transaction>
@@ -91,6 +102,7 @@ class HomeViewModel @Inject constructor(
         val downloadState = flows[3] as ModelDownloader.DownloadState
         val onboardingSyncState = flows[4] as OnboardingSyncManager.OnboardingSyncState
         val isDismissed = flows[5] as Boolean
+        val setupImportState = flows[6] as SetupImportState
 
         val periodDataMap = calculatePeriodData(txs)
         val device = deviceCapabilities.assessDevice()
@@ -158,8 +170,10 @@ class HomeViewModel @Inject constructor(
         HomeUiState(
             selectedPeriod = period,
             periodData = periodDataMap,
+            totalTransactionCount = txs.size,
             syncState = syncState,
-            upgradeRecommendation = upgradeRec
+            upgradeRecommendation = upgradeRec,
+            setupImportState = setupImportState
         )
     }.stateIn(
         scope = viewModelScope,
@@ -168,7 +182,7 @@ class HomeViewModel @Inject constructor(
     )
 
     init {
-        checkForUnsynced()
+        refreshPermissionHealth()
     }
 
     fun selectPeriod(period: String) {
@@ -177,21 +191,121 @@ class HomeViewModel @Inject constructor(
 
     fun checkForUnsynced() {
         viewModelScope.launch {
+            if (
+                !manualRecentSyncAvailable(
+                    setupImportStore.state.value.status
+                )
+            ) {
+                return@launch
+            }
+            if (!smsRepository.hasPermissions()) {
+                setupImportStore.reconcilePermission(granted = false)
+                return@launch
+            }
             syncManager.checkForUnsyncedSms()
-            val pendingCount = syncManager.syncState.value.queue.count { it.status == "pending" }
-            val toastMsg = if (pendingCount > 0) {
-                "Scan complete: Found $pendingCount unsynced transactional messages."
-            } else {
-                "Scan complete: Up to date. No new transactional messages found."
+            val scanState = syncManager.syncState.value
+            val pendingCount = scanState.queue.count { it.status == "pending" }
+            val toastMsg = when (scanState.recentScanOutcome) {
+                HomeSyncState.RecentScanOutcome.FAILED ->
+                    scanState.scanError ?: "The recent SMS scan failed."
+                HomeSyncState.RecentScanOutcome.PERMISSION_NEEDED ->
+                    "Restore SMS access to scan recent alerts."
+                HomeSyncState.RecentScanOutcome.SUCCESS ->
+                    if (pendingCount > 0) {
+                        "Found $pendingCount eligible message" +
+                            if (pendingCount == 1) {
+                                " ready to process."
+                            } else {
+                                "s ready to process."
+                            }
+                    } else {
+                        "No new eligible alerts were found in this recent scan."
+                    }
+                HomeSyncState.RecentScanOutcome.NOT_RUN ->
+                    scanState.scanError
+                        ?: "The recent SMS scan did not start."
             }
             android.widget.Toast.makeText(context, toastMsg, android.widget.Toast.LENGTH_SHORT).show()
         }
     }
 
     fun startSync() {
+        if (
+            !manualRecentSyncAvailable(
+                setupImportStore.state.value.status
+            )
+        ) {
+            return
+        }
+        if (!smsRepository.hasPermissions()) {
+            setupImportStore.reconcilePermission(granted = false)
+            return
+        }
         viewModelScope.launch {
             SyncService.start(context)
         }
+    }
+
+    fun refreshPermissionHealth() {
+        reconcilePreparedModelAvailability()
+        setupImportStore.reconcilePermission(
+            granted = smsRepository.hasPermissions()
+        )
+    }
+
+    fun onSmsPermissionResult(granted: Boolean) {
+        setupImportStore.reconcilePermission(granted)
+    }
+
+    fun confirmModelDownload() {
+        setupImportStore.setModelDownloadConfirmed(true)
+    }
+
+    fun startSetupOrResume() {
+        val setup = reconcilePreparedModelAvailability()
+        if (!smsRepository.hasPermissions()) {
+            setupImportStore.reconcilePermission(granted = false)
+            return
+        }
+        if (!setup.modelPrepared && !setup.modelDownloadConfirmed) return
+
+        val resumableWindow =
+            (setup.activeScanWindowDays ?: setup.coverageWindowDays)
+            ?.takeIf {
+                setup.status in setOf(
+                    SetupImportStatus.PAUSED,
+                    SetupImportStatus.FAILED
+                )
+            }
+        if (resumableWindow != null) {
+            onboardingSyncManager.resumeHistoricalImport(
+                context = context,
+                slm = currentSetupTier(),
+                resumeWindowDays = resumableWindow
+            )
+        } else {
+            onboardingSyncManager.startOnboarding(
+                context,
+                currentSetupTier()
+            )
+        }
+    }
+
+    fun scanOlderMessages() {
+        if (!smsRepository.hasPermissions()) {
+            setupImportStore.reconcilePermission(granted = false)
+            return
+        }
+        val setup = reconcilePreparedModelAvailability()
+        if (!setup.modelPrepared) {
+            startSetupOrResume()
+            return
+        }
+        onboardingSyncManager.startHistoricalImport(
+            context = context,
+            slm = currentSetupTier(),
+            coveredWindowDays = setup.coverageWindowDays
+        )
     }
 
     fun startModelUpgrade() {
@@ -223,6 +337,46 @@ class HomeViewModel @Inject constructor(
         syncManager.resetState()
     }
 
+    private fun currentSetupTier(): SlmTier {
+        val preparedModel = publishedSetupTier()
+        return setupTierForPreparation(
+            modelPrepared =
+                setupImportStore.state.value.modelPrepared &&
+                    preparedModel != null,
+            resolvedActiveTier = preparedModel
+        )
+    }
+
+    /**
+     * Setup may reuse only a model artifact that is actually published on
+     * disk. Hardware recommendation is intentionally not a fallback here:
+     * before preparation it could turn the explicit ~700 MB confirmation into
+     * an unconfirmed multi-gigabyte download.
+     */
+    private fun publishedSetupTier(): SlmTier? {
+        val selectedId = context
+            .getSharedPreferences(APP_SETTINGS, Context.MODE_PRIVATE)
+            .getString(KEY_SELECTED_SLM_ID, null)
+        val selectedTier = SlmTier.ALL_TIERS.find { it.id == selectedId }
+        return buildList {
+            selectedTier?.let(::add)
+            add(SlmTier.DEFAULT_ONBOARDING_SLM)
+            addAll(SlmTier.ALL_TIERS)
+        }
+            .distinctBy { it.id }
+            .firstOrNull { tier ->
+                isPublishedModelArtifact(
+                    modelStorage.modelFile(tier.modelFile)
+                )
+            }
+    }
+
+    private fun reconcilePreparedModelAvailability(): SetupImportState {
+        return setupImportStore.reconcileModelAvailability(
+            hasPublishedModel = publishedSetupTier() != null
+        )
+    }
+
     private fun calculatePeriodData(txs: List<Transaction>): Map<String, PeriodData> {
         // Date timestamps
         val now = System.currentTimeMillis()
@@ -243,9 +397,11 @@ class HomeViewModel @Inject constructor(
         val todayCount = todayDebits.size
         val yesterdayAmount = txs.filter { it.date in yesterdayStart..yesterdayEnd && it.type == TransactionType.DEBIT }.sumOf { it.amount }
         
-        val todayDeltaVal = Math.abs(todayAmount - yesterdayAmount)
-        val todayDeltaDir = if (todayAmount >= yesterdayAmount) "more" else "less"
-        val todayDeltaLabel = "₹${String.format("%,.0f", todayDeltaVal)} $todayDeltaDir than yesterday"
+        val todayComparison = spendingComparison(
+            currentAmount = todayAmount,
+            previousAmount = yesterdayAmount,
+            previousPeriodLabel = "yesterday"
+        )
 
         // 2. Week calculations (Start of current week, e.g. Monday)
         val weekCal = Calendar.getInstance()
@@ -266,9 +422,11 @@ class HomeViewModel @Inject constructor(
         val thisWeekCount = thisWeekDebits.size
         val lastWeekAmount = txs.filter { it.date in lastWeekStart..lastWeekEnd && it.type == TransactionType.DEBIT }.sumOf { it.amount }
 
-        val weekDeltaVal = Math.abs(thisWeekAmount - lastWeekAmount)
-        val weekDeltaDir = if (thisWeekAmount >= lastWeekAmount) "more" else "less"
-        val weekDeltaLabel = "₹${String.format("%,.0f", weekDeltaVal)} $weekDeltaDir than last week"
+        val weekComparison = spendingComparison(
+            currentAmount = thisWeekAmount,
+            previousAmount = lastWeekAmount,
+            previousPeriodLabel = "last week"
+        )
 
         // 3. Month calculations
         val monthCal = Calendar.getInstance().apply {
@@ -288,48 +446,62 @@ class HomeViewModel @Inject constructor(
         val thisMonthCount = thisMonthDebits.size
         val lastMonthAmount = txs.filter { it.date in lastMonthStart..lastMonthEnd && it.type == TransactionType.DEBIT }.sumOf { it.amount }
 
-        val monthDeltaVal = Math.abs(thisMonthAmount - lastMonthAmount)
-        val monthDeltaDir = if (thisMonthAmount >= lastMonthAmount) "more" else "less"
-        val monthDeltaLabel = "₹${String.format("%,.0f", monthDeltaVal)} $monthDeltaDir than last month"
+        val monthComparison = spendingComparison(
+            currentAmount = thisMonthAmount,
+            previousAmount = lastMonthAmount,
+            previousPeriodLabel = "last month"
+        )
 
         return mapOf(
             "Day" to PeriodData(
                 amount = todayAmount,
                 txnCount = todayCount,
-                deltaDir = todayDeltaDir,
-                deltaLabel = todayDeltaLabel,
+                deltaDir = todayComparison.direction,
+                deltaLabel = todayComparison.label,
                 recent = todayDebits.take(5)
             ),
             "Week" to PeriodData(
                 amount = thisWeekAmount,
                 txnCount = thisWeekCount,
-                deltaDir = weekDeltaDir,
-                deltaLabel = weekDeltaLabel,
+                deltaDir = weekComparison.direction,
+                deltaLabel = weekComparison.label,
                 recent = thisWeekDebits.take(5)
             ),
             "Month" to PeriodData(
                 amount = thisMonthAmount,
                 txnCount = thisMonthCount,
-                deltaDir = monthDeltaDir,
-                deltaLabel = monthDeltaLabel,
+                deltaDir = monthComparison.direction,
+                deltaLabel = monthComparison.label,
                 recent = thisMonthDebits.take(5)
             )
         )
     }
 
-    fun getFilterLogs(sender: String, body: String): List<String> {
-        return smsFilterPipeline.filterWithDetails(sender, body).logs
+    fun getFilterLogs(item: SyncSmsItem): List<String> {
+        if (!item.hasDiagnosticSourceEvidence()) {
+            return listOf(SOURCE_EVIDENCE_UNAVAILABLE)
+        }
+        return smsFilterPipeline.filterWithDetails(item.sender, item.body).logs
     }
 
-    fun getKvCacheLogs(sender: String, body: String): List<String> {
+    fun getKvCacheLogs(item: SyncSmsItem): List<String> {
+        if (!item.hasDiagnosticSourceEvidence()) {
+            return listOf(SOURCE_EVIDENCE_UNAVAILABLE)
+        }
         return listOf(
             "KV cache telemetry is captured from the exact runtime request.",
             "Historical transactions do not currently persist cache-hit diagnostics."
         )
     }
 
-    fun getSlmPrompt(sender: String, body: String): String {
-        val rawPrompt = promptBuilder.buildExtractionPrompt(sender, body)
+    fun getSlmPrompt(item: SyncSmsItem): String {
+        if (!item.hasDiagnosticSourceEvidence()) {
+            return SOURCE_EVIDENCE_UNAVAILABLE
+        }
+        val rawPrompt = promptBuilder.buildExtractionPrompt(
+            item.sender,
+            item.body
+        )
         val hasThinking = slmRuntime.state.value.loadedModel?.hasThinkingMode ?: true
         return promptBuilder.buildChatPrompt(rawPrompt, enableThinking = hasThinking)
     }
@@ -339,6 +511,13 @@ class HomeViewModel @Inject constructor(
         return parsed?.let {
             "amount=${it.amount}, type=${it.type.name.lowercase()}, counterparty=${it.counterparty ?: "-"}, account=${it.account ?: "-"}"
         } ?: "Parsed: null (non-financial)"
+    }
+
+    private companion object {
+        const val SOURCE_EVIDENCE_UNAVAILABLE =
+            "Source evidence is unavailable after terminal processing."
+        const val APP_SETTINGS = ".app_settings"
+        const val KEY_SELECTED_SLM_ID = "selected_slm_id"
     }
 
     private fun isProbablyEmulator(): Boolean =
@@ -351,6 +530,15 @@ class HomeViewModel @Inject constructor(
     private fun allowDebugEmulatorOverride(): Boolean =
         (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0 &&
             isProbablyEmulator()
+}
+
+internal fun setupTierForPreparation(
+    modelPrepared: Boolean,
+    resolvedActiveTier: SlmTier?
+): SlmTier = if (modelPrepared) {
+    resolvedActiveTier ?: SlmTier.DEFAULT_ONBOARDING_SLM
+} else {
+    SlmTier.DEFAULT_ONBOARDING_SLM
 }
 
 internal fun canCancelModelUpgrade(
@@ -368,3 +556,33 @@ internal fun unfinishedModelUpgradeTarget(
         state.runPurpose == OnboardingSyncManager.RunPurpose.MODEL_UPGRADE &&
             state.step != OnboardingStep.COMPLETED
     }
+
+internal data class SpendingComparison(
+    val direction: String,
+    val label: String
+)
+
+internal fun spendingComparison(
+    currentAmount: Double,
+    previousAmount: Double,
+    previousPeriodLabel: String
+): SpendingComparison {
+    val delta = currentAmount - previousAmount
+    if (kotlin.math.abs(delta) < 0.005) {
+        return SpendingComparison(
+            direction = "same",
+            label = if (currentAmount == 0.0 && previousAmount == 0.0) {
+                "No spending in either period"
+            } else {
+                "Same as $previousPeriodLabel"
+            }
+        )
+    }
+    val direction = if (delta > 0) "more" else "less"
+    return SpendingComparison(
+        direction = direction,
+        label =
+            "₹${String.format("%,.0f", kotlin.math.abs(delta))} " +
+                "$direction than $previousPeriodLabel"
+    )
+}

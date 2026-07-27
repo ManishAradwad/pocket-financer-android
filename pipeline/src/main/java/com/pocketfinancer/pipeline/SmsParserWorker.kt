@@ -9,7 +9,9 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
-import com.pocketfinancer.data.repository.TransactionRepository
+import com.pocketfinancer.data.model.QueuedSmsCandidate
+import com.pocketfinancer.data.model.SmsCandidateOrigin
+import com.pocketfinancer.data.repository.SmsIngestionRepository
 import com.pocketfinancer.hardware.DeviceCapabilities
 import com.pocketfinancer.hardware.resolveActiveSlmTier
 import com.pocketfinancer.inference.SlmLease
@@ -18,7 +20,7 @@ import com.pocketfinancer.inference.SlmModelStorage
 import com.pocketfinancer.inference.SlmRuntime
 import com.pocketfinancer.inference.SlmRuntimeOwner
 import com.pocketfinancer.sms.SmsReader
-import com.pocketfinancer.sms.SmsRepository
+import com.pocketfinancer.sms.SmsScheduleResult
 import com.pocketfinancer.sms.SmsWorkScheduler
 import dagger.Binds
 import dagger.Module
@@ -34,11 +36,11 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 
 /**
- * Background worker to process one transaction SMS.
+ * Processes one encrypted queued SMS candidate.
  *
- * This worker runs in the application's default process. It obtains temporary
- * residency from the process-wide SLM runtime and releases only its own lease;
- * it never directly loads or unloads the native model.
+ * WorkManager receives only [KEY_CANDIDATE_KEY]. Sender and body remain inside
+ * the SQLCipher database until terminal rejection or until the transaction row
+ * atomically takes ownership of that evidence.
  */
 class SmsParserWorker(
     context: Context,
@@ -53,179 +55,176 @@ class SmsParserWorker(
         fun slmModelStorage(): SlmModelStorage
         fun deviceCapabilities(): DeviceCapabilities
         fun pipelineService(): PipelineService
-        fun smsRepository(): SmsRepository
-        fun transactionRepository(): TransactionRepository
         fun homeSyncDelegate(): HomeSyncDelegate
+        fun smsIngestionRepository(): SmsIngestionRepository
+        fun automaticProcessingPreferences(): AutomaticProcessingPreferences
     }
 
     override suspend fun doWork(): Result {
-        // A malformed item is terminal for that item, but must not poison the
-        // unique chain and prevent already-appended SMS work from running.
-        val address = inputData.getString(KEY_ADDRESS) ?: return Result.success()
-        val body = inputData.getString(KEY_BODY) ?: return Result.success()
-        val date = inputData.getLong(KEY_DATE, 0L)
-        val type = inputData.getInt(KEY_TYPE, 1)
+        val candidateKey = inputData.getString(KEY_CANDIDATE_KEY)
+            ?.takeIf(String::isNotBlank)
+            ?: return Result.success()
+        val claimToken = id.toString()
 
-        return protectSmsParserChain(
-            onFailure = { error ->
-                Log.e(TAG, "Exception in background SMS parser", error)
-                runCatching {
-                    SmsNotificationHelper.showFailureNotification(
-                        applicationContext,
-                        address,
-                        date,
-                        error.message ?: "Unknown error"
-                    )
-                }.onFailure { notificationError ->
-                    Log.e(TAG, "Failed to show parser failure notification", notificationError)
-                }
-            },
-            retryOrFinishChain = ::retryOrFinishChain
-        ) {
-            processValidInput(address, body, date, type)
+        val entryPoint = try {
+            EntryPointAccessors.fromApplication(
+                applicationContext,
+                ParserWorkerEntryPoint::class.java
+            )
+        } catch (error: Exception) {
+            Log.e(TAG, "SMS worker dependency lookup failed", error)
+            return retryOrFinishChain()
         }
-    }
+        // Older builds posted an exact-looking backlog summary from a
+        // truncated heuristic scan. It was neither complete nor proof that
+        // those messages were transactions, so retire any surviving copy and
+        // never recreate it from the automatic worker.
+        SmsNotificationHelper.cancelLegacyUnsyncedSummaryNotification(
+            applicationContext
+        )
+        val ingestionRepository = entryPoint.smsIngestionRepository()
+        val candidate = ingestionRepository.get(candidateKey)
+            ?: return Result.success()
 
-    /**
-     * Everything after structurally-valid WorkData lives under the chain-safe
-     * exception boundary in [doWork]. This includes Hilt entry-point lookup,
-     * foreground delegation, filtering, runtime acquisition, and persistence.
-     */
-    private suspend fun processValidInput(
-        address: String,
-        body: String,
-        date: Long,
-        type: Int
-    ): Result {
-        val prefs = applicationContext.getSharedPreferences(
+        val appPreferences = applicationContext.getSharedPreferences(
             APP_SETTINGS,
             Context.MODE_PRIVATE
         )
-        if (!isOnboardingCompleteForSmsWork(prefs)) {
-            // Persisted work can be recreated after process death. Once reset
-            // has committed onboarding=false it is stale and must never repopulate
-            // the freshly-cleared database.
-            Log.i(TAG, "Onboarding is incomplete; discarding stale parser work.")
+        if (!isOnboardingCompleteForSmsWork(appPreferences)) {
+            ingestionRepository.discardTerminal(candidateKey)
             return Result.success()
         }
-        val processIncoming = prefs.getBoolean(PROCESS_INCOMING_SMS, true)
 
-        val entryPoint = EntryPointAccessors.fromApplication(
-            applicationContext,
-            ParserWorkerEntryPoint::class.java
+        val claimDecision = claimSmsCandidateForRun(
+            candidate = candidate,
+            claimToken = claimToken,
+            automaticProcessingPreferences =
+                entryPoint.automaticProcessingPreferences(),
+            ingestionRepository = ingestionRepository
         )
-        val smsFilterPipeline = entryPoint.smsFilterPipeline()
-        val homeSyncDelegate = entryPoint.homeSyncDelegate()
-        val isForeground = homeSyncDelegate.isAppInForeground()
-
-        if (!processIncoming) {
-            Log.i(TAG, "Background SMS processing is disabled; skipping inference.")
-            if (isForeground) {
-                return routeThroughForegroundSync(
-                    homeSyncDelegate = homeSyncDelegate,
-                    address = address,
-                    body = body,
-                    date = date,
-                    startSyncWhenQueued = false
-                )
-            }
+        if (claimDecision is SmsCandidateClaimDecision.AutomaticDisabled) {
             return Result.success()
         }
-
-        if (isForeground) {
-            Log.i(TAG, "Routing SMS through the foreground sync service.")
-            return routeThroughForegroundSync(
-                homeSyncDelegate = homeSyncDelegate,
-                address = address,
-                body = body,
-                date = date,
-                startSyncWhenQueued = true
-            )
+        val claimed =
+            (claimDecision as SmsCandidateClaimDecision.Claimed).candidate
+        if (claimed == null) {
+            // Another worker owns this candidate. It will either finish or
+            // release it; duplicate work must never run inference concurrently.
+            return if (ingestionRepository.get(candidateKey) == null) {
+                Result.success()
+            } else {
+                retryOrFinishChain()
+            }
         }
 
-        return withSmsWorkerFlowAdmission(
-            delegate = homeSyncDelegate,
-            onAdmissionPaused = {
-                Log.i(
-                    TAG,
-                    "Selected-model maintenance owns SMS admission; retrying worker."
-                )
-                Result.retry()
-            }
-        ) {
-            processDirectlyInBackground(
+        return try {
+            processClaimedCandidate(
                 entryPoint = entryPoint,
-                smsFilterPipeline = smsFilterPipeline,
-                prefs = prefs,
-                address = address,
-                body = body,
-                date = date,
-                type = type
+                preferences = appPreferences,
+                candidate = claimed,
+                claimToken = claimToken
+            )
+        } catch (cancelled: CancellationException) {
+            withContext(NonCancellable) {
+                ingestionRepository.releaseForRetry(
+                    candidateKey = candidateKey,
+                    claimToken = claimToken,
+                    error = "Worker cancelled"
+                )
+            }
+            throw cancelled
+        } catch (error: Exception) {
+            Log.e(
+                TAG,
+                "Encrypted SMS candidate processing failed: " +
+                    error.javaClass.simpleName
+            )
+            runCatching {
+                SmsNotificationHelper.showFailureNotification(
+                    applicationContext,
+                    claimed.sender,
+                    claimed.date,
+                    "Local processing will retry."
+                )
+            }
+            retryClaimedOrDiscard(
+                ingestionRepository = ingestionRepository,
+                candidate = claimed,
+                claimToken = claimToken,
+                error = error.javaClass.simpleName
             )
         }
     }
 
-    private suspend fun routeThroughForegroundSync(
-        homeSyncDelegate: HomeSyncDelegate,
-        address: String,
-        body: String,
-        date: Long,
-        startSyncWhenQueued: Boolean
+    private suspend fun processClaimedCandidate(
+        entryPoint: ParserWorkerEntryPoint,
+        preferences: SharedPreferences,
+        candidate: QueuedSmsCandidate,
+        claimToken: String
     ): Result {
-        val queueResult = homeSyncDelegate.queueIncomingSms(address, body, date)
-        return foldIncomingSmsQueueResult(
-            queueResult = queueResult,
-            onQueuedTransaction = {
-                if (startSyncWhenQueued) {
-                    homeSyncDelegate.startSyncService()
-                }
-                Result.success()
-            },
-            onIgnored = { Result.success() },
-            onAdmissionPaused = {
-                Log.i(
-                    TAG,
-                    "Foreground SMS handoff was paused by selected-model maintenance; retrying."
-                )
-                Result.retry()
+        val ingestionRepository = entryPoint.smsIngestionRepository()
+        val flowLease = entryPoint.homeSyncDelegate().tryEnterSmsWorkerFlow()
+            ?: return retryClaimedOrDiscard(
+                ingestionRepository = ingestionRepository,
+                candidate = candidate,
+                claimToken = claimToken,
+                error = "Model maintenance owns admission"
+            )
+        return try {
+            processDirectlyInBackground(
+                entryPoint = entryPoint,
+                preferences = preferences,
+                candidate = candidate,
+                claimToken = claimToken
+            )
+        } finally {
+            withContext(NonCancellable) {
+                flowLease.release()
             }
-        )
+        }
     }
 
     private suspend fun processDirectlyInBackground(
         entryPoint: ParserWorkerEntryPoint,
-        smsFilterPipeline: SmsFilterPipeline,
-        prefs: SharedPreferences,
-        address: String,
-        body: String,
-        date: Long,
-        type: Int
+        preferences: SharedPreferences,
+        candidate: QueuedSmsCandidate,
+        claimToken: String
     ): Result {
-        val sms = SmsReader.SmsMessage(address, body, date, type)
-        if (!smsFilterPipeline.isTransactional(address, body)) {
-            Log.i(TAG, "SMS from $address is non-transactional; skipping inference.")
+        val ingestionRepository = entryPoint.smsIngestionRepository()
+        val sms = SmsReader.SmsMessage(
+            address = candidate.sender,
+            body = candidate.rawMessage,
+            date = candidate.date,
+            type = candidate.messageType,
+            providerMessageId = candidate.sourceIdentity.providerMessageId,
+            sourceTimestamp = candidate.sourceTimestamp
+        )
+        val filter = entryPoint.smsFilterPipeline()
+        if (!filter.isTransactional(sms.address, sms.body)) {
+            discardOwnedTerminalCandidate(
+                ingestionRepository = ingestionRepository,
+                candidateKey = candidate.candidateKey,
+                claimToken = claimToken
+            )
             SmsNotificationHelper.showSkippedNotification(
                 applicationContext,
-                address,
-                body,
-                date
+                sms.address,
+                sms.body,
+                sms.date
             )
             return Result.success()
         }
 
         val runtime = entryPoint.slmRuntime()
         val modelStorage = entryPoint.slmModelStorage()
-        val pipelineService = entryPoint.pipelineService()
         var lease: SlmLease? = null
-
         val workerResult = try {
             SmsNotificationHelper.showProcessingNotification(
                 applicationContext,
-                address,
-                date,
-                "Initializing local AI engine..."
+                sms.address,
+                sms.date,
+                "Preparing on-device processing..."
             )
-
             val device = entryPoint.deviceCapabilities().assessDevice()
             val tier = resolveActiveSlmTier(
                 applicationContext,
@@ -233,36 +232,24 @@ class SmsParserWorker(
                 device
             )
             if (tier == null) {
-                val message = "No viable SLM for this device (RAM below minimum)."
-                Log.e(TAG, message)
-                SmsNotificationHelper.showFailureNotification(
-                    applicationContext,
-                    address,
-                    date,
-                    message
+                return retryClaimedOrDiscard(
+                    ingestionRepository,
+                    candidate,
+                    claimToken,
+                    "No supported on-device model"
                 )
-                return Result.success()
             }
 
             val modelFile = modelStorage.modelFile(tier.modelFile)
             if (!modelFile.exists() || modelFile.length() == 0L) {
-                val message = "Selected model ${tier.name} is not downloaded yet."
-                Log.e(TAG, message)
-                SmsNotificationHelper.showFailureNotification(
-                    applicationContext,
-                    address,
-                    date,
-                    message
+                return retryClaimedOrDiscard(
+                    ingestionRepository,
+                    candidate,
+                    claimToken,
+                    "On-device model is not prepared"
                 )
-                return Result.success()
             }
 
-            SmsNotificationHelper.showProcessingNotification(
-                applicationContext,
-                address,
-                date,
-                "Waiting for local AI model ${tier.name}..."
-            )
             val spec = SlmModelSpec(
                 modelId = tier.id,
                 modelPath = modelFile.canonicalPath,
@@ -277,79 +264,89 @@ class SmsParserWorker(
             val acquiredLease = runtime.acquire(SlmRuntimeOwner.SMS_WORKER, spec)
             lease = acquiredLease
 
-            // The first onboarding check can race with a reset while this
-            // acquire waits behind runtime maintenance. Re-check after the
-            // lease handoff and before any extraction/persistence; returning
-            // here still releases the lease in the surrounding finally.
-            if (!isOnboardingCompleteForSmsWork(prefs)) {
-                Log.i(
-                    TAG,
-                    "Onboarding reset completed while runtime acquisition was queued; " +
-                        "discarding stale parser work."
+            // Reset may commit while model acquisition is suspended. Both the
+            // preference and durable claim must still be valid before inference
+            // can reach ledger persistence.
+            if (
+                !isOnboardingCompleteForSmsWork(preferences) ||
+                !ingestionRepository.isClaimOwned(
+                    candidate.candidateKey,
+                    claimToken
                 )
+            ) {
+                // A stale replacement now owns this encrypted evidence. The old
+                // worker must stop without deleting the replacement's claim.
                 return Result.success()
             }
 
             SmsNotificationHelper.showProcessingNotification(
                 applicationContext,
-                address,
-                date,
+                sms.address,
+                sms.date,
                 "Analyzing transaction content..."
             )
-
-            when (val processing = pipelineService.processSingle(sms, acquiredLease)) {
+            when (
+                val processing = entryPoint.pipelineService()
+                    .processSingle(sms, acquiredLease)
+            ) {
                 is PipelineService.ProcessingResult.Saved -> {
-                    val parsed = processing.transaction
-                    SmsNotificationHelper.showSuccessNotification(
-                        applicationContext,
-                        address,
-                        date,
-                        parsed.amount,
-                        parsed.counterparty ?: "Unknown Merchant"
-                    )
+                    // insertIfAbsent deletes the matching queued evidence in the
+                    // same Room transaction, whether it inserted or observed a
+                    // concurrent winner.
+                    if (processing.newlyInserted) {
+                        SmsNotificationHelper.showSuccessNotification(
+                            applicationContext,
+                            sms.address,
+                            sms.date,
+                            processing.transaction.amount,
+                            processing.transaction.counterparty
+                                ?: "Unknown Merchant"
+                        )
+                    }
                     Result.success()
                 }
 
                 is PipelineService.ProcessingResult.Skipped -> {
-                    Log.i(TAG, "Pipeline skipped SMS: ${processing.reason}")
+                    discardOwnedTerminalCandidate(
+                        ingestionRepository = ingestionRepository,
+                        candidateKey = candidate.candidateKey,
+                        claimToken = claimToken
+                    )
                     SmsNotificationHelper.showSkippedNotification(
                         applicationContext,
-                        address,
-                        body,
-                        date
+                        sms.address,
+                        sms.body,
+                        sms.date
                     )
                     Result.success()
                 }
 
-                is PipelineService.ProcessingResult.Stopped -> {
-                    val message = "Local AI inference was stopped before completion."
-                    Log.w(TAG, message)
-                    SmsNotificationHelper.showFailureNotification(
-                        applicationContext,
-                        address,
-                        date,
-                        message
+                is PipelineService.ProcessingResult.Stopped ->
+                    retryClaimedOrDiscard(
+                        ingestionRepository,
+                        candidate,
+                        claimToken,
+                        "On-device inference stopped"
                     )
-                    retryOrFinishChain()
-                }
 
-                is PipelineService.ProcessingResult.Failure -> {
-                    Log.e(TAG, processing.message)
-                    SmsNotificationHelper.showFailureNotification(
-                        applicationContext,
-                        address,
-                        date,
-                        processing.message
-                    )
+                is PipelineService.ProcessingResult.Failure ->
                     if (processing.retryable) {
-                        retryOrFinishChain()
+                        retryClaimedOrDiscard(
+                            ingestionRepository,
+                            candidate,
+                            claimToken,
+                            "On-device extraction failed"
+                        )
                     } else {
+                        discardOwnedTerminalCandidate(
+                            ingestionRepository = ingestionRepository,
+                            candidateKey = candidate.candidateKey,
+                            claimToken = claimToken
+                        )
                         Result.success()
                     }
-                }
             }
         } finally {
-            // Idempotent and non-cancellable: release only this worker's claim.
             lease?.let { acquiredLease ->
                 withContext(NonCancellable) {
                     acquiredLease.release()
@@ -357,38 +354,40 @@ class SmsParserWorker(
             }
         }
 
-        updateUnsyncedSummary(entryPoint, smsFilterPipeline)
         return workerResult
     }
 
-    private suspend fun updateUnsyncedSummary(
-        entryPoint: ParserWorkerEntryPoint,
-        smsFilterPipeline: SmsFilterPipeline
-    ) {
-        try {
-            val smsRepository = entryPoint.smsRepository()
-            val transactionRepository = entryPoint.transactionRepository()
-            val rawMessages = smsRepository.fetchHistory(daysBack = 7, limit = 250)
-            val transactionalMessages = rawMessages.filter { message ->
-                smsFilterPipeline.isTransactional(message.address, message.body)
-            }
-            val unsyncedCount = transactionalMessages.count { message ->
-                !transactionRepository.exists(message.address, message.date)
-            }
-            SmsNotificationHelper.showUnsyncedSummaryNotification(
-                applicationContext,
-                unsyncedCount
+    private suspend fun retryClaimedOrDiscard(
+        ingestionRepository: SmsIngestionRepository,
+        candidate: QueuedSmsCandidate,
+        claimToken: String,
+        error: String
+    ): Result {
+        return if (runAttemptCount < MAX_RETRY_ATTEMPTS) {
+            ingestionRepository.releaseForRetry(
+                candidateKey = candidate.candidateKey,
+                claimToken = claimToken,
+                error = error
             )
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (error: Exception) {
-            Log.e(TAG, "Failed to update unsynced count summary", error)
+            Result.retry()
+        } else {
+            discardOwnedTerminalCandidate(
+                ingestionRepository = ingestionRepository,
+                candidateKey = candidate.candidateKey,
+                claimToken = claimToken
+            )
+            SmsNotificationHelper.showFailureNotification(
+                applicationContext,
+                candidate.sender,
+                candidate.date,
+                "Could not process this alert on device."
+            )
+            Result.success()
         }
     }
 
     /**
-     * Exhausting retries is terminal for this SMS, not for the unique chain.
-     * Returning failure would automatically fail already-appended dependents.
+     * Exhausting retries is terminal for this item, not any unrelated work.
      */
     private fun retryOrFinishChain(): Result =
         if (runAttemptCount < MAX_RETRY_ATTEMPTS) {
@@ -397,56 +396,108 @@ class SmsParserWorker(
             Result.success()
         }
 
-    private companion object {
+    internal companion object {
         const val TAG = "SmsParserWorker"
-        const val APP_SETTINGS = ".app_settings"
-        const val PROCESS_INCOMING_SMS = "process_incoming_sms"
-        const val KEY_ADDRESS = "address"
-        const val KEY_BODY = "body"
-        const val KEY_DATE = "date"
-        const val KEY_TYPE = "type"
-        const val MAX_RETRY_ATTEMPTS = 3
+        const val KEY_CANDIDATE_KEY = "candidate_key"
+        const val WORK_TAG = "sms-parser-candidates"
+        private const val APP_SETTINGS = ".app_settings"
+        private const val MAX_RETRY_ATTEMPTS = 3
+
+        fun uniqueWorkName(candidateKey: String): String =
+            "sms-parser-$candidateKey"
     }
 }
 
 /**
- * Concrete implementation of the SMS worker scheduler.
+ * Encrypted admission followed by an opaque, idempotent WorkManager handoff.
  */
 @Singleton
 class SmsWorkSchedulerImpl @Inject internal constructor(
     @ApplicationContext private val context: Context,
-    private val admissionGate: SmsWorkAdmissionGate
+    private val admissionGate: SmsWorkAdmissionGate,
+    private val ingestionRepository: SmsIngestionRepository,
+    private val automaticProcessingPreferences: AutomaticProcessingPreferences
 ) : SmsWorkScheduler {
-    override fun scheduleSmsParsing(address: String, body: String, date: Long) {
-        Log.i("SmsWorkScheduler", "Scheduling background SMS parser for: $address")
-        val data = workDataOf(
-            "address" to address,
-            "body" to body,
-            "date" to date
-        )
-        val request = OneTimeWorkRequestBuilder<SmsParserWorker>()
-            .setInputData(data)
-            .build()
+    override suspend fun scheduleSmsParsing(
+        message: SmsReader.SmsMessage
+    ): SmsScheduleResult =
+        automaticProcessingPreferences.withConsistencyBoundary { enabled ->
+            if (!enabled) {
+                ingestionRepository.discardPendingAutomatic()
+                return@withConsistencyBoundary SmsScheduleResult.AUTOMATIC_DISABLED
+            }
 
-        // Secondary defence only: all native callers, including flows outside
-        // WorkManager, are serialized by SlmRuntime.
-        val admitted = admissionGate.enqueueIfOpen {
-            WorkManager.getInstance(context).enqueueUniqueWork(
-                UNIQUE_SMS_PARSER_WORK,
-                ExistingWorkPolicy.APPEND_OR_REPLACE,
-                request
+            val admission = ingestionRepository.admit(
+                SmsIngestionRepository.NewCandidate(
+                    sourceIdentity = message.sourceIdentity,
+                    sender = message.address,
+                    rawMessage = message.body,
+                    date = message.date,
+                    sourceTimestamp = message.sourceTimestamp,
+                    messageType = message.type,
+                    origin = SmsCandidateOrigin.AUTOMATIC
+                )
             )
+            if (admission is SmsIngestionRepository.AdmissionResult.AlreadySaved) {
+                return@withConsistencyBoundary SmsScheduleResult.ALREADY_SAVED
+            }
+
+            val candidateKey = admission.candidateKey
+            if (!enqueueCandidate(candidateKey)) {
+                ingestionRepository.discardPendingAutomatic()
+                return@withConsistencyBoundary SmsScheduleResult.ADMISSION_PAUSED
+            }
+            SmsScheduleResult.SCHEDULED
         }
-        if (!admitted) {
-            Log.i(
-                "SmsWorkScheduler",
-                "Dropping SMS parser enqueue while destructive reset owns admission."
-            )
+
+    override suspend fun reconcilePendingAutomaticWork() {
+        val candidateKeys =
+            automaticProcessingPreferences.withConsistencyBoundary { enabled ->
+                if (!enabled) {
+                    ingestionRepository.discardPendingAutomatic()
+                    emptyList()
+                } else {
+                    ingestionRepository.pendingAutomaticCandidateKeys()
+                }
+            }
+        if (candidateKeys.isEmpty()) {
+            return
+        }
+
+        for (candidateKey in candidateKeys) {
+            val shouldContinue =
+                automaticProcessingPreferences.withConsistencyBoundary { enabled ->
+                    if (!enabled) {
+                        ingestionRepository.discardPendingAutomatic()
+                        false
+                    } else {
+                        // A destructive maintenance boundary owns admission.
+                        // The encrypted row remains durable for the next
+                        // reconciliation.
+                        enqueueCandidate(candidateKey)
+                    }
+                }
+            if (!shouldContinue) {
+                return
+            }
         }
     }
 
-    internal companion object {
-        const val UNIQUE_SMS_PARSER_WORK = "sms-parser-runtime-chain"
+    private fun enqueueCandidate(candidateKey: String): Boolean {
+        val request = OneTimeWorkRequestBuilder<SmsParserWorker>()
+            .setInputData(
+                workDataOf(SmsParserWorker.KEY_CANDIDATE_KEY to candidateKey)
+            )
+            .addTag(SmsParserWorker.WORK_TAG)
+            .build()
+        val admitted = admissionGate.enqueueIfOpen {
+            WorkManager.getInstance(context).enqueueUniqueWork(
+                SmsParserWorker.uniqueWorkName(candidateKey),
+                ExistingWorkPolicy.KEEP,
+                request
+            )
+        }
+        return admitted
     }
 }
 
@@ -468,6 +519,59 @@ internal fun isOnboardingCompleteForSmsWork(
     preferences: SharedPreferences
 ): Boolean = preferences.getBoolean("onboarding_completed", false)
 
+internal sealed interface SmsCandidateClaimDecision {
+    data object AutomaticDisabled : SmsCandidateClaimDecision
+
+    data class Claimed(
+        val candidate: QueuedSmsCandidate?
+    ) : SmsCandidateClaimDecision
+}
+
+internal suspend fun claimSmsCandidateForRun(
+    candidate: QueuedSmsCandidate,
+    claimToken: String,
+    automaticProcessingPreferences: AutomaticProcessingPreferences,
+    ingestionRepository: SmsIngestionRepository
+): SmsCandidateClaimDecision {
+    if (candidate.origin != SmsCandidateOrigin.AUTOMATIC) {
+        return SmsCandidateClaimDecision.Claimed(
+            ingestionRepository.claim(
+                candidateKey = candidate.candidateKey,
+                claimToken = claimToken
+            )
+        )
+    }
+
+    return automaticProcessingPreferences.withConsistencyBoundary { enabled ->
+        if (!enabled) {
+            // OFF won before this invocation could establish a claim. Pending
+            // evidence, or a same-WorkSpec claim left by process death, can be
+            // removed without touching a replacement owner's claim.
+            ingestionRepository.discardAutomaticBeforeClaim(
+                candidateKey = candidate.candidateKey,
+                claimToken = claimToken
+            )
+            SmsCandidateClaimDecision.AutomaticDisabled
+        } else {
+            SmsCandidateClaimDecision.Claimed(
+                ingestionRepository.claim(
+                    candidateKey = candidate.candidateKey,
+                    claimToken = claimToken
+                )
+            )
+        }
+    }
+}
+
+internal suspend fun discardOwnedTerminalCandidate(
+    ingestionRepository: SmsIngestionRepository,
+    candidateKey: String,
+    claimToken: String
+): Boolean = ingestionRepository.discardClaimed(
+    candidateKey = candidateKey,
+    claimToken = claimToken
+)
+
 internal inline fun <T> foldIncomingSmsQueueResult(
     queueResult: IncomingSmsQueueResult,
     onQueuedTransaction: () -> T,
@@ -479,12 +583,6 @@ internal inline fun <T> foldIncomingSmsQueueResult(
     IncomingSmsQueueResult.ADMISSION_PAUSED -> onAdmissionPaused()
 }
 
-/**
- * Holds the app-wide workflow claim from before selected-model resolution
- * through the worker's inference and persistence path. Admission rejection is
- * temporary maintenance, so callers return WorkManager retry without consuming
- * the SMS item.
- */
 internal suspend fun <T> withSmsWorkerFlowAdmission(
     delegate: HomeSyncDelegate,
     onAdmissionPaused: () -> T,

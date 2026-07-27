@@ -4,16 +4,24 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Update
 import com.pocketfinancer.data.db.entity.TransactionEntity
 import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface TransactionDao {
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insert(transaction: TransactionEntity)
+    /**
+     * Compatibility name retained for existing callers. Inserts never replace
+     * an already-owned source or its raw evidence.
+     */
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insert(transaction: TransactionEntity): Long
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertAll(transactions: List<TransactionEntity>)
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertAll(transactions: List<TransactionEntity>): List<Long>
+
+    @Update
+    suspend fun update(transaction: TransactionEntity): Int
 
     @Query("SELECT * FROM transactions ORDER BY date DESC")
     fun getAllByDateDesc(): Flow<List<TransactionEntity>>
@@ -38,6 +46,94 @@ interface TransactionDao {
 
     @Query("SELECT * FROM transactions WHERE id = :id")
     suspend fun getById(id: String): TransactionEntity?
+
+    @Query(
+        """
+        SELECT * FROM transactions
+        WHERE sourceConnector = :connector
+          AND (
+            sourceMessageId = :messageId
+            OR sourceFingerprint = :fingerprint
+            OR sourceAlternateFingerprint = :fingerprint
+            OR (
+                :alternateFingerprint IS NOT NULL
+                AND (
+                    sourceFingerprint = :alternateFingerprint
+                    OR sourceAlternateFingerprint = :alternateFingerprint
+                )
+            )
+          )
+        LIMIT 1
+        """
+    )
+    suspend fun findBySource(
+        connector: String,
+        messageId: String,
+        fingerprint: String,
+        alternateFingerprint: String?
+    ): TransactionEntity?
+
+    @Query(
+        """
+        SELECT EXISTS(
+            SELECT 1 FROM transactions
+            WHERE sourceConnector = :connector
+              AND (
+                sourceMessageId = :messageId
+                OR sourceFingerprint = :fingerprint
+                OR sourceAlternateFingerprint = :fingerprint
+                OR (
+                    :alternateFingerprint IS NOT NULL
+                    AND (
+                        sourceFingerprint = :alternateFingerprint
+                        OR sourceAlternateFingerprint = :alternateFingerprint
+                    )
+                )
+              )
+        )
+        """
+    )
+    suspend fun existsBySource(
+        connector: String,
+        messageId: String,
+        fingerprint: String,
+        alternateFingerprint: String?
+    ): Boolean
+
+    @Query(
+        """
+        UPDATE transactions
+        SET sourceProviderMessageId =
+                COALESCE(sourceProviderMessageId, :providerMessageId),
+            sourceAlternateFingerprint =
+                COALESCE(
+                    sourceAlternateFingerprint,
+                    CASE
+                        WHEN sourceFingerprint != :fingerprint
+                            THEN :fingerprint
+                        WHEN :alternateFingerprint IS NOT NULL
+                            AND sourceFingerprint != :alternateFingerprint
+                            THEN :alternateFingerprint
+                        ELSE NULL
+                    END
+                ),
+            date = CASE
+                WHEN sourceProviderMessageId IS NULL
+                    AND :providerMessageId IS NOT NULL
+                    AND :receivedDate IS NOT NULL
+                    THEN :receivedDate
+                ELSE date
+            END
+        WHERE id = :transactionId
+        """
+    )
+    suspend fun preserveSourceMetadata(
+        transactionId: String,
+        providerMessageId: String?,
+        fingerprint: String,
+        alternateFingerprint: String?,
+        receivedDate: Long?
+    )
 
     @Query("SELECT EXISTS(SELECT 1 FROM transactions WHERE sender = :sender AND date = :date)")
     suspend fun exists(sender: String, date: Long): Boolean

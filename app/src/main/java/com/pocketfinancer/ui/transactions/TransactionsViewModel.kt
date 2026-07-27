@@ -9,6 +9,8 @@ import com.pocketfinancer.data.repository.TransactionRepository
 import com.pocketfinancer.data.repository.AccountRepository
 import com.pocketfinancer.ui.home.HomeSyncManager
 import com.pocketfinancer.ui.home.HomeSyncState
+import com.pocketfinancer.ui.home.SyncSmsItem
+import com.pocketfinancer.ui.home.hasDiagnosticSourceEvidence
 import com.pocketfinancer.pipeline.SmsFilterPipeline
 import com.pocketfinancer.pipeline.PromptBuilder
 import com.pocketfinancer.pipeline.ExtractionParser
@@ -181,19 +183,31 @@ class TransactionsViewModel @Inject constructor(
         }
     }
 
-    fun getFilterLogs(sender: String, body: String): List<String> {
-        return smsFilterPipeline.filterWithDetails(sender, body).logs
+    fun getFilterLogs(item: SyncSmsItem): List<String> {
+        if (!item.hasDiagnosticSourceEvidence()) {
+            return listOf(SOURCE_EVIDENCE_UNAVAILABLE)
+        }
+        return smsFilterPipeline.filterWithDetails(item.sender, item.body).logs
     }
 
-    fun getKvCacheLogs(sender: String, body: String): List<String> {
+    fun getKvCacheLogs(item: SyncSmsItem): List<String> {
+        if (!item.hasDiagnosticSourceEvidence()) {
+            return listOf(SOURCE_EVIDENCE_UNAVAILABLE)
+        }
         return listOf(
             "KV cache telemetry is captured from the exact runtime request.",
             "Historical transactions do not currently persist cache-hit diagnostics."
         )
     }
 
-    fun getSlmPrompt(sender: String, body: String): String {
-        val rawPrompt = promptBuilder.buildExtractionPrompt(sender, body)
+    fun getSlmPrompt(item: SyncSmsItem): String {
+        if (!item.hasDiagnosticSourceEvidence()) {
+            return SOURCE_EVIDENCE_UNAVAILABLE
+        }
+        val rawPrompt = promptBuilder.buildExtractionPrompt(
+            item.sender,
+            item.body
+        )
         val hasThinking = slmRuntime.state.value.loadedModel?.hasThinkingMode ?: true
         return promptBuilder.buildChatPrompt(rawPrompt, enableThinking = hasThinking)
     }
@@ -203,5 +217,10 @@ class TransactionsViewModel @Inject constructor(
         return parsed?.let {
             "amount=${it.amount}, type=${it.type.name.lowercase()}, counterparty=${it.counterparty ?: "-"}, account=${it.account ?: "-"}"
         } ?: "Parsed: null (non-financial)"
+    }
+
+    private companion object {
+        const val SOURCE_EVIDENCE_UNAVAILABLE =
+            "Source evidence is unavailable after terminal processing."
     }
 }

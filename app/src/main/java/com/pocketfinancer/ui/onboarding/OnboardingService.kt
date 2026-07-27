@@ -11,6 +11,7 @@ import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.pocketfinancer.data.model.TransactionType
+import com.pocketfinancer.data.repository.TransactionRepository
 import com.pocketfinancer.hardware.DeviceCapabilities
 import com.pocketfinancer.hardware.SlmTier
 import com.pocketfinancer.hardware.isPublishedModelArtifact
@@ -23,6 +24,13 @@ import com.pocketfinancer.inference.SlmRuntimeOwner
 import com.pocketfinancer.pipeline.PipelineService
 import com.pocketfinancer.pipeline.SmsFilterPipeline
 import com.pocketfinancer.pipeline.SmsNotificationHelper
+import com.pocketfinancer.setup.AdaptiveHistoryScanPolicy
+import com.pocketfinancer.setup.HistoryScanDecision
+import com.pocketfinancer.setup.SetupActionableError
+import com.pocketfinancer.setup.SetupEmptyReason
+import com.pocketfinancer.setup.SetupImportStatus
+import com.pocketfinancer.setup.SetupImportStore
+import com.pocketfinancer.setup.SetupPauseReason
 import com.pocketfinancer.sms.SmsRepository
 import com.pocketfinancer.SelectedModelResidency
 import com.pocketfinancer.SlmAppFlowCoordinator
@@ -32,6 +40,7 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.File
+import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 
 @AndroidEntryPoint
@@ -77,6 +86,14 @@ class OnboardingService : Service() {
     @Inject
     lateinit var pipelineService: PipelineService
 
+    @Inject
+    lateinit var transactionRepository: TransactionRepository
+
+    @Inject
+    lateinit var setupImportStore: SetupImportStore
+
+    private val historyScanPolicy = AdaptiveHistoryScanPolicy()
+
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val workflowMutex = Mutex()
     private var workJob: Job? = null
@@ -108,6 +125,28 @@ class OnboardingService : Service() {
                     .firstOrNull { it.name == value }
             }
             ?: OnboardingSyncManager.RunPurpose.INITIAL_SETUP
+        val coveredHistoryWindowDays = intent
+            ?.takeIf {
+                it.hasExtra(
+                    OnboardingSyncManager.EXTRA_COVERED_HISTORY_WINDOW_DAYS
+                )
+            }
+            ?.getIntExtra(
+                OnboardingSyncManager.EXTRA_COVERED_HISTORY_WINDOW_DAYS,
+                0
+            )
+            ?.takeIf { it > 0 }
+        val resumeHistoryWindowDays = intent
+            ?.takeIf {
+                it.hasExtra(
+                    OnboardingSyncManager.EXTRA_RESUME_HISTORY_WINDOW_DAYS
+                )
+            }
+            ?.getIntExtra(
+                OnboardingSyncManager.EXTRA_RESUME_HISTORY_WINDOW_DAYS,
+                0
+            )
+            ?.takeIf { it > 0 }
 
         getSystemService(NotificationManager::class.java)
             .cancel(TERMINAL_NOTIFICATION_ID)
@@ -167,6 +206,22 @@ class OnboardingService : Service() {
                             }
                         )
                     }
+                    if (
+                        runPurpose ==
+                        OnboardingSyncManager.RunPurpose.INITIAL_SETUP
+                    ) {
+                        setupImportStore.update {
+                            it.copy(
+                                status = SetupImportStatus.PAUSED,
+                                pauseReason = SetupPauseReason.INTERRUPTED,
+                                actionableError = SetupActionableError(
+                                    code = "SETUP_ADMISSION_PAUSED",
+                                    message = "Setup is waiting for other local model maintenance to finish.",
+                                    actionLabel = "Resume setup"
+                                )
+                            )
+                        }
+                    }
                     showTerminalNotification(
                         title = "Model Work Paused",
                         text = "Open Pocket Financer to try again."
@@ -175,7 +230,12 @@ class OnboardingService : Service() {
                     return@withLock
                 }
                 try {
-                    runOnboardingWorkflow(slm, runPurpose)
+                    runOnboardingWorkflow(
+                        slm = slm,
+                        runPurpose = runPurpose,
+                        coveredHistoryWindowDays = coveredHistoryWindowDays,
+                        resumeHistoryWindowDays = resumeHistoryWindowDays
+                    )
                 } catch (e: CancellationException) {
                     Log.i(TAG, "Onboarding workflow cancelled")
                 } catch (e: Exception) {
@@ -188,6 +248,22 @@ class OnboardingService : Service() {
                             isCancellationAllowed = false,
                             isDownloading = false
                         )
+                    }
+                    if (
+                        runPurpose ==
+                        OnboardingSyncManager.RunPurpose.INITIAL_SETUP
+                    ) {
+                        setupImportStore.update {
+                            it.copy(
+                                status = SetupImportStatus.FAILED,
+                                actionableError = SetupActionableError(
+                                    code = "SETUP_SERVICE_FAILED",
+                                    message = e.message
+                                        ?: "Background setup stopped unexpectedly.",
+                                    actionLabel = "Try again"
+                                )
+                            )
+                        }
                     }
                     showTerminalNotification(
                         title = if (
@@ -373,7 +449,9 @@ class OnboardingService : Service() {
 
     private suspend fun runOnboardingWorkflow(
         slm: SlmTier,
-        runPurpose: OnboardingSyncManager.RunPurpose
+        runPurpose: OnboardingSyncManager.RunPurpose,
+        coveredHistoryWindowDays: Int?,
+        resumeHistoryWindowDays: Int?
     ) {
         val destFile = getModelFile(slm)
 
@@ -386,6 +464,19 @@ class OnboardingService : Service() {
                 step = OnboardingStep.DOWNLOAD_SLM,
                 isDownloading = true
             )
+        }
+        if (runPurpose == OnboardingSyncManager.RunPurpose.INITIAL_SETUP) {
+            setupImportStore.update {
+                it.copy(
+                    status = if (it.modelPrepared) {
+                        SetupImportStatus.SCANNING
+                    } else {
+                        SetupImportStatus.DOWNLOADING
+                    },
+                    pauseReason = null,
+                    actionableError = null
+                )
+            }
         }
 
         // Observe downloader progress
@@ -448,7 +539,11 @@ class OnboardingService : Service() {
             OnboardingSyncManager.RunPurpose.INITIAL_SETUP -> {
                 // Initial setup continues into the one-time inbox scan.
                 Log.i(TAG, "Starting sync phase...")
-                runOnboardingSync(slm, destFile)
+                runOnboardingSync(
+                    slm = slm,
+                    coveredHistoryWindowDays = coveredHistoryWindowDays,
+                    resumeHistoryWindowDays = resumeHistoryWindowDays
+                )
             }
             OnboardingSyncManager.RunPurpose.MODEL_UPGRADE -> {
                 // A post-onboarding model upgrade must not unexpectedly re-run
@@ -550,7 +645,11 @@ class OnboardingService : Service() {
         }
     }
 
-    private suspend fun runOnboardingSync(slm: SlmTier, modelFile: File) {
+    private suspend fun runOnboardingSync(
+        slm: SlmTier,
+        coveredHistoryWindowDays: Int?,
+        resumeHistoryWindowDays: Int?
+    ) {
         val logs = mutableListOf<String>()
 
         fun addLog(msg: String) {
@@ -594,11 +693,25 @@ class OnboardingService : Service() {
                         isModelLoaded = false
                     )
                 }
+                setupImportStore.update {
+                    it.copy(
+                        status = SetupImportStatus.FAILED,
+                        modelPrepared = false,
+                        actionableError = SetupActionableError(
+                            code = "MODEL_LOAD_FAILED",
+                            message = "The downloaded model could not be prepared: $errorMsg",
+                            actionLabel = "Try again"
+                        )
+                    )
+                }
                 return
             }
             batchLease = activeLease
 
-            suspend fun completeSuccessfully() {
+            suspend fun completeRun(
+                notificationTitle: String,
+                notificationText: String
+            ) {
                 val stillOwnsSelection = withContext(NonCancellable) {
                     handoff.commit {
                         persistCompletedSelection(slm)
@@ -609,88 +722,213 @@ class OnboardingService : Service() {
                 }
                 publishOnboardingCompleted()
                 showTerminalNotification(
-                    title = "Pocket Financer Setup Complete",
-                    text = "Your local AI model and SMS sync are ready."
+                    title = notificationTitle,
+                    text = notificationText
                 )
             }
 
             addLog("Model: Loaded successfully on device CPU.")
             syncManager.updateState { it.copy(isModelLoaded = true) }
-
-        syncManager.updateState {
-            it.copy(
-                syncProgress = 0.15f,
-                syncMessage = "Scanning recent message inbox..."
-            )
-        }
-        runOnWorkflowProgress("Syncing Transactions", "Scanning inbox history...", 0.15f)
-        addLog("SmsReader: Querying inbox history (last 7 days)...")
-        delay(600)
-
-        // Fetch SMS history (last 7 days)
-        val rawMessages = withContext(Dispatchers.IO) {
-            smsRepository.fetchHistory(daysBack = 7, limit = 250)
-        }
-
-        if (rawMessages.isEmpty()) {
-            addLog("SmsReader: No SMS found in inbox.")
-            syncManager.updateState {
+            setupImportStore.update {
                 it.copy(
-                    syncProgress = 1.0f,
-                    syncMessage = "No SMS found in inbox. Complete!",
-                    syncTotalMessages = 0
+                    modelPrepared = true,
+                    status = SetupImportStatus.SCANNING,
+                    pauseReason = null,
+                    actionableError = null
                 )
             }
-            completeSuccessfully()
-            return
-        }
-        addLog("SmsReader: Retrieved ${rawMessages.size} messages.")
-        syncManager.updateState {
-            it.copy(syncTotalMessages = rawMessages.size)
-        }
 
-        // Filtering
-        syncManager.updateState {
-            it.copy(
-                syncProgress = 0.25f,
-                syncMessage = "Filtering promotional messages..."
+            var historyWindowDays = initialHistoryWindowDays(
+                policy = historyScanPolicy,
+                coveredWindowDays = coveredHistoryWindowDays,
+                resumeWindowDays = resumeHistoryWindowDays
             )
-        }
-        runOnWorkflowProgress("Syncing Transactions", "Filtering spam...", 0.22f)
-        addLog("Pipeline: Applying regex filters to filter promotional/spam SMS...")
-        delay(600)
+            var rawMessages =
+                emptyList<com.pocketfinancer.sms.SmsReader.SmsMessage>()
+            var transactionalMessages =
+                emptyList<com.pocketfinancer.sms.SmsReader.SmsMessage>()
 
-        val transactionalMessages = rawMessages.filter { msg ->
-            smsFilterPipeline.isTransactional(msg.address, msg.body)
-        }
+            while (true) {
+                setupImportStore.update {
+                    it.copy(
+                        status = SetupImportStatus.SCANNING,
+                        activeScanWindowDays = historyWindowDays,
+                        providerMessageCount = 0,
+                        eligibleCandidateCount = 0,
+                        processedCount = 0,
+                        savedCount = 0,
+                        rejectedCount = 0,
+                        failedCount = 0,
+                        emptyReason = null,
+                        pauseReason = null,
+                        actionableError = null
+                    )
+                }
+                syncManager.updateState {
+                    it.copy(
+                        syncProgress = 0.15f,
+                        syncMessage =
+                            "Checking the last $historyWindowDays days..."
+                    )
+                }
+                runOnWorkflowProgress(
+                    "Checking SMS History",
+                    "Scanning the last $historyWindowDays days...",
+                    0.15f
+                )
+                addLog(
+                    "SmsReader: Querying inbox history " +
+                        "(last $historyWindowDays days)..."
+                )
 
-        val spamCount = rawMessages.size - transactionalMessages.size
-        addLog("Pipeline: Discarded $spamCount non-transactional messages.")
-        syncManager.updateState {
-            it.copy(syncTransactionalCount = transactionalMessages.size)
-        }
+                rawMessages = try {
+                    withContext(Dispatchers.IO) {
+                        smsRepository.fetchHistory(
+                            daysBack = historyWindowDays,
+                            limit = Int.MAX_VALUE
+                        )
+                    }
+                } catch (securityError: SecurityException) {
+                    setupImportStore.reconcilePermission(granted = false)
+                    syncManager.updateState {
+                        it.copy(
+                            isRunning = false,
+                            modelLoadError =
+                                "SMS access was removed during the scan."
+                        )
+                    }
+                    return
+                }
+                val deterministicallyEligible = rawMessages.filter { message ->
+                    smsFilterPipeline.isTransactional(
+                        message.address,
+                        message.body
+                    )
+                }
+                transactionalMessages = withContext(Dispatchers.IO) {
+                    val unsaved = mutableListOf<
+                        com.pocketfinancer.sms.SmsReader.SmsMessage
+                    >()
+                    for (message in deterministicallyEligible) {
+                        if (!transactionRepository.exists(message.sourceIdentity)) {
+                            unsaved += message
+                        }
+                    }
+                    unsaved
+                }
+                val alreadySavedCount =
+                    deterministicallyEligible.size - transactionalMessages.size
+                val scanCompletedAt = System.currentTimeMillis()
+                setupImportStore.update {
+                    it.copy(
+                        coverageStartMillis = scanCompletedAt -
+                            TimeUnit.DAYS.toMillis(
+                                historyWindowDays.toLong()
+                            ),
+                        coverageEndMillis = scanCompletedAt,
+                        coverageWindowDays = historyWindowDays,
+                        providerMessageCount = rawMessages.size,
+                        eligibleCandidateCount =
+                            transactionalMessages.size,
+                        lastSuccessfulScanMillis = scanCompletedAt
+                    )
+                }
+                syncManager.updateState {
+                    it.copy(
+                        syncTotalMessages = rawMessages.size,
+                        syncTransactionalCount =
+                            transactionalMessages.size
+                    )
+                }
+                addLog(
+                    "SmsReader: ${rawMessages.size} messages checked; " +
+                        "${transactionalMessages.size} new eligible" +
+                        if (alreadySavedCount > 0) {
+                            "; $alreadySavedCount already saved."
+                        } else {
+                            "."
+                        }
+                )
 
-        if (transactionalMessages.isEmpty()) {
-            addLog("Pipeline: Found 0 transactional messages.")
-            syncManager.updateState {
+                when (
+                    val decision = historyScanPolicy.decide(
+                        windowDays = historyWindowDays,
+                        providerMessageCount = rawMessages.size,
+                        eligibleCandidateCount =
+                            transactionalMessages.size
+                    )
+                ) {
+                    is HistoryScanDecision.Widen -> {
+                        addLog(
+                            "Discovery: No eligible alerts; widening to " +
+                                "${decision.nextWindowDays} days."
+                        )
+                        historyWindowDays = decision.nextWindowDays
+                    }
+
+                    is HistoryScanDecision.Process -> break
+
+                    is HistoryScanDecision.NoEligibleHistory -> {
+                        val terminalEmptyReason =
+                            if (alreadySavedCount > 0) {
+                                SetupEmptyReason.NO_ADDITIONAL_MESSAGES
+                            } else {
+                                decision.reason
+                            }
+                        setupImportStore.update {
+                            it.copy(
+                                status =
+                                    SetupImportStatus.READY_NO_HISTORY,
+                                activeScanWindowDays = null,
+                                emptyReason = terminalEmptyReason,
+                                actionableError = null
+                            )
+                        }
+                        syncManager.updateState {
+                            it.copy(
+                                syncProgress = 1f,
+                                syncMessage =
+                                    "Ready for the next eligible alert."
+                            )
+                        }
+                        completeRun(
+                            notificationTitle =
+                                "Pocket Financer Is Ready",
+                            notificationText =
+                                "No eligible history was found. New alerts will be captured."
+                        )
+                        return
+                    }
+                }
+            }
+
+            addLog(
+                "Pipeline: Found ${transactionalMessages.size} " +
+                    "eligible alerts to process."
+            )
+            setupImportStore.update {
                 it.copy(
-                    syncProgress = 1.0f,
-                    syncMessage = "Sync completed! No transactional history."
+                    status = SetupImportStatus.PROCESSING,
+                    processedCount = 0,
+                    savedCount = 0,
+                    rejectedCount = 0,
+                    failedCount = 0,
+                    emptyReason = null,
+                    actionableError = null
                 )
             }
-            completeSuccessfully()
-            return
-        }
-        addLog("Pipeline: Found ${transactionalMessages.size} transactions to process.")
 
-        val syncLimit = 20
-        val messagesToProcess = transactionalMessages.take(syncLimit)
+        val messagesToProcess = transactionalMessages
         val totalCount = messagesToProcess.size
         addLog("AI: Beginning local offline parsing for $totalCount transactions...")
 
         val loopStartTime = System.currentTimeMillis()
         val defaultTimePerTxMs = 10000L
         var parsedCount = 0
+        var processedCount = 0
+        var rejectedCount = 0
+        var failedCount = 0
+        var concurrentDuplicateCount = 0
         var spendsTotal = 0.0
         val recentTxList = mutableListOf<ExtractedTxPreview>()
 
@@ -708,7 +946,8 @@ class OnboardingService : Service() {
             syncManager.updateState {
                 it.copy(
                     syncProgress = currentProgress,
-                    syncMessage = "Analyzing SMS ${index + 1} of $totalCount: ${sms.address}...",
+                    syncMessage =
+                        "Analyzing SMS ${index + 1} of $totalCount...",
                     syncEtaSeconds = currentEtaSec
                 )
             }
@@ -718,7 +957,9 @@ class OnboardingService : Service() {
                 currentProgress
             )
 
-            addLog("AI: Analyzing transaction ${index + 1}/$totalCount (${sms.address})...")
+            addLog(
+                "AI: Analyzing transaction ${index + 1}/$totalCount..."
+            )
 
             val txStartTime = System.currentTimeMillis()
             val result = withContext(Dispatchers.IO) {
@@ -739,59 +980,157 @@ class OnboardingService : Service() {
             if (result is PipelineService.ProcessingResult.Stopped) {
                 throw CancellationException("Onboarding inference stopped")
             }
+            processedCount++
             if (result is PipelineService.ProcessingResult.Failure) {
+                failedCount++
+                setupImportStore.update {
+                    it.copy(
+                        processedCount = processedCount,
+                        savedCount = parsedCount,
+                        rejectedCount = rejectedCount,
+                        failedCount = failedCount
+                    )
+                }
                 addLog("➔ Failed: ${result.message}")
                 continue
             }
             if (result is PipelineService.ProcessingResult.Saved) {
                 val transaction = result.transaction
-                parsedCount++
-                if (transaction.type == TransactionType.DEBIT) {
-                    spendsTotal += transaction.amount
-                }
-                recentTxList.add(
-                    0,
-                    ExtractedTxPreview(
-                        amount = transaction.amount,
-                        merchant = transaction.counterparty ?: "Unknown Merchant",
-                        type = transaction.type.name.lowercase()
+                if (result.newlyInserted) {
+                    parsedCount++
+                    if (transaction.type == TransactionType.DEBIT) {
+                        spendsTotal += transaction.amount
+                    }
+                    recentTxList.add(
+                        0,
+                        ExtractedTxPreview(
+                            amount = transaction.amount,
+                            merchant = transaction.counterparty
+                                ?: "Unknown Merchant",
+                            type = transaction.type.name.lowercase()
+                        )
                     )
-                )
 
-                syncManager.updateState {
-                    it.copy(
-                        syncParsedCount = parsedCount,
-                        syncSpendsTotal = spendsTotal,
-                        syncRecentTransactions = recentTxList.take(3)
+                    syncManager.updateState {
+                        it.copy(
+                            syncParsedCount = parsedCount,
+                            syncSpendsTotal = spendsTotal,
+                            syncRecentTransactions = recentTxList.take(3)
+                        )
+                    }
+
+                    addLog("➔ Extracted: ₹${transaction.amount} at ${transaction.counterparty ?: "Unknown Merchant"} [${"%.1f".format(durationMs / 1000f)}s]")
+                    addLog("➔ Saved to encrypted local database.")
+                } else {
+                    concurrentDuplicateCount++
+                    addLog(
+                        "➔ Already saved by another processing path; " +
+                            "not counted as a new transaction."
                     )
                 }
-
-                addLog("➔ Extracted: ₹${transaction.amount} at ${transaction.counterparty ?: "Unknown Merchant"} [${"%.1f".format(durationMs / 1000f)}s]")
-                addLog("➔ Saved to encrypted local database.")
             } else {
+                rejectedCount++
                 addLog("➔ Skipped (non-transactional content detected) [${"%.1f".format(durationMs / 1000f)}s]")
+            }
+            setupImportStore.update {
+                it.copy(
+                    processedCount = processedCount,
+                    savedCount = parsedCount,
+                    rejectedCount = rejectedCount,
+                    failedCount = failedCount
+                )
             }
         }
 
         syncManager.updateState {
             it.copy(
                 syncProgress = 0.98f,
-                syncMessage = "Optimizing encrypted local database...",
+                syncMessage = "Finalizing local results...",
                 syncEtaSeconds = 0
             )
         }
-        runOnWorkflowProgress("Syncing Transactions", "Optimizing storage encryption...", 0.98f)
-        addLog("Database: Reindexing and optimizing storage encryption...")
-        delay(1000)
+        runOnWorkflowProgress(
+            "Finishing SMS Import",
+            "Saving verified results...",
+            0.98f
+        )
 
-        addLog("System: Offline synchronization fully completed!")
+        val terminalStatus = setupTerminalStatus(
+            savedCount = parsedCount,
+            failedCount = failedCount,
+            concurrentDuplicateCount = concurrentDuplicateCount
+        )
+        setupImportStore.update {
+            it.copy(
+                status = terminalStatus,
+                activeScanWindowDays = if (
+                    terminalStatus == SetupImportStatus.FAILED
+                ) {
+                    it.activeScanWindowDays
+                } else {
+                    null
+                },
+                emptyReason = if (
+                    terminalStatus == SetupImportStatus.READY_NO_HISTORY
+                ) {
+                    SetupEmptyReason.CANDIDATES_REJECTED
+                } else {
+                    null
+                },
+                actionableError = if (failedCount > 0) {
+                    SetupActionableError(
+                        code = "SMS_PROCESSING_FAILED",
+                        message =
+                            "$failedCount eligible alert" +
+                                if (failedCount == 1) {
+                                    " could not be processed."
+                                } else {
+                                    "s could not be processed."
+                                },
+                        actionLabel = "Retry import"
+                    )
+                } else {
+                    null
+                }
+            )
+        }
+        addLog(
+            "System: Import finished: $parsedCount saved, " +
+                "$rejectedCount rejected, $failedCount failed" +
+                if (concurrentDuplicateCount > 0) {
+                    ", $concurrentDuplicateCount already saved."
+                } else {
+                    "."
+                }
+        )
         syncManager.updateState {
             it.copy(
                 syncProgress = 1.0f,
-                syncMessage = "Synchronization completed!"
+                syncMessage = when (terminalStatus) {
+                    SetupImportStatus.FAILED ->
+                        "Import finished with items to retry."
+                    SetupImportStatus.READY_NO_HISTORY ->
+                        "Ready for the next eligible alert."
+                    else -> "SMS import completed."
+                }
             )
         }
-        completeSuccessfully()
+        completeRun(
+            notificationTitle = when (terminalStatus) {
+                SetupImportStatus.FAILED ->
+                    "SMS Import Needs Attention"
+                SetupImportStatus.READY_NO_HISTORY ->
+                    "Pocket Financer Is Ready"
+                else -> "SMS Import Complete"
+            },
+            notificationText = when (terminalStatus) {
+                SetupImportStatus.FAILED ->
+                    "$parsedCount saved; $failedCount need another attempt."
+                SetupImportStatus.READY_NO_HISTORY ->
+                    "No transaction was saved. New eligible alerts will be captured."
+                else -> "$parsedCount transaction${if (parsedCount == 1) "" else "s"} saved locally."
+            }
+        )
         } finally {
             withContext(NonCancellable) {
                 batchLease?.release()
@@ -817,11 +1156,7 @@ class OnboardingService : Service() {
 
     private fun publishOnboardingCompleted() {
         syncManager.updateState {
-            it.copy(
-                step = OnboardingStep.COMPLETED,
-                isRunning = false,
-                isModelLoaded = true
-            )
+            scrubCompletedOnboardingState(it)
         }
     }
 
@@ -861,6 +1196,46 @@ class OnboardingService : Service() {
                 )
             }
         }
+        if (setupImportStore.state.value.isActive) {
+            setupImportStore.update {
+                it.copy(
+                    status = SetupImportStatus.PAUSED,
+                    pauseReason = SetupPauseReason.INTERRUPTED,
+                    actionableError = SetupActionableError(
+                        code = SetupImportStore.ERROR_INTERRUPTED,
+                        message = "Setup stopped before it finished. Completed work is still saved.",
+                        actionLabel = "Resume setup"
+                    )
+                )
+            }
+        }
         super.onDestroy()
     }
+}
+
+internal fun initialHistoryWindowDays(
+    policy: AdaptiveHistoryScanPolicy,
+    coveredWindowDays: Int?,
+    resumeWindowDays: Int?
+): Int = resumeWindowDays ?: policy.firstWindowAfter(coveredWindowDays)
+
+internal fun scrubCompletedOnboardingState(
+    state: OnboardingSyncManager.OnboardingSyncState
+): OnboardingSyncManager.OnboardingSyncState = state.copy(
+    step = OnboardingStep.COMPLETED,
+    isRunning = false,
+    isModelLoaded = true,
+    syncMessage = "Setup finished",
+    syncLogs = emptyList()
+)
+
+internal fun setupTerminalStatus(
+    savedCount: Int,
+    failedCount: Int,
+    concurrentDuplicateCount: Int
+): SetupImportStatus = when {
+    failedCount > 0 -> SetupImportStatus.FAILED
+    savedCount > 0 || concurrentDuplicateCount > 0 ->
+        SetupImportStatus.READY
+    else -> SetupImportStatus.READY_NO_HISTORY
 }

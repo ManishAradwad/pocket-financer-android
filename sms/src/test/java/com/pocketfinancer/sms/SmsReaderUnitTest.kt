@@ -12,6 +12,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 @RunWith(RobolectricTestRunner::class)
@@ -50,8 +51,19 @@ class SmsReaderUnitTest {
 
     @Test
     fun `fetchInbox should parse cursor correctly`() {
-        val cursor = MatrixCursor(arrayOf("_id", "address", "body", "date", "type"))
-        cursor.addRow(arrayOf(1, "AX-HDFCBK", "Rs.500 credited to a/c XX0000", 2000L, 1))
+        val cursor = MatrixCursor(
+            arrayOf("_id", "address", "body", "date", "date_sent", "type")
+        )
+        cursor.addRow(
+            arrayOf(
+                1,
+                "AX-HDFCBK",
+                "Rs.500 credited to a/c XX0000",
+                2000L,
+                0L,
+                1
+            )
+        )
 
         every {
             mockContentResolver.query(
@@ -66,6 +78,56 @@ class SmsReaderUnitTest {
         assertEquals("Rs.500 credited to a/c XX0000", results[0].body)
         assertEquals(2000L, results[0].date)
         assertEquals(1, results[0].type)
+        assertEquals("1", results[0].providerMessageId)
+        assertEquals(2000L, results[0].sourceTimestamp)
+    }
+
+    @Test
+    fun `provider received date stays visible while sent date converges with broadcast identity`() {
+        val cursor = MatrixCursor(
+            arrayOf("_id", "address", "body", "date", "date_sent", "type")
+        )
+        cursor.addRow(
+            arrayOf(
+                9,
+                "AX-HDFCBK",
+                "Rs.500 credited to a/c XX0000",
+                2_500L,
+                2_000L,
+                1
+            )
+        )
+        every {
+            mockContentResolver.query(
+                Uri.parse("content://sms/inbox"),
+                any(), any(), any(), any()
+            )
+        } returns cursor
+
+        val provider = reader.fetchInbox().single()
+        val broadcast = SmsReader.SmsMessage(
+            address = provider.address,
+            body = provider.body,
+            date = 2_000L,
+            type = 1,
+            sourceTimestamp = 2_000L
+        )
+
+        assertEquals(2_500L, provider.date)
+        assertEquals(2_000L, provider.sourceTimestamp)
+        assertEquals(
+            broadcast.sourceIdentity.fallbackFingerprint,
+            provider.sourceIdentity.fallbackFingerprint
+        )
+        assertEquals(
+            SmsReader.SmsMessage(
+                address = provider.address,
+                body = provider.body,
+                date = 2_500L,
+                type = 1
+            ).sourceIdentity.fallbackFingerprint,
+            provider.sourceIdentity.alternateFingerprint
+        )
     }
 
     @Test
@@ -84,7 +146,7 @@ class SmsReaderUnitTest {
     }
 
     @Test
-    fun `fetchInbox should handle null cursor`() {
+    fun `fetchInbox should surface null cursor as provider failure`() {
         every {
             mockContentResolver.query(
                 Uri.parse("content://sms/inbox"),
@@ -92,8 +154,10 @@ class SmsReaderUnitTest {
             )
         } returns null
 
-        val results = reader.fetchInbox()
-        assertTrue(results.isEmpty())
+        val error = assertFailsWith<IllegalStateException> {
+            reader.fetchInbox()
+        }
+        assertTrue(error.message.orEmpty().contains("SMS provider"))
     }
 
     @Test
@@ -140,7 +204,14 @@ class SmsReaderUnitTest {
         every {
             mockContentResolver.query(
                 Uri.parse("content://sms/inbox"),
-                arrayOf("_id", "address", "body", "date", "type"),
+                arrayOf(
+                    "_id",
+                    "address",
+                    "body",
+                    "date",
+                    "date_sent",
+                    "type"
+                ),
                 any(), any(), any()
             )
         } returns cursor

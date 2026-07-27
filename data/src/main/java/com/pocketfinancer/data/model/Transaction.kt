@@ -17,7 +17,8 @@ data class Transaction(
     val slmPromptEvalMs: Long? = null,
     val slmEvalMs: Long? = null,
     val slmNumTokens: Int? = null,
-    val slmModelName: String? = null
+    val slmModelName: String? = null,
+    val sourceIdentity: SmsSourceIdentity? = null
 )
 
 enum class TransactionType {

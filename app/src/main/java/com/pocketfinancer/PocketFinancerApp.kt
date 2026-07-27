@@ -9,8 +9,16 @@ import com.pocketfinancer.hardware.DeviceCapabilities
 import com.pocketfinancer.hardware.SlmTier
 import com.pocketfinancer.hardware.isPublishedModelArtifact
 import com.pocketfinancer.inference.SlmModelStorage
+import com.pocketfinancer.setup.SetupImportStore
+import com.pocketfinancer.sms.SmsWorkScheduler
+import com.pocketfinancer.ui.settings.LocalFinancialEraseRecovery
 import dagger.hilt.android.HiltAndroidApp
 import javax.inject.Inject
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 
 @HiltAndroidApp
 class PocketFinancerApp : Application() {
@@ -23,6 +31,18 @@ class PocketFinancerApp : Application() {
     @Inject
     lateinit var deviceCapabilities: DeviceCapabilities
 
+    @Inject
+    lateinit var smsWorkScheduler: SmsWorkScheduler
+
+    @Inject
+    lateinit var localFinancialEraseRecovery: LocalFinancialEraseRecovery
+
+    @Inject
+    lateinit var setupImportStore: SetupImportStore
+
+    private val applicationScope =
+        CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     private var activeActivities = 0
 
     val isAppInForeground: Boolean
@@ -30,7 +50,17 @@ class PocketFinancerApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
-        restoreSelectedModelPin()
+        recoverInterruptedLocalFinancialErase()
+        if (!localFinancialEraseRecovery.isRecoveryPending()) {
+            reconcileSetupModelAvailability()
+            restoreSelectedModelPin()
+            reconcileEncryptedSmsOutbox()
+        } else {
+            Log.e(
+                TAG,
+                "Local financial erase recovery is still pending; startup work remains locked"
+            )
+        }
         registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
             override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {}
             override fun onActivityStarted(activity: Activity) {
@@ -44,6 +74,46 @@ class PocketFinancerApp : Application() {
             override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
             override fun onActivityDestroyed(activity: Activity) {}
         })
+    }
+
+    /**
+     * A pending erase has already durably locked the shell and advanced the
+     * service generation. Finish it before UI, model restoration, or encrypted
+     * outbox reconciliation can observe the new process.
+     */
+    private fun recoverInterruptedLocalFinancialErase() {
+        if (!localFinancialEraseRecovery.isRecoveryPending()) return
+        try {
+            val result = runBlocking(Dispatchers.IO) {
+                localFinancialEraseRecovery.recoverIfNeeded()
+            }
+            result.cleanupFailure?.let { failure ->
+                Log.e(
+                    TAG,
+                    "Recovered local financial erase with ancillary cleanup failure",
+                    failure
+                )
+            }
+        } catch (error: Exception) {
+            Log.e(TAG, "Could not complete interrupted local financial erase", error)
+        }
+    }
+
+    private fun reconcileSetupModelAvailability() {
+        val hasPublishedModel = SlmTier.ALL_TIERS.any { tier ->
+            isPublishedModelArtifact(modelStorage.modelFile(tier.modelFile))
+        }
+        setupImportStore.reconcileModelAvailability(hasPublishedModel)
+    }
+
+    private fun reconcileEncryptedSmsOutbox() {
+        applicationScope.launch {
+            try {
+                smsWorkScheduler.reconcilePendingAutomaticWork()
+            } catch (error: Exception) {
+                Log.e(TAG, "Could not reconcile encrypted SMS work", error)
+            }
+        }
     }
 
     /**

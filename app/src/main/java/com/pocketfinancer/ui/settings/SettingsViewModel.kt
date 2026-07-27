@@ -4,7 +4,7 @@ import android.content.Context
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.pocketfinancer.data.repository.AccountRepository
+import androidx.core.app.NotificationManagerCompat
 import com.pocketfinancer.data.repository.TransactionRepository
 import com.pocketfinancer.hardware.DeviceCapabilities
 import com.pocketfinancer.hardware.SlmTier
@@ -24,12 +24,14 @@ import com.pocketfinancer.inference.SlmRuntime
 import com.pocketfinancer.inference.SlmRuntimeOwner
 import com.pocketfinancer.inference.SlmRuntimePhase
 import com.pocketfinancer.inference.SlmRuntimeState
+import com.pocketfinancer.pipeline.AutomaticProcessingPreferences
 import com.pocketfinancer.pipeline.ExtractionParser
 import com.pocketfinancer.pipeline.PromptBuilder
 import com.pocketfinancer.pipeline.SlmProcessingPreferences
 import com.pocketfinancer.pipeline.SmsFilterPipeline
 import com.pocketfinancer.pipeline.SmsWorkAdmissionPause
 import com.pocketfinancer.pipeline.SmsWorkController
+import com.pocketfinancer.setup.SetupImportStore
 import com.pocketfinancer.SelectedModelResidency
 import com.pocketfinancer.SelectedModelMutationPause
 import com.pocketfinancer.SlmAppFlowCoordinator
@@ -90,8 +92,21 @@ data class SettingsUiState(
     val sessionCacheLogs: List<String>? = null,
     val slmPrompt: String? = null,
     val processIncomingSms: Boolean = true,
-    val gbnfGrammarEnabled: Boolean = true
+    val automaticProcessingChangeRunning: Boolean = false,
+    val automaticProcessingError: String? = null,
+    val gbnfGrammarEnabled: Boolean = false,
+    val readSmsPermissionGranted: Boolean = false,
+    val receiveSmsPermissionGranted: Boolean = false,
+    val notificationPermissionRequired: Boolean = false,
+    val notificationRuntimePermissionGranted: Boolean = true,
+    val appNotificationsEnabled: Boolean = true,
+    val progressNotificationChannelEnabled: Boolean = true,
+    val notificationPermissionGranted: Boolean = true,
+    val initialSetupModelPrepared: Boolean = false
 ) {
+    val smsPermissionGranted: Boolean
+        get() = readSmsPermissionGranted && receiveSmsPermissionGranted
+
     val canLoadModel: Boolean
         get() = selectedSlm != null &&
             downloadState.isComplete &&
@@ -136,14 +151,16 @@ class SettingsViewModel @Inject constructor(
     private val extractionParser: ExtractionParser,
     private val smsFilterPipeline: SmsFilterPipeline,
     private val transactionRepository: TransactionRepository,
-    private val accountRepository: AccountRepository,
+    private val automaticProcessingPreferences: AutomaticProcessingPreferences,
     private val slmProcessingPreferences: SlmProcessingPreferences,
     private val smsWorkController: SmsWorkController,
     private val selectedModelResidency: SelectedModelResidency,
     private val appFlowCoordinator: SlmAppFlowCoordinator,
     private val homeSyncManager: HomeSyncManager,
     private val onboardingSyncManager: OnboardingSyncManager,
-    private val onboardingRunGenerationStore: OnboardingRunGenerationStore
+    private val onboardingRunGenerationStore: OnboardingRunGenerationStore,
+    private val setupImportStore: SetupImportStore,
+    private val permissionHealthReader: SettingsPermissionHealthReader
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(SettingsUiState())
@@ -155,11 +172,13 @@ class SettingsViewModel @Inject constructor(
 
     init {
         assessDevice()
-        val prefs = context.getSharedPreferences(APP_SETTINGS, Context.MODE_PRIVATE)
         _state.value = _state.value.copy(
-            processIncomingSms = prefs.getBoolean(PROCESS_INCOMING_SMS, true),
-            gbnfGrammarEnabled = slmProcessingPreferences.gbnfGrammarEnabled.value
+            processIncomingSms = automaticProcessingPreferences.enabled.value,
+            gbnfGrammarEnabled = slmProcessingPreferences.gbnfGrammarEnabled.value,
+            initialSetupModelPrepared =
+                setupImportStore.state.value.modelPrepared
         )
+        refreshPermissionHealth()
         applyRuntimeState(slmRuntime.state.value)
 
         viewModelScope.launch {
@@ -170,6 +189,18 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch {
             slmProcessingPreferences.gbnfGrammarEnabled.collect { enabled ->
                 _state.value = _state.value.copy(gbnfGrammarEnabled = enabled)
+            }
+        }
+        viewModelScope.launch {
+            automaticProcessingPreferences.enabled.collect { enabled ->
+                _state.value = _state.value.copy(processIncomingSms = enabled)
+            }
+        }
+        viewModelScope.launch {
+            setupImportStore.state.collect { setup ->
+                _state.value = _state.value.copy(
+                    initialSetupModelPrepared = setup.modelPrepared
+                )
             }
         }
         viewModelScope.launch {
@@ -215,6 +246,7 @@ class SettingsViewModel @Inject constructor(
     }
 
     fun downloadSelectedModel() {
+        if (!initialModelManagementAvailable()) return
         val tier = _state.value.selectedSlm ?: return
         if (downloadJob?.isActive == true) return
         if (_state.value.runtimeBusy ||
@@ -280,10 +312,12 @@ class SettingsViewModel @Inject constructor(
     }
 
     fun cancelDownload() {
+        if (!initialModelManagementAvailable()) return
         downloadJob?.let(modelDownloader::cancel)
     }
 
     fun loadSelectedModel() {
+        if (!initialModelManagementAvailable()) return
         val tier = _state.value.selectedSlm ?: return
         val file = modelStorage.modelFile(tier.modelFile)
         if (!file.exists() || file.length() == 0L) {
@@ -293,6 +327,16 @@ class SettingsViewModel @Inject constructor(
             return
         }
         loadModelFromPath(file.absolutePath)
+    }
+
+    private fun initialModelManagementAvailable(): Boolean {
+        if (_state.value.initialSetupModelPrepared) return true
+        _state.value = _state.value.copy(
+            modelLoadError =
+                "Prepare the first on-device model from Home. That flow keeps " +
+                    "download confirmation and restart progress together."
+        )
+        return false
     }
 
     private fun loadModelFromPath(path: String) {
@@ -339,13 +383,15 @@ class SettingsViewModel @Inject constructor(
                 provisionalPin = handoff
 
                 // Commit selection only after the exact model successfully loads
-                // and owns its persistent residency pin.
+                // and owns its persistent residency pin. Selection and setup
+                // readiness share one durable commit so Home cannot observe a
+                // selected model while still claiming preparation is required.
                 val committed = withContext(NonCancellable) {
                     handoff.commit {
-                        context.getSharedPreferences(APP_SETTINGS, Context.MODE_PRIVATE)
-                            .edit()
-                            .putString(SELECTED_SLM_ID, tier.id)
-                            .commit()
+                        runCatching {
+                            setupImportStore.markModelPrepared(tier.id)
+                            true
+                        }.getOrDefault(false)
                     }
                 }
                 check(committed) {
@@ -537,7 +583,7 @@ class SettingsViewModel @Inject constructor(
                     }
                 )
             )
-            renderTestResult(result, body, sender, System.currentTimeMillis() - startedAt)
+            renderTestResult(result, System.currentTimeMillis() - startedAt)
         } catch (cancelled: CancellationException) {
             _state.value = _state.value.copy(
                 testRunning = false,
@@ -561,37 +607,12 @@ class SettingsViewModel @Inject constructor(
 
     private suspend fun renderTestResult(
         result: SlmExtractionResult,
-        body: String,
-        sender: String,
         elapsedMs: Long
     ) {
         when (result) {
             is SlmExtractionResult.Success -> {
                 val trimmed = result.json.trim()
                 val parsed = extractionParser.parse(trimmed)
-                parsed?.let { transaction ->
-                    val account = transaction.account?.let {
-                        accountRepository.getOrCreate(it, "Unknown Account", "auto-extracted")
-                    } ?: accountRepository.ensureDefault()
-                    val merchant = transaction.counterparty
-                        ?.takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
-                        ?: "Transaction (Test)"
-                    transactionRepository.insert(
-                        TransactionRepository.NewTransaction(
-                            amount = transaction.amount,
-                            merchant = merchant,
-                            date = System.currentTimeMillis(),
-                            type = transaction.type,
-                            accountId = account.id,
-                            rawMessage = body,
-                            sender = sender,
-                            slmPromptEvalMs = result.perf?.tPromptEvalMs,
-                            slmEvalMs = result.perf?.tEvalMs,
-                            slmNumTokens = result.perf?.nTokens,
-                            slmModelName = File(result.model.modelPath).name
-                        )
-                    )
-                }
                 val performance = result.perf?.let {
                     "\n\nPerformance:\n" +
                         "  Generation: ${it.tEvalMs}ms for ${it.nTokens} tokens\n" +
@@ -651,16 +672,72 @@ class SettingsViewModel @Inject constructor(
     }
 
     fun toggleProcessIncomingSms() {
-        val next = !_state.value.processIncomingSms
-        context.getSharedPreferences(APP_SETTINGS, Context.MODE_PRIVATE)
-            .edit()
-            .putBoolean(PROCESS_INCOMING_SMS, next)
-            .apply()
-        _state.value = _state.value.copy(processIncomingSms = next)
+        setProcessIncomingSms(!_state.value.processIncomingSms)
+    }
+
+    fun setProcessIncomingSms(enabled: Boolean) {
+        if (_state.value.automaticProcessingChangeRunning) return
+        changeAutomaticProcessing(enabled = enabled)
     }
 
     fun setGbnfGrammarEnabled(enabled: Boolean) {
         slmProcessingPreferences.setGbnfGrammarEnabled(enabled)
+    }
+
+    fun refreshPermissionHealth() {
+        val health = permissionHealthReader.read()
+        _state.value = _state.value.copy(
+            readSmsPermissionGranted = health.readSmsPermissionGranted,
+            receiveSmsPermissionGranted = health.receiveSmsPermissionGranted,
+            notificationPermissionRequired = health.notificationPermissionRequired,
+            notificationRuntimePermissionGranted =
+                health.notificationRuntimePermissionGranted,
+            appNotificationsEnabled = health.appNotificationsEnabled,
+            progressNotificationChannelEnabled =
+                health.progressNotificationChannelEnabled,
+            notificationPermissionGranted = health.progressNotificationsHealthy
+        )
+    }
+
+    private fun changeAutomaticProcessing(
+        enabled: Boolean
+    ) {
+        _state.value = _state.value.copy(
+            automaticProcessingChangeRunning = true,
+            automaticProcessingError = null
+        )
+        viewModelScope.launch {
+            try {
+                when {
+                    !enabled ->
+                        automaticProcessingPreferences.disableAndCleanupPending {
+                            smsWorkController.discardPendingAutomaticWork()
+                        }
+                    else ->
+                        automaticProcessingPreferences.enableAfterCleanupPending {
+                            smsWorkController.discardPendingAutomaticWork()
+                        }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                _state.value = _state.value.copy(
+                    automaticProcessingError = if (
+                        !enabled
+                    ) {
+                        "Automatic updates remain off, but pending-work cleanup failed: " +
+                            (error.message ?: "unknown error")
+                    } else {
+                        "Automatic updates remain off because pending-work cleanup failed: " +
+                            (error.message ?: "unknown error")
+                    }
+                )
+            } finally {
+                _state.value = _state.value.copy(
+                    automaticProcessingChangeRunning = false
+                )
+            }
+        }
     }
 
     fun resetOnboarding(onSuccess: () -> Unit) {
@@ -724,28 +801,48 @@ class SettingsViewModel @Inject constructor(
                 // native and app-flow gates are both held.
                 smsWorkController.cancelPending()
                 withContext(Dispatchers.IO) {
-                    // Cross-store reset cannot be fully atomic. Make the reset
-                    // intent durable first: after process death, workers skip
-                    // and Application will not restore the old selected pin.
-                    val committed = context
-                        .getSharedPreferences(APP_SETTINGS, Context.MODE_PRIVATE)
-                        .edit()
-                        .putBoolean(ONBOARDING_COMPLETED, false)
-                        .remove(SELECTED_SLM_ID)
-                        .putLong(
-                            OnboardingRunGenerationStore.PREFERENCE_KEY,
-                            onboardingRunGenerationStore.nextGeneration()
+                    val retainedModelPrepared = SlmTier.ALL_TIERS.any { tier ->
+                        isPublishedModelArtifact(
+                            modelStorage.modelFile(tier.modelFile)
                         )
-                        .commit()
-                    check(committed) {
-                        "Could not durably persist the onboarding reset."
                     }
-                    resetIntentDurable = true
-                    transactionRepository.clearDatabase()
+                    val nextGeneration =
+                        onboardingRunGenerationStore.nextGeneration()
+                    val nonEssentialCleanupFailure =
+                        runLocalFinancialEraseCriticalSection(
+                            beginDurableErase = {
+                                setupImportStore.beginLocalFinancialErase(
+                                    nextRunGeneration = nextGeneration
+                                )
+                            },
+                            onDurableEraseStarted = {
+                                resetIntentDurable = true
+                            },
+                            clearEncryptedData = transactionRepository::clearDatabase,
+                            cancelFinancialNotifications = {
+                                NotificationManagerCompat.from(context).cancelAll()
+                            },
+                            resetInMemoryState = {
+                                homeSyncManager.resetState()
+                                onboardingSyncManager.reset()
+                            },
+                            commitSetupReset = {
+                                setupImportStore.finishLocalFinancialErase(
+                                    retainedModelPrepared = retainedModelPrepared
+                                )
+                            },
+                            onCommitted = {
+                                invokeSuccess = true
+                            }
+                        )
+                    if (nonEssentialCleanupFailure != null) {
+                        Log.e(
+                            TAG,
+                            "Financial data erased, but ancillary cleanup failed",
+                            nonEssentialCleanupFailure
+                        )
+                    }
                 }
-                homeSyncManager.resetState()
-                onboardingSyncManager.reset()
-                invokeSuccess = true
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Exception) {
@@ -894,7 +991,6 @@ class SettingsViewModel @Inject constructor(
     private companion object {
         const val TAG = "PocketFinancer"
         const val APP_SETTINGS = ".app_settings"
-        const val PROCESS_INCOMING_SMS = "process_incoming_sms"
         const val SELECTED_SLM_ID = "selected_slm_id"
         const val ONBOARDING_COMPLETED = "onboarding_completed"
         const val GRAMMAR_ASSET = "sms_extraction.gbnf"

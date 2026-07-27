@@ -9,16 +9,14 @@ import dagger.hilt.EntryPoint
 import dagger.hilt.InstallIn
 import dagger.hilt.android.EntryPointAccessors
 import dagger.hilt.components.SingletonComponent
-import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.receiveAsFlow
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 /**
- * BroadcastReceiver for incoming SMS. Emits each received SMS via a
- * Channel that SmsRepository exposes as a Flow.
- *
- * Ported from the React Native SmsReceiver.kt — RN bridge replaced with
- * Channel-based Flow emission.
+ * BroadcastReceiver for incoming SMS. [goAsync] keeps the receiver alive until
+ * raw evidence reaches encrypted storage and opaque WorkManager input is queued.
  */
 class SmsReceiver : BroadcastReceiver() {
 
@@ -26,13 +24,6 @@ class SmsReceiver : BroadcastReceiver() {
     @InstallIn(SingletonComponent::class)
     interface SmsReceiverEntryPoint {
         fun smsWorkScheduler(): SmsWorkScheduler
-    }
-
-    companion object {
-        /** Shared channel so SmsRepository can listen to incoming SMS. */
-        private val smsChannel = Channel<SmsReader.SmsMessage>(Channel.BUFFERED)
-
-        fun incomingSmsFlow(): Flow<SmsReader.SmsMessage> = smsChannel.receiveAsFlow()
     }
 
     override fun onReceive(context: Context, intent: Intent) {
@@ -48,25 +39,27 @@ class SmsReceiver : BroadcastReceiver() {
                     address = address,
                     body = body,
                     date = date,
-                    type = 1  // Inbox
+                    type = 1,  // Inbox
+                    sourceTimestamp = firstMsg.timestampMillis
                 )
-                // 1. Emits SMS via channel (for UI)
-                smsChannel.trySend(msg)
-
-                // 2. Schedule background processing via WorkManager (using scheduler entrypoint)
-                try {
-                    val appContext = context.applicationContext
-                    val entryPoint = EntryPointAccessors.fromApplication(
-                        appContext,
-                        SmsReceiverEntryPoint::class.java
-                    )
-                    entryPoint.smsWorkScheduler().scheduleSmsParsing(
-                        address = msg.address,
-                        body = msg.body,
-                        date = msg.date
-                    )
-                } catch (e: Exception) {
-                    Log.e("SmsReceiver", "Failed to schedule background SMS parsing", e)
+                val pendingResult = goAsync()
+                CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+                    try {
+                        val appContext = context.applicationContext
+                        val entryPoint = EntryPointAccessors.fromApplication(
+                            appContext,
+                            SmsReceiverEntryPoint::class.java
+                        )
+                        entryPoint.smsWorkScheduler().scheduleSmsParsing(msg)
+                    } catch (e: Exception) {
+                        Log.e(
+                            "SmsReceiver",
+                            "Failed to admit encrypted background SMS candidate",
+                            e
+                        )
+                    } finally {
+                        pendingResult.finish()
+                    }
                 }
             }
         }

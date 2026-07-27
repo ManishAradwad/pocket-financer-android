@@ -10,6 +10,7 @@ import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -39,11 +40,37 @@ import com.pocketfinancer.ui.theme.PocketFinancerTheme
 fun PocketFinancerRoot() {
     PocketFinancerTheme {
         val context = androidx.compose.ui.platform.LocalContext.current
-        var onboardingCompleted by remember {
-            mutableStateOf(
-                context.getSharedPreferences(".app_settings", android.content.Context.MODE_PRIVATE)
-                    .getBoolean("onboarding_completed", false)
+        val preferences = remember(context) {
+            context.getSharedPreferences(
+                ".app_settings",
+                android.content.Context.MODE_PRIVATE
             )
+        }
+        var onboardingCompleted by remember(preferences) {
+            mutableStateOf(preferences.getBoolean("onboarding_completed", false))
+        }
+        DisposableEffect(preferences) {
+            val listener =
+                android.content.SharedPreferences.OnSharedPreferenceChangeListener {
+                        changedPreferences,
+                        key ->
+                    if (key == "onboarding_completed") {
+                        onboardingCompleted = changedPreferences.getBoolean(
+                            "onboarding_completed",
+                            false
+                        )
+                    }
+                }
+            preferences.registerOnSharedPreferenceChangeListener(listener)
+            // Re-read after registering so a commit racing with composition
+            // cannot leave the shell gate stale.
+            onboardingCompleted = preferences.getBoolean(
+                "onboarding_completed",
+                false
+            )
+            onDispose {
+                preferences.unregisterOnSharedPreferenceChangeListener(listener)
+            }
         }
 
         if (!onboardingCompleted) {

@@ -1,6 +1,7 @@
 package com.pocketfinancer.data.db
 
 import com.pocketfinancer.data.db.dao.AccountDao
+import com.pocketfinancer.data.db.dao.QueuedSmsCandidateDao
 import com.pocketfinancer.data.db.dao.TransactionDao
 import dagger.Module
 import dagger.Provides
@@ -26,5 +27,10 @@ object DatabaseModule {
     @Provides
     fun provideAccountDao(db: AppDatabase): AccountDao {
         return db.accountDao()
+    }
+
+    @Provides
+    fun provideQueuedSmsCandidateDao(db: AppDatabase): QueuedSmsCandidateDao {
+        return db.queuedSmsCandidateDao()
     }
 }

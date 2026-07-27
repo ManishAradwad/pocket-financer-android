@@ -54,6 +54,7 @@ object SmsNotificationHelper {
     /**
      * Post a notification indicating that an SMS has been skipped because it is non-transactional.
      */
+    @Suppress("UNUSED_PARAMETER")
     fun showSkippedNotification(context: Context, sender: String, body: String, date: Long) {
         createNotificationChannel(context)
         val notificationId = getNotificationId(sender, date)
@@ -61,8 +62,7 @@ object SmsNotificationHelper {
         val builder = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_sys_warning) // fallback built-in icon
             .setContentTitle("SMS Skipped")
-            .setContentText("SMS from $sender contains non-transactional content.")
-            .setStyle(NotificationCompat.BigTextStyle().bigText("SMS from $sender contains non-transactional content:\n\"$body\""))
+            .setContentText("This alert was not a supported transaction.")
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setAutoCancel(true)
             .setContentIntent(getAppPendingIntent(context))
@@ -90,7 +90,7 @@ object SmsNotificationHelper {
         val builder = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_notify_sync)
             .setContentTitle("Processing Transaction SMS")
-            .setContentText("$stageText (Sender: $sender)")
+            .setContentText(stageText)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setOngoing(true) // Cannot be swiped away
             .setAutoCancel(false)
@@ -149,7 +149,7 @@ object SmsNotificationHelper {
         val builder = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_notify_error)
             .setContentTitle("SMS Sync Failed")
-            .setContentText("Could not sync message from $sender: $reason")
+            .setContentText(reason)
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .setOngoing(false) // Can be swiped away
             .setAutoCancel(true)
@@ -164,39 +164,10 @@ object SmsNotificationHelper {
     }
 
     /**
-     * Post/update the summary notification showing the total count of unsynced transaction messages.
+     * Removes the legacy heuristic backlog summary. Current automatic work
+     * reports only the candidate it actually processed.
      */
-    fun showUnsyncedSummaryNotification(context: Context, unsyncedCount: Int) {
-        createNotificationChannel(context)
-        
-        if (unsyncedCount <= 0) {
-            cancelUnsyncedSummaryNotification(context)
-            return
-        }
-
-        val text = if (unsyncedCount == 1) {
-            "1 transaction is yet to be synced. Tap to sync."
-        } else {
-            "$unsyncedCount transactions are yet to be synced. Tap to sync."
-        }
-
-        val builder = NotificationCompat.Builder(context, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.stat_notify_chat)
-            .setContentTitle("Unsynced Transactions")
-            .setContentText(text)
-            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-            .setAutoCancel(true)
-            .setContentIntent(getAppPendingIntent(context))
-
-        try {
-            val notificationManager = NotificationManagerCompat.from(context)
-            notificationManager.notify(SUMMARY_NOTIFICATION_ID, builder.build())
-        } catch (e: SecurityException) {
-            // Permission not granted
-        }
-    }
-
-    fun cancelUnsyncedSummaryNotification(context: Context) {
+    fun cancelLegacyUnsyncedSummaryNotification(context: Context) {
         try {
             val notificationManager = NotificationManagerCompat.from(context)
             notificationManager.cancel(SUMMARY_NOTIFICATION_ID)

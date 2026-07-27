@@ -97,7 +97,7 @@ object AppTypography {
      * Timestamp / metadata tag — smallest monospaced text for dates and tags.
      * Backed by labelSmall (already Monospace, 11sp / 16sp).
      *
-     * Use for: "20:59", "MESSAGE STREAM SYNCED", date stamps.
+     * Use for: "20:59", "SETUP READY", date stamps.
      */
     val timestamp: TextStyle
         @Composable @ReadOnlyComposable

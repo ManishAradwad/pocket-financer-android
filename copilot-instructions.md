@@ -25,7 +25,7 @@ pocket-financer-android/
 1. **[`:app`](file:///d:/Personal_Projects/pocket-financer-android/app)**
    - **Main UI & Themes**: Custom M3 dark theme defined in [`ui/theme/Color.kt`](file:///d:/Personal_Projects/pocket-financer-android/app/src/main/java/com/pocketfinancer/ui/theme/Color.kt) and [`ui/theme/Theme.kt`](file:///d:/Personal_Projects/pocket-financer-android/app/src/main/java/com/pocketfinancer/ui/theme/Theme.kt).
    - **Navigation**: Structured using Compose Navigation in [`ui/navigation/Screen.kt`](file:///d:/Personal_Projects/pocket-financer-android/app/src/main/java/com/pocketfinancer/ui/navigation/Screen.kt) and [`ui/PocketFinancerRoot.kt`](file:///d:/Personal_Projects/pocket-financer-android/app/src/main/java/com/pocketfinancer/ui/PocketFinancerRoot.kt).
-   - **Settings Screen**: Present in [`ui/settings/SettingsScreen.kt`](file:///d:/Personal_Projects/pocket-financer-android/app/src/main/java/com/pocketfinancer/ui/settings/SettingsScreen.kt) (manages hardware specs, downloads models, loads/unloads, and triggers test SMS).
+   - **Settings Screen**: Present in [`ui/settings/SettingsScreen.kt`](file:///d:/Personal_Projects/pocket-financer-android/app/src/main/java/com/pocketfinancer/ui/settings/SettingsScreen.kt). The normal surface covers SMS/update controls, permission health, data/privacy, on-device AI and About; hardware, runtime, GBNF and parser-test controls live under collapsed Advanced diagnostics.
 
 2. **[`:pipeline`](file:///d:/Personal_Projects/pocket-financer-android/pipeline)**
    - **[`PipelineService.kt`](file:///d:/Personal_Projects/pocket-financer-android/pipeline/src/main/java/com/pocketfinancer/pipeline/PipelineService.kt)**: Coordinates SMS parsing flows, builds prompt, runs JNI inference, parses JSON output, and persists in database.
@@ -36,14 +36,14 @@ pocket-financer-android/
 3. **[`:inference`](file:///d:/Personal_Projects/pocket-financer-android/inference)**
    - **[`SlmRuntime.kt`](file:///d:/Personal_Projects/pocket-financer-android/inference/src/main/java/com/pocketfinancer/inference/SlmRuntime.kt)** and **[`SlmRuntimeCoordinator.kt`](file:///d:/Personal_Projects/pocket-financer-android/inference/src/main/java/com/pocketfinancer/inference/SlmRuntimeCoordinator.kt)**: The process-wide, lease-based access path for model residency and serialized native operations. Production callers must use this API.
    - **[`LlamaEngine.kt`](file:///d:/Personal_Projects/pocket-financer-android/inference/src/main/java/com/pocketfinancer/inference/LlamaEngine.kt)**: Internal JNI owner used only by the coordinator; app, service, worker, and pipeline code must not access it directly.
-   - **GBNF Grammar**: Optional, default-enabled grammar schema defined in [`assets/sms_extraction.gbnf`](file:///d:/Personal_Projects/pocket-financer-android/inference/src/main/assets/sms_extraction.gbnf). It improves structured-output reliability but can slow per-SMS processing.
+   - **GBNF Grammar**: Optional, default-off grammar schema defined in [`assets/sms_extraction.gbnf`](file:///d:/Personal_Projects/pocket-financer-android/inference/src/main/assets/sms_extraction.gbnf). An explicitly stored choice is preserved, and consumers snapshot it once per SMS.
 
 4. **[`:data`](file:///d:/Personal_Projects/pocket-financer-android/data)**
    - **Room DB & SQLCipher**: Uses SQLCipher for AES-256 database encryption.
-   - **Passphrase generation**: Derived via `getOrCreatePassphrase` inside [`db/AppDatabase.kt`](file:///d:/Personal_Projects/pocket-financer-android/data/src/main/java/com/pocketfinancer/data/db/AppDatabase.kt).
+   - **Passphrase protection**: A random SQLCipher key is wrapped by Android Keystore-backed encrypted preferences in [`db/AppDatabase.kt`](file:///d:/Personal_Projects/pocket-financer-android/data/src/main/java/com/pocketfinancer/data/db/AppDatabase.kt). Initialization fails closed if that protection is unavailable; legacy plaintext-fallback keys are migrated and erased.
 
 5. **[`:sms`](file:///d:/Personal_Projects/pocket-financer-android/sms)**
-   - **Real-time broadcast**: [`SmsReceiver.kt`](file:///d:/Personal_Projects/pocket-financer-android/sms/src/main/java/com/pocketfinancer/sms/SmsReceiver.kt) catches incoming transaction alerts and emits them via Coroutine flow channels.
+   - **Real-time broadcast**: [`SmsReceiver.kt`](file:///d:/Personal_Projects/pocket-financer-android/sms/src/main/java/com/pocketfinancer/sms/SmsReceiver.kt) uses `goAsync` to durably admit raw evidence to the SQLCipher-backed candidate outbox. WorkManager receives only an opaque candidate key, and startup reconciles pending candidates after process death.
    - **ContentProvider scraper**: [`SmsReader.kt`](file:///d:/Personal_Projects/pocket-financer-android/sms/src/main/java/com/pocketfinancer/sms/SmsReader.kt) reads historical messages from the device inbox.
 
 6. **[`:hardware`](file:///d:/Personal_Projects/pocket-financer-android/hardware)**
@@ -57,7 +57,7 @@ Extracting structured transaction schema requires a power-saving and robust pipe
 
 1. **Deterministic Filter (Phase 0)**: Uses regexes to assert details like currency, amounts, masked cards/accounts, action verbs, and excludes OTPs/collect requests. If failed, it stops immediately.
 2. **Thinking Pass (Phase 1)**: Assembles prompt, appends `<think>`, and lets the model reason step-by-step. The native JNI engine generates tokens with a stop token set to `</think>`.
-3. **Structured JSON Generation (Phase 2)**: Appends `</think>\n` and executes native completion. The default-enabled GBNF setting constrains the sampler to the transaction schema (`amount`, `counterparty`, `type`, `account`); when disabled, defensive parsing rejects malformed output.
+3. **Structured JSON Generation (Phase 2)**: Appends `</think>\n` and executes native completion. Optional GBNF constraints default off; when disabled, defensive parsing rejects malformed output. Each operation snapshots the setting before suspension.
 
 ---
 
@@ -128,5 +128,6 @@ Check model storage paths and read device warning or crash logs:
 1. **Dashboard, Transaction Register, and Device Profiling Screens (Current Step)**:
    - Build out the primary tabs (`Home`, `Insights`) inside [`ui/PocketFinancerRoot.kt`](file:///d:/Personal_Projects/pocket-financer-android/app/src/main/java/com/pocketfinancer/ui/PocketFinancerRoot.kt) (the `Transactions` tab is now fully implemented with date-grouped lists, daily subtotals, credit/debit filters, and an SLM details bottom sheet).
    - Ensure you use Material 3 dark components that fit the defined color tokens.
-2. **Background Worker integration (Next Step)**:
-   - Integrate an Android WorkManager flow that triggers in the background when SMS is received to parse messages offline without requiring the app to be open.
+2. **Background processing (Implemented)**:
+   - `SmsReceiver` delegates incoming alerts to a unique WorkManager chain. Automatic processing defaults on and is owned by `AutomaticProcessingPreferences`; disabling it blocks new/pending automatic work while allowing already claimed processing to finish. Manual scans remain available.
+   - Saved transactions retain the source SMS sender/body in SQLCipher-backed Room storage. Rejected messages may exist only as encrypted retry candidates and must be removed after terminal rejection or evidence handoff.

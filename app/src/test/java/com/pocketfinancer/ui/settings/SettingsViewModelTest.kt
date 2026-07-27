@@ -6,7 +6,7 @@ import android.util.Log
 import com.pocketfinancer.ProvisionalSelectedModelPin
 import com.pocketfinancer.SelectedModelResidency
 import com.pocketfinancer.SlmAppFlowCoordinator
-import com.pocketfinancer.data.repository.AccountRepository
+import com.pocketfinancer.data.model.TransactionType
 import com.pocketfinancer.data.repository.TransactionRepository
 import com.pocketfinancer.hardware.DeviceCapabilities
 import com.pocketfinancer.inference.ModelDownloader
@@ -22,11 +22,14 @@ import com.pocketfinancer.inference.SlmRuntime
 import com.pocketfinancer.inference.SlmRuntimeOwner
 import com.pocketfinancer.inference.SlmRuntimePhase
 import com.pocketfinancer.inference.SlmRuntimeState
+import com.pocketfinancer.pipeline.AutomaticProcessingPreferences
 import com.pocketfinancer.pipeline.ExtractionParser
 import com.pocketfinancer.pipeline.PromptBuilder
 import com.pocketfinancer.pipeline.SlmProcessingPreferences
 import com.pocketfinancer.pipeline.SmsFilterPipeline
 import com.pocketfinancer.pipeline.SmsWorkController
+import com.pocketfinancer.setup.SetupImportState
+import com.pocketfinancer.setup.SetupImportStore
 import com.pocketfinancer.ui.home.HomeSyncManager
 import com.pocketfinancer.ui.home.HomeSyncState
 import com.pocketfinancer.ui.onboarding.OnboardingRunGenerationStore
@@ -77,6 +80,7 @@ class SettingsViewModelTest {
     @Test
     fun `grammar preference is exposed and updated through settings state`() =
         runTest(dispatcher) {
+            assertFalse(SettingsUiState().gbnfGrammarEnabled)
             val fixture = fixture(gbnfInitiallyEnabled = false)
             val viewModel = fixture.createViewModel()
 
@@ -87,6 +91,126 @@ class SettingsViewModelTest {
             runCurrent()
 
             assertTrue(viewModel.state.value.gbnfGrammarEnabled)
+        }
+
+    @Test
+    fun `permission health reflects revocation and recovery after refresh`() =
+        runTest(dispatcher) {
+            val fixture = fixture()
+            val viewModel = fixture.createViewModel()
+            runCurrent()
+
+            assertTrue(viewModel.state.value.smsPermissionGranted)
+
+            fixture.permissionHealth.value =
+                fixture.permissionHealth.value.copy(
+                    readSmsPermissionGranted = false
+                )
+            viewModel.refreshPermissionHealth()
+
+            assertFalse(viewModel.state.value.readSmsPermissionGranted)
+            assertTrue(viewModel.state.value.receiveSmsPermissionGranted)
+            assertFalse(viewModel.state.value.smsPermissionGranted)
+
+            fixture.permissionHealth.value =
+                fixture.permissionHealth.value.copy(
+                    readSmsPermissionGranted = true
+                )
+            viewModel.refreshPermissionHealth()
+
+            assertTrue(viewModel.state.value.smsPermissionGranted)
+        }
+
+    @Test
+    fun `notification health reflects global and channel disablement`() =
+        runTest(dispatcher) {
+            val fixture = fixture()
+            val viewModel = fixture.createViewModel()
+            runCurrent()
+
+            assertTrue(viewModel.state.value.notificationPermissionGranted)
+
+            fixture.permissionHealth.value =
+                fixture.permissionHealth.value.copy(
+                    appNotificationsEnabled = false
+                )
+            viewModel.refreshPermissionHealth()
+
+            assertFalse(viewModel.state.value.appNotificationsEnabled)
+            assertFalse(viewModel.state.value.notificationPermissionGranted)
+
+            fixture.permissionHealth.value =
+                fixture.permissionHealth.value.copy(
+                    appNotificationsEnabled = true,
+                    progressNotificationChannelEnabled = false
+                )
+            viewModel.refreshPermissionHealth()
+
+            assertTrue(viewModel.state.value.appNotificationsEnabled)
+            assertFalse(
+                viewModel.state.value.progressNotificationChannelEnabled
+            )
+            assertFalse(viewModel.state.value.notificationPermissionGranted)
+        }
+
+    @Test
+    fun `automatic processing preference is exposed and updated through settings state`() =
+        runTest(dispatcher) {
+            val fixture = fixture(automaticProcessingInitiallyEnabled = true)
+            val viewModel = fixture.createViewModel()
+
+            runCurrent()
+            assertTrue(viewModel.state.value.processIncomingSms)
+
+            viewModel.setProcessIncomingSms(false)
+            runCurrent()
+
+            assertFalse(viewModel.state.value.processIncomingSms)
+            coVerify(exactly = 1) {
+                fixture.automaticProcessingPreferences
+                    .disableAndCleanupPending(any())
+            }
+            coVerify(exactly = 1) {
+                fixture.smsWorkController.discardPendingAutomaticWork()
+            }
+
+            viewModel.setProcessIncomingSms(true)
+            runCurrent()
+
+            assertTrue(viewModel.state.value.processIncomingSms)
+            coVerify(exactly = 1) {
+                fixture.automaticProcessingPreferences
+                    .enableAfterCleanupPending(any())
+            }
+            coVerify(exactly = 2) {
+                fixture.smsWorkController.discardPendingAutomaticWork()
+            }
+        }
+
+    @Test
+    fun `failed automatic cleanup keeps intake off until cleanup retry succeeds`() =
+        runTest(dispatcher) {
+            val fixture = fixture(automaticProcessingInitiallyEnabled = true)
+            coEvery {
+                fixture.smsWorkController.discardPendingAutomaticWork()
+            } throws IllegalStateException("database unavailable")
+            val viewModel = fixture.createViewModel()
+            runCurrent()
+
+            viewModel.setProcessIncomingSms(false)
+            runCurrent()
+
+            assertFalse(viewModel.state.value.processIncomingSms)
+            assertTrue(viewModel.state.value.automaticProcessingError!!.contains("cleanup failed"))
+
+            coEvery {
+                fixture.smsWorkController.discardPendingAutomaticWork()
+            } returns 2
+            viewModel.setProcessIncomingSms(true)
+            runCurrent()
+
+            assertTrue(viewModel.state.value.processIncomingSms)
+            assertNull(viewModel.state.value.automaticProcessingError)
         }
 
     @Test
@@ -114,6 +238,41 @@ class SettingsViewModelTest {
             assertNull(capturedGrammar)
             verify(exactly = 0) {
                 fixture.storage.readTextAsset("sms_extraction.gbnf")
+            }
+        }
+
+    @Test
+    fun `successful parser diagnostic never writes into the real ledger`() =
+        runTest(dispatcher) {
+            val fixture = fixture(gbnfInitiallyEnabled = false, modelLoaded = true)
+            val extracted = ExtractionParser.ExtractedTransaction(
+                amount = 500.0,
+                counterparty = "Demo",
+                type = TransactionType.CREDIT,
+                account = "account 0000"
+            )
+            coEvery {
+                fixture.runtime.acquire(SlmRuntimeOwner.SETTINGS_TEST, fixture.spec)
+            } returns fixture.lease
+            coEvery { fixture.lease.extract(any()) } returns SlmExtractionResult.Success(
+                json = """{"amount":500,"counterparty":"Demo","type":"credit","account":"0000"}""",
+                model = fixture.spec
+            )
+            coEvery { fixture.lease.release() } returns Unit
+            every { fixture.extractionParser.parse(any()) } returns extracted
+
+            val viewModel = fixture.createViewModel()
+            runCurrent()
+            viewModel.runTestSms()
+            advanceTimeBy(2_000)
+            runCurrent()
+
+            assertTrue(
+                "Unexpected diagnostic state: ${viewModel.state.value}",
+                viewModel.state.value.testParsed?.contains("amount=500.0") == true
+            )
+            coVerify(exactly = 0) {
+                fixture.transactionRepository.insert(any())
             }
         }
 
@@ -210,7 +369,9 @@ class SettingsViewModelTest {
             coEvery {
                 fixture.selectedModelResidency.beginProvisionalPin(any(), any())
             } returns handoff
-            coEvery { handoff.commit(any()) } returns true
+            coEvery { handoff.commit(any()) } coAnswers {
+                firstArg<() -> Boolean>().invoke()
+            }
 
             val viewModel = fixture.createViewModel()
             runCurrent()
@@ -235,7 +396,26 @@ class SettingsViewModelTest {
             coVerify(exactly = 1) {
                 fixture.selectedModelResidency.beginProvisionalPin(any(), any())
             }
+            verify(exactly = 1) {
+                fixture.setupImportStore.markModelPrepared(tier.id)
+            }
             assertTrue(viewModel.state.value.modelLoadError == null)
+        }
+
+    @Test
+    fun `fresh shell cannot bypass resumable Home model preparation`() =
+        runTest(dispatcher) {
+            val fixture = fixture(initialSetupModelPrepared = false)
+            val viewModel = fixture.createViewModel()
+            runCurrent()
+
+            viewModel.downloadSelectedModel()
+            runCurrent()
+
+            assertTrue(viewModel.state.value.modelLoadError!!.contains("from Home"))
+            coVerify(exactly = 0) {
+                fixture.modelDownloader.download(any(), any())
+            }
         }
 
     @Test
@@ -308,8 +488,10 @@ class SettingsViewModelTest {
 
     private fun fixture(
         gbnfInitiallyEnabled: Boolean = true,
+        automaticProcessingInitiallyEnabled: Boolean = true,
         modelLoaded: Boolean = false,
-        onboardingCompleted: Boolean = true
+        onboardingCompleted: Boolean = true,
+        initialSetupModelPrepared: Boolean = true
     ): Fixture {
         val context = mockk<Context>()
         val sharedPreferences = mockk<SharedPreferences>()
@@ -318,10 +500,30 @@ class SettingsViewModelTest {
         val storage = mockk<SlmModelStorage>()
         val promptBuilder = mockk<PromptBuilder>()
         val preferences = mockk<SlmProcessingPreferences>()
+        val automaticProcessingPreferences = mockk<AutomaticProcessingPreferences>()
         val modelDownloader = mockk<ModelDownloader>(relaxed = true)
         val downloaderState = MutableStateFlow(ModelDownloader.DownloadState())
         val selectedModelResidency = mockk<SelectedModelResidency>(relaxed = true)
         val gbnf = MutableStateFlow(gbnfInitiallyEnabled)
+        val automaticProcessing = MutableStateFlow(automaticProcessingInitiallyEnabled)
+        val extractionParser = mockk<ExtractionParser>(relaxed = true)
+        val transactionRepository = mockk<TransactionRepository>(relaxed = true)
+        val smsWorkController = mockk<SmsWorkController>(relaxed = true)
+        val setupImportStore = mockk<SetupImportStore>(relaxed = true)
+        val setupImportState = MutableStateFlow(
+            SetupImportState(modelPrepared = initialSetupModelPrepared)
+        )
+        val permissionHealthReader = mockk<SettingsPermissionHealthReader>()
+        val permissionHealth = MutableStateFlow(
+            SettingsPermissionHealthSnapshot(
+                readSmsPermissionGranted = true,
+                receiveSmsPermissionGranted = true,
+                notificationPermissionRequired = true,
+                notificationRuntimePermissionGranted = true,
+                appNotificationsEnabled = true,
+                progressNotificationChannelEnabled = true
+            )
+        )
         val models = File("build/test-settings-models/${System.nanoTime()}")
         val spec = SlmModelSpec(
             modelId = "test-model",
@@ -346,11 +548,28 @@ class SettingsViewModelTest {
         every {
             context.getSharedPreferences(".app_settings", Context.MODE_PRIVATE)
         } returns sharedPreferences
+        every { permissionHealthReader.read() } answers {
+            permissionHealth.value
+        }
         every { sharedPreferences.getString("selected_slm_id", null) } returns null
-        every { sharedPreferences.getBoolean("process_incoming_sms", true) } returns true
         every {
             sharedPreferences.getBoolean("onboarding_completed", false)
         } returns onboardingCompleted
+        every { automaticProcessingPreferences.enabled } returns automaticProcessing
+        every { setupImportStore.state } returns setupImportState
+        coEvery {
+            automaticProcessingPreferences.disableAndCleanupPending(any())
+        } coAnswers {
+            automaticProcessing.value = false
+            firstArg<suspend () -> Int>().invoke()
+        }
+        coEvery {
+            automaticProcessingPreferences.enableAfterCleanupPending(any())
+        } coAnswers {
+            val removed = firstArg<suspend () -> Int>().invoke()
+            automaticProcessing.value = true
+            removed
+        }
         every { preferences.gbnfGrammarEnabled } returns gbnf
         every { preferences.setGbnfGrammarEnabled(any()) } answers {
             gbnf.value = firstArg()
@@ -376,12 +595,20 @@ class SettingsViewModelTest {
             promptBuilder = promptBuilder,
             preferences = preferences,
             gbnf = gbnf,
+            automaticProcessingPreferences = automaticProcessingPreferences,
+            automaticProcessing = automaticProcessing,
+            extractionParser = extractionParser,
+            transactionRepository = transactionRepository,
+            smsWorkController = smsWorkController,
+            permissionHealthReader = permissionHealthReader,
+            permissionHealth = permissionHealth,
             spec = spec,
             lease = lease,
             appFlowCoordinator = appFlowCoordinator,
             modelDownloader = modelDownloader,
             downloaderState = downloaderState,
-            selectedModelResidency = selectedModelResidency
+            selectedModelResidency = selectedModelResidency,
+            setupImportStore = setupImportStore
         )
     }
 
@@ -394,12 +621,20 @@ class SettingsViewModelTest {
         val promptBuilder: PromptBuilder,
         val preferences: SlmProcessingPreferences,
         val gbnf: MutableStateFlow<Boolean>,
+        val automaticProcessingPreferences: AutomaticProcessingPreferences,
+        val automaticProcessing: MutableStateFlow<Boolean>,
+        val extractionParser: ExtractionParser,
+        val transactionRepository: TransactionRepository,
+        val smsWorkController: SmsWorkController,
+        val permissionHealthReader: SettingsPermissionHealthReader,
+        val permissionHealth: MutableStateFlow<SettingsPermissionHealthSnapshot>,
         val spec: SlmModelSpec,
         val lease: SlmLease,
         val appFlowCoordinator: SlmAppFlowCoordinator,
         val modelDownloader: ModelDownloader,
         val downloaderState: MutableStateFlow<ModelDownloader.DownloadState>,
-        val selectedModelResidency: SelectedModelResidency
+        val selectedModelResidency: SelectedModelResidency,
+        val setupImportStore: SetupImportStore
     ) {
         fun createViewModel(): SettingsViewModel {
             val homeSync = mockk<HomeSyncManager>()
@@ -415,19 +650,21 @@ class SettingsViewModelTest {
                 modelStorage = storage,
                 modelDownloader = modelDownloader,
                 promptBuilder = promptBuilder,
-                extractionParser = mockk<ExtractionParser>(relaxed = true),
+                extractionParser = extractionParser,
                 smsFilterPipeline = SmsFilterPipeline(),
-                transactionRepository = mockk<TransactionRepository>(relaxed = true),
-                accountRepository = mockk<AccountRepository>(relaxed = true),
+                transactionRepository = transactionRepository,
+                automaticProcessingPreferences = automaticProcessingPreferences,
                 slmProcessingPreferences = preferences,
-                smsWorkController = mockk<SmsWorkController>(relaxed = true),
+                smsWorkController = smsWorkController,
                 selectedModelResidency = selectedModelResidency,
                 appFlowCoordinator = appFlowCoordinator,
                 homeSyncManager = homeSync,
                 onboardingSyncManager = onboardingSync,
                 onboardingRunGenerationStore = mockk<OnboardingRunGenerationStore>(
                     relaxed = true
-                )
+                ),
+                setupImportStore = setupImportStore,
+                permissionHealthReader = permissionHealthReader
             )
         }
     }

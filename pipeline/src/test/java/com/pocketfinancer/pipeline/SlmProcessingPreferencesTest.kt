@@ -2,9 +2,7 @@ package com.pocketfinancer.pipeline
 
 import android.content.Context
 import android.content.SharedPreferences
-import io.mockk.Runs
 import io.mockk.every
-import io.mockk.just
 import io.mockk.mockk
 import org.junit.Test
 import kotlin.test.assertFalse
@@ -13,7 +11,7 @@ import kotlin.test.assertTrue
 class SlmProcessingPreferencesTest {
 
     @Test
-    fun `grammar defaults on and persists explicit changes`() {
+    fun `missing grammar preference defaults off and explicit values survive recreation`() {
         val context = mockk<Context>()
         val sharedPreferences = mockk<SharedPreferences>()
         val editor = mockk<SharedPreferences.Editor>()
@@ -43,18 +41,19 @@ class SlmProcessingPreferencesTest {
             storedValue = secondArg()
             editor
         }
-        every { editor.apply() } just Runs
+        every { editor.commit() } returns true
 
         val preferences = SlmProcessingPreferences(context)
-        assertTrue(preferences.gbnfGrammarEnabled.value)
-
-        preferences.setGbnfGrammarEnabled(false)
         assertFalse(preferences.gbnfGrammarEnabled.value)
 
-        val recreatedPreferences = SlmProcessingPreferences(context)
-        assertFalse(recreatedPreferences.gbnfGrammarEnabled.value)
+        preferences.setGbnfGrammarEnabled(true)
+        assertTrue(preferences.gbnfGrammarEnabled.value)
 
-        recreatedPreferences.setGbnfGrammarEnabled(true)
+        val recreatedPreferences = SlmProcessingPreferences(context)
         assertTrue(recreatedPreferences.gbnfGrammarEnabled.value)
+
+        recreatedPreferences.setGbnfGrammarEnabled(false)
+        assertFalse(recreatedPreferences.gbnfGrammarEnabled.value)
+        assertFalse(SlmProcessingPreferences(context).gbnfGrammarEnabled.value)
     }
 }

@@ -19,13 +19,13 @@ By leveraging a local **Small Language Model (SLM)** backed by `llama.cpp` via a
 *   **Three-Phase Reasoning Pipeline**:
     *   *Phase 0 (Pre-Filtering)*: Checks sender, currency amounts, masked accounts, and action verbs; filters out OTPs and collect requests.
     *   *Phase 1 (Chain of Thought)*: Dynamic allocation of `<think>` tokens (1024 token budget) to analyze the alert sender context and message logic.
-    *   *Phase 2 (Structured JSON Generation)*: Produces transaction JSON with optional **GBNF (GGML BNF) grammar** constraints. GBNF is enabled by default and can improve structured-output reliability at the cost of slower per-SMS processing.
+    *   *Phase 2 (Structured JSON Generation)*: Produces transaction JSON with optional **GBNF (GGML BNF) grammar** constraints. GBNF defaults off and can be enabled from Advanced diagnostics; each SMS snapshots the setting once before processing.
 *   **Dynamic Hardware Auto-Tuning**: Smart hardware profiling detects device RAM capacities and CPU architectures (specifically checking for `ARMv8.2-A` instruction features like `i8mm` and `dotprod` to accelerate integer math) to select the optimal model size automatically.
 *   **Disk-Based KV Cache Caching**: Saves and loads the static prefix KV cache state to/from disk using SHA-256 hashes. This cuts prefill time from ~140 seconds down to `< 100ms` on subsequent runs while automatically cleaning up old stale session files.
-*   **Cryptographically Secured Database**: Persists transaction and account information in a Room database encrypted with **SQLCipher (AES-256)**, securing sensitive ledger data from third-party app leaks or root-level vulnerabilities.
-*   **Real-time & Batch Synchronization**: Employs an Android `BroadcastReceiver` flow to catch transaction alerts as they land, combined with an inbox ContentProvider scraper to catch up on historical transactions during launch.
-*   **Interactive Onboarding Sync**: Redesigned sync dashboard displaying a real-time progress hub with remaining ETA, a visual pipeline stepper (Engine Init ➔ SMS Filter ➔ Parse SMS ➔ DB Save), dynamic cards showing total spends detected and parsed items, a live rolling feed of extracted transactions, rotating privacy tips, and a collapsible raw LLM engine log console.
-*   **Developer Onboarding Reset**: Built-in developer settings card allowing users to wipe local database tables and reset the onboarding status, instantly restarting the onboarding Compose flow while preserving downloaded model files on-device.
+*   **Cryptographically Secured Database**: Persists transaction and account information in a Room database encrypted with **SQLCipher (AES-256)**, protecting the local ledger at rest.
+*   **Durable Real-time & Historical Ingestion**: An Android `BroadcastReceiver` first admits raw evidence to an encrypted Room outbox, then gives WorkManager only an opaque candidate key. Inbox discovery preserves provider IDs and widens from 7 to 30 to 90 days only when no new eligible candidates are found.
+*   **Fast, Resumable First Run**: The pre-shell flow contains one calm introduction and the required SMS permission. Model preparation (about 700 MB) starts only after explicit confirmation, while durable setup/import status, verified coverage, counts, and actionable failures remain visible on Home across recreation or process restart.
+*   **Private, Evidence-Backed Ledger**: Saved transactions retain their source SMS sender and body in encrypted local storage. Settings provides a confirmed erase-all-local-financial-data action while preserving downloaded model files.
 *   **Modern Jetpack Compose UI**: Designed around Material 3 dark-themed specs to present clean dashboards, transaction histories, system hardware capabilities, and engine diagnostics.
 *   **Native Edge-to-Edge System Bars**: Integrated transparent Android system bars padding and custom color styling (`SystemBarStyle.dark`) to ensure that time, wifi, and battery icons remain white and visible on dark background themes across all Light/Dark global OS themes.
 
@@ -36,7 +36,9 @@ By leveraging a local **Small Language Model (SLM)** backed by `llama.cpp` via a
 ```mermaid
 graph TD
     A[Incoming SMS Alert] -->|Telephony.SMS_RECEIVED| B(SmsReceiver)
-    B -->|SmsMessage Flow| C[PipelineService]
+    B -->|Encrypted candidate admission| Q[(SQLCipher outbox)]
+    Q -->|Opaque candidate key| W[Unique WorkManager job]
+    W --> C[PipelineService]
     C -->|Pre-Filter Checks| FP{SmsFilterPipeline<br>6-Stage Deterministic Filter}
     FP -->|Dropped / Non-Transactional| Discard[Discard Alert]
     FP -->|Passed / Transactional| C2[Inference Queue]
@@ -94,7 +96,7 @@ Extracting structured data from highly unstructured, localized SMS alerts (which
 2.  **Phase 1: Thinking Pass (Chain of Thought)**:
     For messages that pass the pre-filter, the system builds the inference prompt (merging the system prompt and few-shot examples) and appends `<think>` to the end. The local SLM processes the SMS semantics, reasoning step-by-step to verify transaction details.
 3.  **Phase 2: Structured JSON Generation**:
-    Once the thinking tag is closed with `</think>`, the native JNI engine generates the transaction JSON. By default it applies the Backus-Naur Form (GBNF) grammar defined in [sms_extraction.gbnf](file:///d:/Personal_Projects/pocket-financer-android/inference/src/main/assets/sms_extraction.gbnf), constraining vocabulary sampling to the expected schema. Users can disable GBNF from Settings for faster per-SMS processing; unconstrained output still passes through the defensive extraction parser and malformed results are rejected:
+    Once the thinking tag is closed with `</think>`, the native JNI engine generates the transaction JSON. The Backus-Naur Form (GBNF) grammar defined in [sms_extraction.gbnf](file:///d:/Personal_Projects/pocket-financer-android/inference/src/main/assets/sms_extraction.gbnf) is optional and defaults off. It can be enabled under Settings → Advanced diagnostics to constrain vocabulary sampling to the expected schema. The value is snapshotted once per SMS, so an in-flight extraction never mixes settings; unconstrained output still passes through the defensive extraction parser and malformed results are rejected:
     ```json
     {
       "amount": 1500.00,
@@ -139,9 +141,10 @@ To run local inference smoothly without triggering Android's low-memory killer (
 
 ## 🔒 Hardened Security & Privacy
 
-*   **100% Local Scope**: The Android manifest restricts network permissions except for the initial HuggingFace model download. Decryption, extraction, parsing, and database transactions occur fully offline.
-*   **AES-256 SQLCipher Database**: Prevents root-level memory scrapers or physical extraction of the database. The Room database is wrapped inside a SQLCipher cryptographic engine using key generation logic.
-*   **Account Anonymization**: The database only stores anonymized account handles (e.g. the last 4 digits extracted from raw SMS strings like `"Account XX5812"`), stripping out full names, routing info, or explicit bank identifiers where possible.
+*   **Financial Data Stays Local**: SMS filtering, model inference, parsing, and database transactions happen on-device. Network access is used to download a model only after explicit confirmation; financial messages are not uploaded.
+*   **AES-256 SQLCipher Database**: Room uses SQLCipher with a random key protected by Android Keystore-backed encrypted preferences. Database initialization fails closed if Keystore protection is unavailable, and older plaintext-fallback keys are wrapped and erased during upgrade.
+*   **Source Evidence Retention**: A saved transaction retains its original SMS sender and full message body indefinitely in the encrypted local database. Rejected non-transaction messages are not retained long-term.
+*   **User-Controlled Erasure**: Settings requires confirmation before erasing all local financial data and setup/import state. There is no retention-period picker.
 
 ---
 
@@ -200,13 +203,13 @@ python inject_sms.py
 ```
 This utility automatically configures shell appops permissions (`WRITE_SMS`) and restarts the Android Messages application to refresh the inbox view.
 
-### 2. Replay Onboarding
+### 2. Replay First Run
 To test the onboarding sync visual elements repeatedly:
 - Open the application and navigate to the **Settings** tab.
-- Scroll down to the **DEVELOPER OPTIONS** card.
-- Tap **RESET ONBOARDING & CLEAR DB**.
-- The app will reset the database tables, clear the onboarding completion preferences, and recreate the activity to launch the Welcome flow.
-- Because the SLM model file remains cached in internal storage, the onboarding screen will automatically detect it, bypass the download step within 800ms, and initiate the transactional sync flow again.
+- Open **Data & privacy** and tap **Erase all local financial data**.
+- Review the scope and confirm the destructive action.
+- The app resets encrypted ledger/outbox tables and setup/import metadata, clears the shell gate, cancels financial notifications, and recreates the activity to launch the short Welcome flow.
+- A valid downloaded SLM artifact remains in internal storage. After SMS permission is restored, Home truthfully shows that the local model is ready and waits for an explicit history-scan action; it does not silently start a download or import.
 
 ---
 

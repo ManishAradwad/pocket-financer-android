@@ -3,6 +3,7 @@ package com.pocketfinancer.sms
 import android.content.ContentResolver
 import android.net.Uri
 import android.provider.Telephony
+import com.pocketfinancer.data.model.SmsSourceIdentity
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -18,8 +19,28 @@ class SmsReader @Inject constructor(
         val address: String,
         val body: String,
         val date: Long,          // epoch millis
-        val type: Int            // 1 = inbox, 2 = sent, etc.
-    )
+        val type: Int,            // 1 = inbox, 2 = sent, etc.
+        /** Raw Android SMS provider `_id`; broadcasts legitimately have none. */
+        val providerMessageId: String? = null,
+        /**
+         * Timestamp used only for source identity.
+         *
+         * Provider rows prefer `date_sent` so they converge with
+         * SmsMessage.timestampMillis from the receive broadcast. [date] remains
+         * the provider's received timestamp used by the ledger and UI.
+         */
+        val sourceTimestamp: Long = date
+    ) {
+        val sourceIdentity: SmsSourceIdentity
+            get() = SmsSourceIdentity.androidSms(
+                providerMessageId = providerMessageId,
+                sender = address,
+                body = body,
+                sourceTimestamp = sourceTimestamp,
+                messageType = type,
+                receivedTimestamp = date
+            )
+    }
 
     data class SmsFilter(
         val minDate: Long = 0L,
@@ -34,20 +55,36 @@ class SmsReader @Inject constructor(
      */
     fun fetchInbox(filter: SmsFilter = SmsFilter()): List<SmsMessage> {
         val uri = Uri.parse("content://sms/inbox")
-        val projection = arrayOf("_id", "address", "body", "date", "type")
+        val projection = arrayOf(
+            "_id",
+            "address",
+            "body",
+            "date",
+            "date_sent",
+            "type"
+        )
         val selection = "date >= ? AND date <= ?"
         val selectionArgs = arrayOf(filter.minDate.toString(), filter.maxDate.toString())
         val sortOrder = "date DESC"
 
-        val cursor = context.contentResolver.query(uri, projection, selection, selectionArgs, sortOrder)
-            ?: return emptyList()
+        val cursor = context.contentResolver.query(
+            uri,
+            projection,
+            selection,
+            selectionArgs,
+            sortOrder
+        ) ?: throw IllegalStateException(
+            "The SMS provider did not return a readable inbox cursor."
+        )
 
         val results = mutableListOf<SmsMessage>()
         cursor.use {
             val addressIdx = it.getColumnIndex("address")
             val bodyIdx = it.getColumnIndex("body")
             val dateIdx = it.getColumnIndex("date")
+            val dateSentIdx = it.getColumnIndex("date_sent")
             val typeIdx = it.getColumnIndex("type")
+            val providerIdIdx = it.getColumnIndex("_id")
 
             // Skip offset
             if (filter.offset > 0) {
@@ -69,12 +106,29 @@ class SmsReader @Inject constructor(
                     }
                 }
 
+                val receivedDate =
+                    if (dateIdx >= 0) it.getLong(dateIdx) else 0L
+                val sentDate =
+                    if (dateSentIdx >= 0 && !it.isNull(dateSentIdx)) {
+                        it.getLong(dateSentIdx)
+                    } else {
+                        0L
+                    }
                 results.add(
                     SmsMessage(
                         address = address ?: "",
                         body = body ?: "",
-                        date = if (dateIdx >= 0) it.getLong(dateIdx) else 0L,
-                        type = if (typeIdx >= 0) it.getInt(typeIdx) else 1
+                        date = receivedDate,
+                        type = if (typeIdx >= 0) it.getInt(typeIdx) else 1,
+                        providerMessageId = if (
+                            providerIdIdx >= 0 && !it.isNull(providerIdIdx)
+                        ) {
+                            it.getString(providerIdIdx)
+                        } else {
+                            null
+                        },
+                        sourceTimestamp = sentDate.takeIf { it > 0L }
+                            ?: receivedDate
                     )
                 )
                 count++

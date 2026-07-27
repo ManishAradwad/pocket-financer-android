@@ -92,6 +92,11 @@ class PipelineServiceTest {
             bank = "HDFC Bank",
             type = "auto-extracted"
         )
+        val insertResult = mockk<TransactionRepository.InsertResult>()
+        every { insertResult.inserted } returns true
+        coEvery {
+            transactionRepository.insertIfAbsent(any())
+        } returns insertResult
 
         pipeline = PipelineService(
             promptBuilder = promptBuilder,
@@ -200,7 +205,7 @@ class PipelineServiceTest {
 
             assertIs<PipelineService.ProcessingResult.Saved>(result)
             coVerify(exactly = 1) {
-                transactionRepository.insert(match {
+                transactionRepository.insertIfAbsent(match {
                     it.amount == 500.0 &&
                         it.merchant == "UPI Ref 12345" &&
                         it.slmModelName == "test-model.gguf"
@@ -274,7 +279,7 @@ class PipelineServiceTest {
         assertFailsWith<CancellationException> {
             pipeline.processSingle(transactionSms(), lease)
         }
-        coVerify(exactly = 0) { transactionRepository.insert(any()) }
+        coVerify(exactly = 0) { transactionRepository.insertIfAbsent(any()) }
     }
 
     @Test

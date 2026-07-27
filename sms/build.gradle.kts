@@ -27,6 +27,7 @@ android {
 dependencies {
     implementation(libs.core.ktx)
     implementation(libs.coroutines.android)
+    implementation(project(":data"))
 
     // Hilt
     implementation(libs.hilt.android)

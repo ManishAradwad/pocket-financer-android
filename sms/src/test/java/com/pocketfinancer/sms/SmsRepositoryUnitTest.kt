@@ -137,15 +137,4 @@ class SmsRepositoryUnitTest {
         }
     }
 
-    @Test
-    fun `listenForIncomingSms should return flow from SmsReceiver`() = runBlocking {
-        mockkObject(SmsReceiver.Companion)
-        val expectedFlow = flowOf(SmsReader.SmsMessage("AX-HDFCBK", "Rs.500 credited", 1000L, 1))
-        every { SmsReceiver.incomingSmsFlow() } returns expectedFlow
-
-        val result = repo.listenForIncomingSms()
-        assertEquals(expectedFlow, result)
-
-        unmockkObject(SmsReceiver.Companion)
-    }
 }

@@ -1,23 +1,35 @@
 package com.pocketfinancer.ui.settings
 
+import android.Manifest
+import android.app.Activity
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
+import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.pocketfinancer.hardware.DeviceCapabilities
 import com.pocketfinancer.hardware.SlmTier
 import com.pocketfinancer.ui.theme.*
@@ -25,6 +37,33 @@ import com.pocketfinancer.ui.theme.*
 @Composable
 fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
     val state by viewModel.state.collectAsState()
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var advancedExpanded by rememberSaveable { mutableStateOf(false) }
+    var showEraseConfirmation by rememberSaveable { mutableStateOf(false) }
+
+    val smsPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) {
+        viewModel.refreshPermissionHealth()
+    }
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) {
+        viewModel.refreshPermissionHealth()
+    }
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                viewModel.refreshPermissionHealth()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -33,27 +72,458 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        // ── Section 1: Device Hardware ───────────────────────────────────
-        HardwareCard(state.deviceInfo, state.hardwareError, viewModel)
-
-        // ── Section 2: Active Model ──────────────────────────────────────
-        ActiveModelCard(state.selectedSlm, state.selectedSlm?.let { state.tierExplanations[it.id] })
-
-        // ── Section: Background SMS Processing ──────────────────────────
-        BackgroundParsingCard(state.processIncomingSms, viewModel)
-
-        SlmProcessingCard(
-            enabled = state.gbnfGrammarEnabled,
-            onEnabledChange = viewModel::setGbnfGrammarEnabled
+        SmsAndUpdatesCard(
+            state = state,
+            onAutomaticProcessingChange = viewModel::setProcessIncomingSms,
+            onRequestSmsPermissions = {
+                smsPermissionLauncher.launch(
+                    arrayOf(Manifest.permission.READ_SMS, Manifest.permission.RECEIVE_SMS)
+                )
+            },
+            onRequestNotificationPermission = {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                }
+            },
+            onOpenAppSettings = {
+                context.startActivity(
+                    Intent(
+                        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        Uri.fromParts("package", context.packageName, null)
+                    )
+                )
+            }
+        )
+        DataAndPrivacyCard(
+            state = state,
+            onErase = { showEraseConfirmation = true }
+        )
+        OnDeviceAiCard(state, viewModel)
+        AboutCard()
+        AdvancedDiagnostics(
+            expanded = advancedExpanded,
+            onExpandedChange = { advancedExpanded = it },
+            state = state,
+            viewModel = viewModel
         )
 
-        // ── Section 3: Engine Status + Test ──────────────────────────────
-        EngineCard(state, viewModel)
-
-        // ── Section 4: Developer Options ─────────────────────────────────
-        DeveloperToolsCard(state, viewModel)
-
         Spacer(modifier = Modifier.height(8.dp))
+    }
+
+    if (showEraseConfirmation) {
+        AlertDialog(
+            onDismissRequest = { showEraseConfirmation = false },
+            title = { Text("Erase all local financial data?") },
+            text = {
+                Text(
+                    "This permanently deletes transactions, accounts, retained source SMS " +
+                        "evidence, and setup/import progress from Pocket Financer. Your " +
+                        "downloaded on-device AI model stays on this device."
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showEraseConfirmation = false
+                        viewModel.resetOnboarding {
+                            (context as? Activity)?.recreate()
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = M3_Error)
+                ) {
+                    Text("Erase data", color = Color.White)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showEraseConfirmation = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+}
+
+@Composable
+private fun SmsAndUpdatesCard(
+    state: SettingsUiState,
+    onAutomaticProcessingChange: (Boolean) -> Unit,
+    onRequestSmsPermissions: () -> Unit,
+    onRequestNotificationPermission: () -> Unit,
+    onOpenAppSettings: () -> Unit
+) {
+    SectionCard(title = "SMS & UPDATES") {
+        SettingSwitchRow(
+            title = "Automatic updates",
+            description = if (state.processIncomingSms) {
+                "Pocket Financer will process new eligible alerts automatically."
+            } else {
+                "Automatic work is paused. Manual scans remain available."
+            },
+            checked = state.processIncomingSms,
+            enabled = !state.automaticProcessingChangeRunning,
+            onCheckedChange = onAutomaticProcessingChange
+        )
+        Text(
+            text = "Turning this off lets an alert already being processed finish, prevents " +
+                "new or pending automatic work, and does not disable manual scans.",
+            color = M3_OnSurfaceVariant,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(top = 8.dp)
+        )
+        if (state.automaticProcessingChangeRunning) {
+            LinearProgressIndicator(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 8.dp),
+                color = M3_Primary,
+                trackColor = M3_SurfaceContainerLow
+            )
+        }
+        state.automaticProcessingError?.let { error ->
+            Text(
+                error,
+                color = M3_Error,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(top = 8.dp)
+            )
+        }
+
+        HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
+        PermissionStatusRow("Read messages", state.readSmsPermissionGranted)
+        PermissionStatusRow("Receive new alerts", state.receiveSmsPermissionGranted)
+        PermissionStatusRow(
+            "Background progress notifications",
+            state.notificationPermissionGranted
+        )
+
+        if (!state.smsPermissionGranted) {
+            Text(
+                "SMS access is incomplete. Historical scans need Read messages; automatic " +
+                    "capture needs Receive new alerts.",
+                color = M3_Error,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(top = 8.dp)
+            )
+            OutlinedButton(
+                onClick = onRequestSmsPermissions,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 8.dp)
+            ) {
+                Text("Restore SMS access")
+            }
+        }
+        if (!state.notificationPermissionGranted) {
+            Text(
+                text = when {
+                    state.notificationPermissionRequired &&
+                        !state.notificationRuntimePermissionGranted ->
+                        "Allow notifications when model preparation or an import continues " +
+                            "in the background, so Android can show honest progress."
+                    !state.appNotificationsEnabled ->
+                        "Notifications are turned off for Pocket Financer in Android " +
+                            "settings. Re-enable them to see background progress."
+                    !state.progressNotificationChannelEnabled ->
+                        "The SMS Transaction Sync notification channel is turned off. " +
+                            "Re-enable it in Android settings to see background progress."
+                    else ->
+                        "Background progress notifications need attention in Android settings."
+                },
+                color = M3_OnSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(top = 8.dp)
+            )
+        }
+        if (state.notificationPermissionRequired &&
+            !state.notificationRuntimePermissionGranted
+        ) {
+            OutlinedButton(
+                onClick = onRequestNotificationPermission,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 8.dp)
+            ) {
+                Text("Allow progress notifications")
+            }
+        }
+        if (!state.smsPermissionGranted ||
+            !state.notificationPermissionGranted
+        ) {
+            TextButton(
+                onClick = onOpenAppSettings,
+                modifier = Modifier.align(Alignment.End)
+            ) {
+                Text("Open app settings")
+            }
+        }
+    }
+}
+
+@Composable
+private fun DataAndPrivacyCard(
+    state: SettingsUiState,
+    onErase: () -> Unit
+) {
+    SectionCard(title = "DATA & PRIVACY") {
+        Text(
+            "Saved transactions keep the original SMS sender and full message body " +
+                "indefinitely as evidence. They are stored only in Pocket Financer's " +
+                "encrypted local database.",
+            color = M3_OnSurface,
+            style = MaterialTheme.typography.bodyMedium
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        Text(
+            "Messages rejected as non-transactions are not retained long-term. There is no " +
+                "cloud ledger and no retention-period picker.",
+            color = M3_OnSurfaceVariant,
+            style = MaterialTheme.typography.bodySmall
+        )
+        OutlinedButton(
+            onClick = onErase,
+            enabled = state.canResetOnboarding,
+            colors = ButtonDefaults.outlinedButtonColors(contentColor = M3_Error),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 12.dp)
+        ) {
+            Text(if (state.resetRunning) "Erasing..." else "Erase all local financial data")
+        }
+        if (!state.canResetOnboarding && !state.resetRunning) {
+            Text(
+                "Erase is available after current model or import work finishes.",
+                color = M3_OnSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(top = 6.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun OnDeviceAiCard(state: SettingsUiState, viewModel: SettingsViewModel) {
+    val download = state.downloadState
+    SectionCard(title = "ON-DEVICE AI") {
+        val selected = state.selectedSlm
+        if (selected == null) {
+            Text(
+                "No compatible local model is available for this device.",
+                color = M3_Error,
+                style = MaterialTheme.typography.bodyMedium
+            )
+            return@SectionCard
+        }
+        Text(
+            selected.name,
+            color = M3_OnSurface,
+            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold)
+        )
+        Text(
+            "Transaction alerts are interpreted on this device. A model download starts " +
+                "only after you choose to prepare it.",
+            color = M3_OnSurfaceVariant,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(top = 4.dp)
+        )
+        Spacer(modifier = Modifier.height(10.dp))
+        InfoRow(
+            label = "Status",
+            value = when {
+                state.modelLoaded -> "Ready"
+                download.isComplete -> "Downloaded"
+                download.isDownloading -> "Downloading"
+                else -> "Not prepared"
+            },
+            valueColor = if (state.modelLoaded) M3_Pos else M3_OnSurface
+        )
+        if (!state.initialSetupModelPrepared) {
+            Text(
+                text =
+                    "Prepare the first on-device model from Home. The Home " +
+                        "setup card keeps the size confirmation, background " +
+                        "progress, and restart recovery together.",
+                color = M3_OnSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(top = 10.dp)
+            )
+        } else if (download.isDownloading) {
+            LinearProgressIndicator(
+                progress = { download.progress },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 8.dp),
+                color = M3_Primary,
+                trackColor = M3_SurfaceContainerLow
+            )
+            Text(
+                "${"%.0f".format(download.progress * 100)}% · " +
+                    "${"%.1f".format(download.downloadedMb)} / " +
+                    "${"%.1f".format(download.totalMb)} MB",
+                color = M3_OnSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(top = 4.dp)
+            )
+            OutlinedButton(
+                onClick = viewModel::cancelDownload,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 8.dp)
+            ) {
+                Text("Cancel download")
+            }
+        } else if (!download.isComplete) {
+            Button(
+                onClick = viewModel::downloadSelectedModel,
+                enabled = !state.runtimeBusy &&
+                    !state.flowBusy &&
+                    !state.testRunning &&
+                    !state.loadingModel &&
+                    !state.resetRunning,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 10.dp)
+            ) {
+                Text("Prepare model (${selected.sizeMb} MB)")
+            }
+        } else if (!state.modelPinnedByUser) {
+            Button(
+                onClick = viewModel::loadSelectedModel,
+                enabled = state.canLoadModel,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 10.dp)
+            ) {
+                Text(if (state.loadingModel) "Loading..." else "Use downloaded model")
+            }
+        }
+        state.modelLoadError?.let { error ->
+            Text(
+                error,
+                color = M3_Error,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(top = 8.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun AboutCard() {
+    SectionCard(title = "ABOUT") {
+        Text(
+            "Pocket Financer",
+            color = M3_OnSurface,
+            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold)
+        )
+        Text(
+            "A local-first financial SMS ledger. Extraction and storage stay on your device; " +
+                "network access is used to download the model you explicitly choose.",
+            color = M3_OnSurfaceVariant,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(top = 4.dp)
+        )
+    }
+}
+
+@Composable
+private fun AdvancedDiagnostics(
+    expanded: Boolean,
+    onExpandedChange: (Boolean) -> Unit,
+    state: SettingsUiState,
+    viewModel: SettingsViewModel
+) {
+    SectionCard(title = "ADVANCED DIAGNOSTICS") {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onExpandedChange(!expanded) }
+                .padding(vertical = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    if (expanded) "Hide technical details" else "Show technical details",
+                    color = M3_OnSurface,
+                    style = MaterialTheme.typography.bodyMedium.copy(
+                        fontWeight = FontWeight.SemiBold
+                    )
+                )
+                Text(
+                    "Hardware, runtime, grammar and parser-test controls",
+                    color = M3_OnSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+            Text(if (expanded) "−" else "+", color = M3_Primary, fontSize = 24.sp)
+        }
+        if (expanded) {
+            Spacer(modifier = Modifier.height(12.dp))
+            SlmProcessingCard(
+                enabled = state.gbnfGrammarEnabled,
+                onEnabledChange = viewModel::setGbnfGrammarEnabled
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            HardwareCard(state.deviceInfo, state.hardwareError, viewModel)
+            Spacer(modifier = Modifier.height(12.dp))
+            EngineCard(state, viewModel)
+        }
+    }
+}
+
+@Composable
+private fun PermissionStatusRow(label: String, granted: Boolean) {
+    InfoRow(
+        label = label,
+        value = if (granted) "Allowed" else "Needs attention",
+        valueColor = if (granted) M3_Pos else M3_Error
+    )
+}
+
+@Composable
+private fun SettingSwitchRow(
+    title: String,
+    description: String,
+    checked: Boolean,
+    enabled: Boolean,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .toggleable(
+                value = checked,
+                enabled = enabled,
+                role = Role.Switch,
+                onValueChange = onCheckedChange
+            )
+            .padding(vertical = 4.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                title,
+                color = M3_OnSurface,
+                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold)
+            )
+            Text(
+                description,
+                color = M3_OnSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(top = 2.dp)
+            )
+        }
+        Spacer(modifier = Modifier.width(16.dp))
+        Switch(
+            checked = checked,
+            enabled = enabled,
+            onCheckedChange = null,
+            colors = SwitchDefaults.colors(
+                checkedThumbColor = Color.White,
+                checkedTrackColor = M3_Primary
+            )
+        )
     }
 }
 
@@ -511,78 +981,6 @@ private fun ramBadge(tier: DeviceCapabilities.RamTier): Pair<String, Color>? {
         DeviceCapabilities.RamTier.OK -> "OK" to M3_Pos
         DeviceCapabilities.RamTier.WARNING -> "WARNING" to Color(0xFFF2C94C)
         DeviceCapabilities.RamTier.BLOCKED -> "BLOCKED" to M3_Error
-    }
-}
-
-@Composable
-private fun DeveloperToolsCard(state: SettingsUiState, viewModel: SettingsViewModel) {
-    val context = androidx.compose.ui.platform.LocalContext.current
-    
-    SectionCard(title = "DEVELOPER OPTIONS") {
-        Text(
-            text = "Testing utilities for app developers. Resetting onboarding will clear transaction history, but will keep the downloaded local AI model file intact.",
-            color = M3_OnSurfaceVariant,
-            style = MaterialTheme.typography.bodySmall
-        )
-        
-        Spacer(modifier = Modifier.height(12.dp))
-        
-        Button(
-            onClick = {
-                viewModel.resetOnboarding {
-                    val activity = context as? android.app.Activity
-                    activity?.recreate()
-                }
-            },
-            enabled = state.canResetOnboarding,
-            colors = ButtonDefaults.buttonColors(containerColor = M3_Error),
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text(
-                if (state.resetRunning) "RESETTING..." else "RESET ONBOARDING & CLEAR DB",
-                color = Color.White,
-                style = MaterialTheme.typography.labelMedium
-            )
-        }
-    }
-}
-
-@Composable
-private fun BackgroundParsingCard(
-    enabled: Boolean,
-    viewModel: SettingsViewModel
-) {
-    SectionCard(title = "BACKGROUND SMS PROCESSING") {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(vertical = 4.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "Process Incoming SMS",
-                    color = M3_OnSurface,
-                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold)
-                )
-                Spacer(modifier = Modifier.height(2.dp))
-                Text(
-                    text = "Automatically parse transaction alerts in the background and update transactions.",
-                    color = M3_OnSurfaceVariant,
-                    style = MaterialTheme.typography.bodySmall
-                )
-            }
-            Spacer(modifier = Modifier.width(16.dp))
-            Switch(
-                checked = enabled,
-                onCheckedChange = { viewModel.toggleProcessIncomingSms() },
-                colors = SwitchDefaults.colors(
-                    checkedThumbColor = Color.White,
-                    checkedTrackColor = M3_Primary
-                )
-            )
-        }
     }
 }
 

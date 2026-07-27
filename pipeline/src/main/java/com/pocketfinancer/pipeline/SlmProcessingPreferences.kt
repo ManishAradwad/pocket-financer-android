@@ -27,15 +27,19 @@ class SlmProcessingPreferences @Inject constructor(
     val gbnfGrammarEnabled: StateFlow<Boolean> = _gbnfGrammarEnabled.asStateFlow()
 
     fun setGbnfGrammarEnabled(enabled: Boolean) {
+        check(
+            preferences.edit()
+                .putBoolean(KEY_GBNF_GRAMMAR_ENABLED, enabled)
+                .commit()
+        ) {
+            "Could not persist the GBNF grammar preference."
+        }
         _gbnfGrammarEnabled.value = enabled
-        preferences.edit()
-            .putBoolean(KEY_GBNF_GRAMMAR_ENABLED, enabled)
-            .apply()
     }
 
     companion object {
         internal const val PREFERENCES_NAME = ".app_settings"
         internal const val KEY_GBNF_GRAMMAR_ENABLED = "gbnf_grammar_enabled"
-        internal const val DEFAULT_GBNF_GRAMMAR_ENABLED = true
+        internal const val DEFAULT_GBNF_GRAMMAR_ENABLED = false
     }
 }

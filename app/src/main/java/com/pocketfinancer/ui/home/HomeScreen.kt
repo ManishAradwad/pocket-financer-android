@@ -1,5 +1,10 @@
 package com.pocketfinancer.ui.home
 
+import android.Manifest
+import android.os.Build
+import android.content.pm.PackageManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -28,9 +33,15 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.pocketfinancer.data.model.Transaction
 import com.pocketfinancer.data.model.TransactionType
+import com.pocketfinancer.setup.SetupImportStatus
 import com.pocketfinancer.ui.theme.*
 import com.pocketfinancer.ui.transactions.TelemetryLogsViewer
 import java.text.SimpleDateFormat
@@ -44,10 +55,101 @@ fun HomeScreen(
 ) {
     val state by viewModel.uiState.collectAsState()
     val selectedPeriod by viewModel.selectedPeriod.collectAsState()
-    
+    val context = LocalContext.current
+
     val pData = state.periodData[selectedPeriod] ?: PeriodData()
     var showDrawer by remember { mutableStateOf(false) }
-    var selectedTelemetrySms by remember { mutableStateOf<SyncSmsItem?>(null) }
+    var selectedTelemetrySmsId by remember { mutableStateOf<String?>(null) }
+    var showModelDownloadConfirmation by remember { mutableStateOf(false) }
+    var showHowThisWorks by remember { mutableStateOf(false) }
+    var pendingBackgroundAction by remember {
+        mutableStateOf<SetupCardAction?>(null)
+    }
+
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                viewModel.refreshPermissionHealth()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    val runSetupAction: (SetupCardAction) -> Unit = { action ->
+        when (action.target()) {
+            SetupCardActionTarget.SCAN_OLDER ->
+                viewModel.scanOlderMessages()
+            SetupCardActionTarget.RETRY_RECENT_SYNC ->
+                viewModel.checkForUnsynced()
+            SetupCardActionTarget.START_SETUP ->
+                viewModel.startSetupOrResume()
+            SetupCardActionTarget.RESTORE_PERMISSION -> Unit
+        }
+    }
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) {
+        pendingBackgroundAction?.let(runSetupAction)
+        pendingBackgroundAction = null
+    }
+    val requestNotificationThenRun: (SetupCardAction) -> Unit = { action ->
+        val needsRuntimePermission =
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.POST_NOTIFICATIONS
+                ) != PackageManager.PERMISSION_GRANTED
+        if (needsRuntimePermission) {
+            pendingBackgroundAction = action
+            notificationPermissionLauncher.launch(
+                Manifest.permission.POST_NOTIFICATIONS
+            )
+        } else {
+            runSetupAction(action)
+        }
+    }
+    val smsPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { result ->
+        val readGranted =
+            result[Manifest.permission.READ_SMS] == true ||
+                ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.READ_SMS
+                ) == PackageManager.PERMISSION_GRANTED
+        val receiveGranted =
+            result[Manifest.permission.RECEIVE_SMS] == true ||
+                ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.RECEIVE_SMS
+                ) == PackageManager.PERMISSION_GRANTED
+        viewModel.onSmsPermissionResult(readGranted && receiveGranted)
+    }
+
+    val onSetupAction: (SetupCardAction) -> Unit = { action ->
+        when (action) {
+            SetupCardAction.RESTORE_PERMISSION -> {
+                smsPermissionLauncher.launch(
+                    arrayOf(
+                        Manifest.permission.READ_SMS,
+                        Manifest.permission.RECEIVE_SMS
+                    )
+                )
+            }
+            SetupCardAction.PREPARE_MODEL -> {
+                if (state.setupImportState.modelDownloadConfirmed) {
+                    requestNotificationThenRun(action)
+                } else {
+                    showModelDownloadConfirmation = true
+                }
+            }
+            SetupCardAction.RETRY_RECENT_SYNC ->
+                runSetupAction(action)
+            else -> requestNotificationThenRun(action)
+        }
+    }
 
     val dateEyebrow = when (selectedPeriod) {
         "Day" -> {
@@ -133,6 +235,14 @@ fun HomeScreen(
                 contentPadding = PaddingValues(bottom = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
+                item {
+                    SetupImportCard(
+                        state = state.setupImportState,
+                        onAction = onSetupAction,
+                        onHowThisWorks = { showHowThisWorks = true }
+                    )
+                }
+
                 // ── Hero Card ──
                 item {
                     Card(
@@ -153,7 +263,14 @@ fun HomeScreen(
                                 Box(
                                     modifier = Modifier
                                         .size(6.dp)
-                                        .background(M3_Error, CircleShape)
+                                        .background(
+                                            if (pData.amount > 0.0) {
+                                                M3_Error
+                                            } else {
+                                                M3_OnSurfaceVariant.copy(alpha = 0.55f)
+                                            },
+                                            CircleShape
+                                        )
                                 )
                                 Text(
                                     text = "$dateEyebrow • Spends",
@@ -191,9 +308,22 @@ fun HomeScreen(
                                     style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Medium)
                                 )
                                 val isLess = pData.deltaDir == "less"
-                                val containerColor = if (isLess) M3_PosContainer else M3_ErrorContainer
-                                val textColor = if (isLess) M3_OnPosContainer else M3_OnErrorContainer
-                                val icon = if (isLess) Icons.Rounded.ArrowDownward else Icons.Rounded.ArrowUpward
+                                val isSame = pData.deltaDir == "same"
+                                val containerColor = when {
+                                    isSame -> M3_SurfaceContainerHigh
+                                    isLess -> M3_PosContainer
+                                    else -> M3_ErrorContainer
+                                }
+                                val textColor = when {
+                                    isSame -> M3_OnSurfaceVariant
+                                    isLess -> M3_OnPosContainer
+                                    else -> M3_OnErrorContainer
+                                }
+                                val icon = if (isLess) {
+                                    Icons.Rounded.ArrowDownward
+                                } else {
+                                    Icons.Rounded.ArrowUpward
+                                }
 
                                 Row(
                                     modifier = Modifier
@@ -202,12 +332,14 @@ fun HomeScreen(
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(4.dp)
                                 ) {
-                                    Icon(
-                                        imageVector = icon,
-                                        contentDescription = null,
-                                        tint = textColor,
-                                        modifier = Modifier.size(12.dp)
-                                    )
+                                    if (!isSame) {
+                                        Icon(
+                                            imageVector = icon,
+                                            contentDescription = null,
+                                            tint = textColor,
+                                            modifier = Modifier.size(12.dp)
+                                        )
+                                    }
                                     Text(
                                         text = pData.deltaLabel,
                                         color = textColor,
@@ -221,7 +353,11 @@ fun HomeScreen(
 
                 // ── Model Upgrade Banner ──
                 val upgradeRec = state.upgradeRecommendation
-                if (upgradeRec.isUpgradeAvailable && !upgradeRec.isDismissed) {
+                if (
+                    state.setupImportState.modelPrepared &&
+                    upgradeRec.isUpgradeAvailable &&
+                    !upgradeRec.isDismissed
+                ) {
                     item {
                         ModelUpgradeBanner(
                             recommendation = upgradeRec,
@@ -233,13 +369,22 @@ fun HomeScreen(
                 }
 
                 // ── Sync Banner ──
-                item {
-                    SyncStrip(
-                        syncState = state.syncState,
-                        onStartSync = { viewModel.startSync() },
-                        onInspectSync = { showDrawer = true },
-                        onCheckForUnsynced = { viewModel.checkForUnsynced() }
+                if (
+                    state.setupImportState.modelPrepared &&
+                    manualRecentSyncAvailable(
+                        state.setupImportState.status
                     )
+                ) {
+                    item {
+                        SyncStrip(
+                            syncState = state.syncState,
+                            onStartSync = { viewModel.startSync() },
+                            onInspectSync = { showDrawer = true },
+                            onCheckForUnsynced = {
+                                viewModel.checkForUnsynced()
+                            }
+                        )
+                    }
                 }
 
                 // ── Period Switcher ──
@@ -342,7 +487,13 @@ fun HomeScreen(
                                     contentAlignment = Alignment.Center
                                 ) {
                                     Text(
-                                        text = "No transactions for this period",
+                                        text = selectedPeriodEmptyMessage(
+                                            selectedPeriod = selectedPeriod,
+                                            totalTransactionCount =
+                                                state.totalTransactionCount,
+                                            setupStatus =
+                                                state.setupImportState.status
+                                        ),
                                         color = M3_OnSurfaceVariant,
                                         style = MaterialTheme.typography.bodySmall
                                     )
@@ -473,14 +624,19 @@ fun HomeScreen(
                     onDismiss = { showDrawer = false },
                     onResetSync = { viewModel.resetSyncState() },
                     onItemClick = { item ->
-                        selectedTelemetrySms = item
+                        selectedTelemetrySmsId = item.id
                     }
                 )
             }
         }
 
         // ── Telemetry Logs Sheet ──
-        val telemetrySms = selectedTelemetrySms
+        // Keep only an opaque row id in Compose state and resolve the row from
+        // the latest queue snapshot. The manager replaces terminal rows with
+        // privacy-safe copies after processing.
+        val telemetrySms = selectedTelemetrySmsId?.let { selectedId ->
+            state.syncState.queue.firstOrNull { it.id == selectedId }
+        }
         if (telemetrySms != null) {
             val currentIndex = state.syncState.currentIndex
             val isActive = state.syncState.status == HomeSyncState.Status.SYNCING &&
@@ -490,7 +646,11 @@ fun HomeScreen(
 
             val activeStageIndex = if (isActive) {
                 state.syncState.currentStageIndex ?: 0
-            } else if (telemetrySms.status == "synced" || telemetrySms.status == "filtered_out") {
+            } else if (
+                telemetrySms.status == "synced" ||
+                telemetrySms.status == "already_saved" ||
+                telemetrySms.status == "filtered_out"
+            ) {
                 4
             } else {
                 0
@@ -506,6 +666,8 @@ fun HomeScreen(
                 state.syncState.jsonOutput
             } else if (telemetrySms.status == "synced") {
                 "Raw JSON output was not retained after sync."
+            } else if (telemetrySms.status == "already_saved") {
+                "Raw JSON output was not retained for an existing transaction."
             } else if (telemetrySms.status == "filtered_out") {
                 "No transaction JSON was retained for this message."
             } else if (telemetrySms.status == "error") {
@@ -527,6 +689,8 @@ fun HomeScreen(
                 }
             } else if (telemetrySms.status == "synced") {
                 "Saved transaction: amount=${telemetrySms.parsedAmount ?: "-"}, counterparty=${telemetrySms.parsedMerchant ?: "-"}"
+            } else if (telemetrySms.status == "already_saved") {
+                "The encrypted ledger already owns this source evidence."
             } else if (telemetrySms.status == "filtered_out") {
                 "No transaction was saved for this message."
             } else if (telemetrySms.status == "error") {
@@ -536,7 +700,7 @@ fun HomeScreen(
             }
 
             ModalBottomSheet(
-                onDismissRequest = { selectedTelemetrySms = null },
+                onDismissRequest = { selectedTelemetrySmsId = null },
                 sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
                 containerColor = M3_SurfaceContainerLow,
                 contentColor = M3_OnSurface,
@@ -566,14 +730,187 @@ fun HomeScreen(
                     activeStageIndex = activeStageIndex,
                     thinkingOutput = finalThinkingOutput,
                     jsonOutput = finalJsonOutput,
-                    filterLogs = viewModel.getFilterLogs(telemetrySms.sender, telemetrySms.body),
-                    kvLogs = viewModel.getKvCacheLogs(telemetrySms.sender, telemetrySms.body),
-                    slmPrompt = viewModel.getSlmPrompt(telemetrySms.sender, telemetrySms.body),
+                    filterLogs = viewModel.getFilterLogs(telemetrySms),
+                    kvLogs = viewModel.getKvCacheLogs(telemetrySms),
+                    slmPrompt = viewModel.getSlmPrompt(telemetrySms),
                     parsedOutput = finalParsedOutput,
                     performanceText = performanceText,
                     activeModelName = state.syncState.activeModelName,
-                    onClose = { selectedTelemetrySms = null }
+                    onClose = { selectedTelemetrySmsId = null }
                 )
+            }
+        }
+    }
+
+    if (showModelDownloadConfirmation) {
+        AlertDialog(
+            onDismissRequest = { showModelDownloadConfirmation = false },
+            title = { Text("Prepare the on-device AI model?") },
+            text = {
+                Text(
+                    "This explicitly starts an approximately 700 MB download. " +
+                        "The model stays on this device. Historical SMS scanning " +
+                        "begins after the model is ready and can resume if interrupted."
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        viewModel.confirmModelDownload()
+                        showModelDownloadConfirmation = false
+                        requestNotificationThenRun(
+                            SetupCardAction.PREPARE_MODEL
+                        )
+                    }
+                ) {
+                    Text("Download and continue")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { showModelDownloadConfirmation = false }
+                ) {
+                    Text("Not now")
+                }
+            }
+        )
+    }
+
+    if (showHowThisWorks) {
+        AlertDialog(
+            onDismissRequest = { showHowThisWorks = false },
+            title = { Text("How this works") },
+            text = {
+                Text(
+                    "Pocket Financer first checks 7 days of SMS locally. If no " +
+                        "eligible alert is found, it widens to 30 and then 90 days. " +
+                        "Only eligible candidates reach the on-device model. A saved " +
+                        "transaction keeps its encrypted source SMS and sender; " +
+                        "rejected messages are removed after processing."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { showHowThisWorks = false }) {
+                    Text("Got it")
+                }
+            }
+        )
+    }
+}
+
+@Composable
+private fun SetupImportCard(
+    state: com.pocketfinancer.setup.SetupImportState,
+    onAction: (SetupCardAction) -> Unit,
+    onHowThisWorks: () -> Unit
+) {
+    val model = setupImportCardModel(state)
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp),
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = when (state.status) {
+                SetupImportStatus.PERMISSION_NEEDED,
+                SetupImportStatus.FAILED -> M3_ErrorContainer.copy(alpha = 0.42f)
+                SetupImportStatus.READY,
+                SetupImportStatus.READY_NO_HISTORY ->
+                    M3_PosContainer.copy(alpha = 0.42f)
+                else -> M3_SurfaceContainerLow
+            }
+        ),
+        border = BorderStroke(
+            1.dp,
+            M3_OutlineVariant.copy(alpha = 0.35f)
+        )
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = model.eyebrow,
+                    color = M3_OnSurfaceVariant,
+                    style = AppTypography.eyebrow
+                )
+                Icon(
+                    imageVector = when (state.status) {
+                        SetupImportStatus.PERMISSION_NEEDED ->
+                            Icons.Rounded.Lock
+                        SetupImportStatus.DOWNLOADING ->
+                            Icons.Rounded.Download
+                        SetupImportStatus.SCANNING ->
+                            Icons.Rounded.Search
+                        SetupImportStatus.PROCESSING ->
+                            Icons.Rounded.Memory
+                        SetupImportStatus.READY,
+                        SetupImportStatus.READY_NO_HISTORY ->
+                            Icons.Rounded.Verified
+                        SetupImportStatus.FAILED ->
+                            Icons.Rounded.ErrorOutline
+                        else -> Icons.Rounded.Shield
+                    },
+                    contentDescription = null,
+                    tint = M3_Primary,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+            Text(
+                text = model.title,
+                color = M3_OnSurface,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(
+                text = model.body,
+                color = M3_OnSurfaceVariant,
+                style = MaterialTheme.typography.bodyMedium
+            )
+            model.evidence?.let { evidence ->
+                Text(
+                    text = evidence,
+                    color = M3_OnSurface,
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+            if (model.showProgress) {
+                LinearProgressIndicator(
+                    modifier = Modifier.fillMaxWidth(),
+                    color = M3_Primary,
+                    trackColor = M3_SurfaceContainerHigh
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                model.primaryAction?.let { action ->
+                    Button(
+                        onClick = { onAction(action) },
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Text(model.primaryLabel.orEmpty())
+                    }
+                }
+                TextButton(
+                    onClick = onHowThisWorks,
+                    modifier = if (model.primaryAction == null) {
+                        Modifier.fillMaxWidth()
+                    } else {
+                        Modifier
+                    }
+                ) {
+                    Text("How this works")
+                }
             }
         }
     }
@@ -800,19 +1137,19 @@ fun SyncStrip(
                         }
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                 text = "MESSAGE STREAM SYNCED",
+                                 text = "MANUAL SMS SCAN",
                                  color = M3_OnSurfaceVariant.copy(alpha = 0.8f),
                                  style = MaterialTheme.typography.labelSmall
                              )
                              Spacer(modifier = Modifier.height(2.dp))
                              Text(
-                                 text = "Up to Date (Last 7 Days)",
+                                 text = "Check for recent eligible alerts",
                                  color = M3_OnSurface,
                                  style = AppTypography.bodyMediumBold
                              )
                              Spacer(modifier = Modifier.height(2.dp))
                              Text(
-                                 text = "Click to re-scan local device messages",
+                                 text = "No pending items are currently shown. Scan results, not queue emptiness, determine coverage.",
                                  color = M3_OnSurfaceVariant,
                                  style = MaterialTheme.typography.bodySmall
                              )
@@ -925,11 +1262,14 @@ fun SyncStrip(
             }
 
             HomeSyncState.Status.DONE -> {
+                val hasFailures = homeSyncHasFailures(syncState)
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(20.dp))
-                        .background(M3_PosContainer)
+                        .background(
+                            if (hasFailures) M3_ErrorContainer else M3_PosContainer
+                        )
                         .clickable { onInspectSync() }
                         .padding(horizontal = 14.dp, vertical = 14.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -938,31 +1278,51 @@ fun SyncStrip(
                     Box(
                         modifier = Modifier
                             .size(40.dp)
-                            .background(M3_OnPosContainer.copy(alpha = 0.1f), CircleShape),
+                            .background(
+                                if (hasFailures) {
+                                    M3_OnErrorContainer.copy(alpha = 0.1f)
+                                } else {
+                                    M3_OnPosContainer.copy(alpha = 0.1f)
+                                },
+                                CircleShape
+                            ),
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
-                            imageVector = Icons.Default.CheckCircle,
+                            imageVector = if (hasFailures) {
+                                Icons.Rounded.ErrorOutline
+                            } else {
+                                Icons.Default.CheckCircle
+                            },
                             contentDescription = null,
-                            tint = M3_Pos,
+                            tint = if (hasFailures) M3_Error else M3_Pos,
                             modifier = Modifier.size(20.dp)
                         )
                     }
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = "EXTRACTION COMPLETE",
-                            color = M3_Pos.copy(alpha = 0.9f),
+                            text = if (hasFailures) {
+                                "PROCESSING FINISHED WITH ISSUES"
+                            } else {
+                                "PROCESSING FINISHED"
+                            },
+                            color = if (hasFailures) {
+                                M3_Error
+                            } else {
+                                M3_Pos.copy(alpha = 0.9f)
+                            },
                             style = AppTypography.eyebrow
                         )
                         Spacer(modifier = Modifier.height(2.dp))
                         Text(
-                            text = "All local messages matched",
+                            text = syncState.syncError
+                                ?: "Manual processing finished",
                             color = M3_OnSurface,
                             style = MaterialTheme.typography.titleSmall
                         )
                         Spacer(modifier = Modifier.height(2.dp))
                         Text(
-                            text = "Balances updated offline successfully",
+                            text = homeSyncCompletionSummary(syncState),
                             color = M3_OnPosContainer.copy(alpha = 0.85f),
                             style = MaterialTheme.typography.bodySmall
                         )
@@ -1054,7 +1414,9 @@ fun DrawerContent(
         ) {
             itemsIndexed(syncState.queue) { idx, item ->
                 val isActive = idx == syncState.currentIndex
-                val isComplete = item.status == "synced"
+                val isComplete =
+                    item.status == "synced" ||
+                        item.status == "already_saved"
                 val isFiltered = item.status == "filtered_out"
                 val isError = item.status == "error"
 
@@ -1546,6 +1908,53 @@ private fun getAccountShortLabel(label: String?): String {
     
     return if (digits.isNotEmpty()) "$shortBank ••$digits" else shortBank
 }
+
+internal fun selectedPeriodEmptyMessage(
+    selectedPeriod: String,
+    totalTransactionCount: Int,
+    setupStatus: SetupImportStatus
+): String {
+    if (totalTransactionCount > 0) {
+        return "No spending transactions in the selected ${selectedPeriod.lowercase()} period"
+    }
+    return when (setupStatus) {
+        SetupImportStatus.PERMISSION_NEEDED ->
+            "SMS access is off. Restore it to discover transaction alerts."
+        SetupImportStatus.NOT_STARTED,
+        SetupImportStatus.DOWNLOADING,
+        SetupImportStatus.SCANNING,
+        SetupImportStatus.PROCESSING,
+        SetupImportStatus.PAUSED ->
+            "No transactions yet. The setup card shows what remains."
+        SetupImportStatus.FAILED ->
+            "No transactions were saved. The setup card explains what needs attention."
+        SetupImportStatus.READY_NO_HISTORY ->
+            "No eligible transaction history was found. The next eligible alert will appear here."
+        SetupImportStatus.READY ->
+            "No saved spending transactions in this period."
+    }
+}
+
+internal fun homeSyncHasFailures(state: HomeSyncState): Boolean =
+    state.syncError != null ||
+        state.queue.any { it.status == "error" }
+
+internal fun homeSyncCompletionSummary(state: HomeSyncState): String =
+    buildString {
+        val saved = state.queue.count { it.status == "synced" }
+        val alreadySaved =
+            state.queue.count { it.status == "already_saved" }
+        val rejected =
+            state.queue.count { it.status == "filtered_out" }
+        val failed = state.queue.count { it.status == "error" }
+
+        append("$saved saved")
+        if (alreadySaved > 0) {
+            append(" · $alreadySaved already present")
+        }
+        if (rejected > 0) append(" · $rejected rejected")
+        if (failed > 0) append(" · $failed failed")
+    }
 
 @Composable
 fun ModelUpgradeBanner(

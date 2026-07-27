@@ -1,61 +1,73 @@
 package com.pocketfinancer.ui.onboarding
 
 import android.Manifest
-import android.os.Build
-import android.content.pm.PackageManager
 import android.app.Activity
+import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.provider.Settings
-import android.util.Log
-import androidx.core.app.ActivityCompat
-import androidx.core.content.ContextCompat
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalLifecycleOwner
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
-import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.*
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material.icons.rounded.ArrowForward
+import androidx.compose.material.icons.rounded.Lock
+import androidx.compose.material.icons.rounded.MarkEmailRead
+import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
-import com.pocketfinancer.hardware.SlmTier
-import com.pocketfinancer.inference.ModelDownloader
-import com.pocketfinancer.ui.theme.*
-import kotlinx.coroutines.delay
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import com.pocketfinancer.ui.theme.M3_Background
+import com.pocketfinancer.ui.theme.M3_OnPrimary
+import com.pocketfinancer.ui.theme.M3_OnSurface
+import com.pocketfinancer.ui.theme.M3_OnSurfaceVariant
+import com.pocketfinancer.ui.theme.M3_OutlineVariant
+import com.pocketfinancer.ui.theme.M3_Primary
+import com.pocketfinancer.ui.theme.M3_PrimaryContainer
+import com.pocketfinancer.ui.theme.M3_SurfaceContainerLow
 
 @Composable
 fun OnboardingScreen(
@@ -65,11 +77,8 @@ fun OnboardingScreen(
     val state by viewModel.state.collectAsState()
     val context = LocalContext.current
 
-    // Handle completed state from ViewModel
     LaunchedEffect(state.step) {
-        if (state.step == OnboardingStep.COMPLETED) {
-            onComplete()
-        }
+        if (state.step == OnboardingStep.COMPLETED) onComplete()
     }
 
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -80,584 +89,221 @@ fun OnboardingScreen(
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose {
-            lifecycleOwner.lifecycle.removeObserver(observer)
-        }
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     val permissionLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestMultiplePermissions()
+        ActivityResultContracts.RequestMultiplePermissions()
     ) { result ->
-        viewModel.checkPermissions()
-        
-        val readSmsGranted = result[Manifest.permission.READ_SMS] == true ||
-                ContextCompat.checkSelfPermission(context, Manifest.permission.READ_SMS) == PackageManager.PERMISSION_GRANTED
-        val receiveSmsGranted = result[Manifest.permission.RECEIVE_SMS] == true ||
-                ContextCompat.checkSelfPermission(context, Manifest.permission.RECEIVE_SMS) == PackageManager.PERMISSION_GRANTED
-        
-        val smsGranted = readSmsGranted && receiveSmsGranted
-        val notifGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            result[Manifest.permission.POST_NOTIFICATIONS] == true ||
-                    ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
-        } else {
-            true
-        }
-
-        if (smsGranted) {
-            if (!notifGranted) {
-                viewModel.showNotificationWarning()
-            } else {
-                viewModel.setStep(OnboardingStep.DOWNLOAD_SLM)
-            }
-        } else {
-            viewModel.incrementPermissionDeny()
-        }
+        val readGranted =
+            result[Manifest.permission.READ_SMS] == true ||
+                ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.READ_SMS
+                ) == PackageManager.PERMISSION_GRANTED
+        val receiveGranted =
+            result[Manifest.permission.RECEIVE_SMS] == true ||
+                ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.RECEIVE_SMS
+                ) == PackageManager.PERMISSION_GRANTED
+        viewModel.onPermissionResult(readGranted && receiveGranted)
     }
 
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(M3_Background)
+            .navigationBarsPadding()
+            .padding(horizontal = 24.dp, vertical = 20.dp),
+        contentAlignment = Alignment.Center
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .statusBarsPadding()
-        ) {
-            Box(
-                modifier = Modifier
-                    .fillGridModifier()
-                    .weight(1f)
-            ) {
-                AnimatedContent(
-                    targetState = state.step,
-                    transitionSpec = {
-                        (fadeIn(animationSpec = tween(300))).togetherWith(
-                            fadeOut(animationSpec = tween(300))
+        AnimatedContent(
+            targetState = state.step,
+            transitionSpec = { fadeIn().togetherWith(fadeOut()) },
+            label = "onboarding_step"
+        ) { step ->
+            when (step) {
+                OnboardingStep.WELCOME -> CalmIntroduction(
+                    onContinue = {
+                        viewModel.setStep(OnboardingStep.PERMISSIONS)
+                    }
+                )
+
+                OnboardingStep.PERMISSIONS -> SmsPermissionStep(
+                    deniedCount = state.deniedCount,
+                    onRequestPermission = {
+                        permissionLauncher.launch(
+                            arrayOf(
+                                Manifest.permission.READ_SMS,
+                                Manifest.permission.RECEIVE_SMS
+                            )
                         )
                     },
-                    label = "OnboardingContent"
-                ) { step ->
-                    when (step) {
-                        OnboardingStep.WELCOME -> WelcomeStepScreen(
-                            onNext = { viewModel.setStep(OnboardingStep.PERMISSIONS) }
-                        )
-                        OnboardingStep.PERMISSIONS -> PermissionsStepScreen(
-                            deniedCount = state.deniedCount,
-                            showNotificationWarning = state.showNotificationWarning,
-                            onGrant = {
-                                val permissions = mutableListOf(
-                                    Manifest.permission.READ_SMS,
-                                    Manifest.permission.RECEIVE_SMS
-                                )
-                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                                    permissions.add(Manifest.permission.POST_NOTIFICATIONS)
-                                }
-                                permissionLauncher.launch(permissions.toTypedArray())
-                            },
-                            onProceedAnyway = { viewModel.proceedAnyway() },
-                            onNotNow = { viewModel.incrementPermissionDeny() }
-                        )
-                        OnboardingStep.DOWNLOAD_SLM -> DownloadSlmStepScreen(
-                            selectedSlm = state.selectedSlm,
-                            downloadState = state.downloadState,
-                            isDownloading = state.isDownloading,
-                            hasNotificationPermission = state.hasNotificationPermission,
-                            onDownload = { viewModel.downloadModel() }
-                        )
-                        OnboardingStep.SYNCING -> SyncingStepScreen(
-                            progress = state.syncProgress,
-                            message = state.syncMessage,
-                            loadError = state.modelLoadError,
-                            logs = state.syncLogs,
-                            etaSeconds = state.syncEtaSeconds,
-                            totalMessages = state.syncTotalMessages,
-                            transactionalCount = state.syncTransactionalCount,
-                            parsedCount = state.syncParsedCount,
-                            spendsTotal = state.syncSpendsTotal,
-                            recentTransactions = state.syncRecentTransactions,
-                            hasNotificationPermission = state.hasNotificationPermission
-                        )
-                        OnboardingStep.COMPLETED -> Box(modifier = Modifier.fillMaxSize())
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun WelcomeStepScreen(onNext: () -> Unit) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(horizontal = 24.dp, vertical = 16.dp)
-            .verticalScroll(rememberScrollState()),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.SpaceBetween
-    ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            modifier = Modifier.weight(1f, fill = false)
-        ) {
-            Spacer(modifier = Modifier.height(48.dp))
-            Box(
-                modifier = Modifier
-                    .size(64.dp)
-                    .background(
-                        brush = Brush.linearGradient(
-                            colors = listOf(
-                                M3_Primary.copy(alpha = 0.3f),
-                                M3_Primary
+                    onOpenSettings = {
+                        context.startActivity(
+                            Intent(
+                                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                Uri.parse("package:${context.packageName}")
                             )
-                        ),
-                        shape = RoundedCornerShape(20.dp)
+                        )
+                    },
+                    permanentlyDenied = smsPermissionsPermanentlyDenied(
+                        context = context,
+                        deniedCount = state.deniedCount
                     )
-                    .border(
-                        BorderStroke(1.dp, M3_Primary.copy(alpha = 0.2f)),
-                        RoundedCornerShape(20.dp)
-                    ),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = "₹",
-                    color = M3_OnPrimary,
-                    style = AppTypography.headlineLargeBold
                 )
+
+                // Model work no longer belongs before the app shell. These
+                // legacy enum values remain for the existing background
+                // manager/model-upgrade state machine.
+                OnboardingStep.DOWNLOAD_SLM,
+                OnboardingStep.SYNCING,
+                OnboardingStep.COMPLETED -> Unit
             }
-
-            Spacer(modifier = Modifier.height(24.dp))
-
-            Text(
-                text = "Your money,\nyour business. Period.",
-                color = M3_OnSurface,
-                style = AppTypography.headlineMediumBold,
-                textAlign = TextAlign.Center
-            )
-
-            Spacer(modifier = Modifier.height(14.dp))
-
-            Text(
-                text = "Experience unparalleled financial clarity with privacy-first, on-device AI. No cloud uploads. Total control over your transaction history.",
-                color = M3_OnSurfaceVariant,
-                style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Medium),
-                textAlign = TextAlign.Center
-            )
-
-            Spacer(modifier = Modifier.height(32.dp))
-
-            // Info rows
-            InfoRowItem(
-                icon = Icons.Rounded.Shield,
-                title = "Private by Design",
-                desc = "Your messages never leave this device."
-            )
-
-            Spacer(modifier = Modifier.height(14.dp))
-
-            InfoRowItem(
-                icon = Icons.Rounded.Memory,
-                title = "Local SLM Engine",
-                desc = "Small Language Model parses SMS locally."
-            )
-        }
-
-        Column(
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Spacer(modifier = Modifier.height(24.dp))
-            Button(
-                onClick = onNext,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(48.dp),
-                shape = CircleShape,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = M3_Primary,
-                    contentColor = M3_OnPrimary
-                )
-            ) {
-                Text(
-                    text = "Get Started",
-                    style = AppTypography.titleSmallBold
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Icon(
-                    imageVector = Icons.Rounded.ArrowForward,
-                    contentDescription = null,
-                    modifier = Modifier.size(18.dp)
-                )
-            }
-            Spacer(modifier = Modifier.height(16.dp))
         }
     }
 }
 
 @Composable
-private fun InfoRowItem(
-    icon: ImageVector,
-    title: String,
-    desc: String
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(M3_SurfaceContainerLow, RoundedCornerShape(16.dp))
-            .border(
-                BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.25f)),
-                RoundedCornerShape(16.dp)
-            )
-            .padding(14.dp),
-        verticalAlignment = Alignment.CenterVertically
+private fun CalmIntroduction(onContinue: () -> Unit) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Box(
             modifier = Modifier
-                .size(40.dp)
-                .background(M3_SurfaceContainer, RoundedCornerShape(12.dp))
-                .border(
-                    BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.3f)),
-                    RoundedCornerShape(12.dp)
-                ),
+                .size(72.dp)
+                .background(M3_PrimaryContainer, CircleShape),
             contentAlignment = Alignment.Center
         ) {
             Icon(
-                imageVector = icon,
+                imageVector = Icons.Rounded.Lock,
                 contentDescription = null,
                 tint = M3_Primary,
-                modifier = Modifier.size(20.dp)
+                modifier = Modifier.size(34.dp)
             )
         }
-
-        Spacer(modifier = Modifier.width(14.dp))
-
-        Column {
-            Text(
-                text = title,
-                color = M3_OnSurface,
-                style = MaterialTheme.typography.titleSmall
-            )
-            Text(
-                text = desc,
-                color = M3_OnSurfaceVariant,
-                style = MaterialTheme.typography.labelSmall
+        Spacer(Modifier.height(24.dp))
+        Text(
+            text = "A clear ledger from the alerts you already receive",
+            color = M3_OnSurface,
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.SemiBold,
+            textAlign = TextAlign.Center
+        )
+        Spacer(Modifier.height(12.dp))
+        Text(
+            text = "Pocket Financer reads eligible bank and payment SMS on this device, explains what it found, and keeps saved transaction evidence encrypted locally.",
+            color = M3_OnSurfaceVariant,
+            style = MaterialTheme.typography.bodyLarge,
+            textAlign = TextAlign.Center
+        )
+        Spacer(Modifier.height(28.dp))
+        Button(
+            onClick = onContinue,
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(14.dp),
+            contentPadding = PaddingValues(vertical = 14.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = M3_Primary)
+        ) {
+            Text("Continue", color = M3_OnPrimary)
+            Spacer(Modifier.size(8.dp))
+            Icon(
+                imageVector = Icons.Rounded.ArrowForward,
+                contentDescription = null,
+                tint = M3_OnPrimary
             )
         }
     }
 }
 
 @Composable
-private fun PermissionsStepScreen(
+private fun SmsPermissionStep(
     deniedCount: Int,
-    showNotificationWarning: Boolean,
-    onGrant: () -> Unit,
-    onProceedAnyway: () -> Unit,
-    onNotNow: () -> Unit
+    permanentlyDenied: Boolean,
+    onRequestPermission: () -> Unit,
+    onOpenSettings: () -> Unit
 ) {
-    val context = LocalContext.current
-    val activity = remember(context) { context.findActivity() }
-    val isSmsPermanentlyDenied = remember(deniedCount, context) {
-        activity?.let { act ->
-            val hasReadSms = ContextCompat.checkSelfPermission(act, Manifest.permission.READ_SMS) == PackageManager.PERMISSION_GRANTED
-            val hasReceiveSms = ContextCompat.checkSelfPermission(act, Manifest.permission.RECEIVE_SMS) == PackageManager.PERMISSION_GRANTED
-            val smsGranted = hasReadSms && hasReceiveSms
-            
-            !smsGranted && 
-                    !ActivityCompat.shouldShowRequestPermissionRationale(act, Manifest.permission.READ_SMS) &&
-                    !ActivityCompat.shouldShowRequestPermissionRationale(act, Manifest.permission.RECEIVE_SMS) &&
-                    deniedCount > 0
-        } ?: false
-    }
-
     Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(horizontal = 24.dp, vertical = 16.dp)
-            .verticalScroll(rememberScrollState()),
-        horizontalAlignment = Alignment.Start,
-        verticalArrangement = Arrangement.SpaceBetween
+        modifier = Modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Column(
-            horizontalAlignment = Alignment.Start,
-            modifier = Modifier.weight(1f, fill = false)
+        Icon(
+            imageVector = Icons.Rounded.MarkEmailRead,
+            contentDescription = null,
+            tint = M3_Primary,
+            modifier = Modifier.size(52.dp)
+        )
+        Spacer(Modifier.height(20.dp))
+        Text(
+            text = "SMS access is required",
+            color = M3_OnSurface,
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.SemiBold
+        )
+        Spacer(Modifier.height(10.dp))
+        Text(
+            text = "It lets Pocket Financer discover transaction alerts and capture new eligible alerts. Personal, OTP, and promotional messages are filtered before local AI processing.",
+            color = M3_OnSurfaceVariant,
+            style = MaterialTheme.typography.bodyLarge,
+            textAlign = TextAlign.Center
+        )
+        Spacer(Modifier.height(20.dp))
+        Card(
+            colors = CardDefaults.cardColors(
+                containerColor = M3_SurfaceContainerLow
+            ),
+            border = BorderStroke(
+                1.dp,
+                M3_OutlineVariant.copy(alpha = 0.35f)
+            ),
+            shape = RoundedCornerShape(16.dp)
         ) {
-            Spacer(modifier = Modifier.height(24.dp))
-            Box(
-                modifier = Modifier
-                    .size(56.dp)
-                    .background(M3_SurfaceContainerHigh, RoundedCornerShape(16.dp))
-                    .border(
-                        BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.4f)),
-                        RoundedCornerShape(16.dp)
-                    ),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.Sms,
-                    contentDescription = null,
-                    tint = M3_Primary,
-                    modifier = Modifier.size(24.dp)
-                )
-            }
-
-            Spacer(modifier = Modifier.height(20.dp))
-
             Text(
-                text = "Grant App Permissions",
-                color = M3_OnSurface,
-                style = AppTypography.headlineSmallBold
-            )
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Text(
-                text = "Pocket Financer uses local AI processing and requires the following permissions to function:",
+                text = if (deniedCount == 0) {
+                    "The app shell opens as soon as SMS access is granted. Model preparation and history import happen later, only after you confirm them."
+                } else {
+                    "Nothing was downloaded. Grant SMS access when you are ready to continue."
+                },
                 color = M3_OnSurfaceVariant,
-                style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Medium)
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.padding(16.dp)
             )
+        }
+        Spacer(Modifier.height(24.dp))
 
-            Spacer(modifier = Modifier.height(20.dp))
-
-            // Permission Items explanations
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(M3_SurfaceContainerLow, RoundedCornerShape(16.dp))
-                        .border(
-                            BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.2f)),
-                            RoundedCornerShape(16.dp)
-                        )
-                        .padding(14.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Sms,
-                        contentDescription = null,
-                        tint = M3_Primary,
-                        modifier = Modifier.size(20.dp)
-                    )
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Column {
-                        Text("SMS Access (Required)", color = M3_OnSurface, style = AppTypography.sectionHeadingBold)
-                        Text("Used to read and parse your bank's transactional alerts locally on-device.", color = M3_OnSurfaceVariant, style = MaterialTheme.typography.labelSmall)
-                    }
-                }
-
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(M3_SurfaceContainerLow, RoundedCornerShape(16.dp))
-                        .border(
-                            BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.2f)),
-                            RoundedCornerShape(16.dp)
-                        )
-                        .padding(14.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Notifications,
-                        contentDescription = null,
-                        tint = M3_Primary,
-                        modifier = Modifier.size(20.dp)
-                    )
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Column {
-                        Text("Notifications (Optional)", color = M3_OnSurface, style = AppTypography.sectionHeadingBold)
-                        Text("Shows persistent background updates during the local model download and SMS sync stages.", color = M3_OnSurfaceVariant, style = MaterialTheme.typography.labelSmall)
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(20.dp))
-
-            if (showNotificationWarning) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(M3_ErrorContainer.copy(alpha = 0.2f), RoundedCornerShape(16.dp))
-                        .border(
-                            BorderStroke(1.dp, M3_Error.copy(alpha = 0.3f)),
-                            RoundedCornerShape(16.dp)
-                        )
-                        .padding(14.dp),
-                    verticalAlignment = Alignment.Top
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Warning,
-                        contentDescription = null,
-                        tint = M3_Error,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Column {
-                        Text(
-                            text = "Notification Permission Denied",
-                            color = M3_OnErrorContainer,
-                            style = AppTypography.bodySmallBold
-                        )
-                        Text(
-                            text = "Model download and SMS parsing progress updates won't be available through system notifications. We promise this app never spams you with promotional alerts.",
-                            color = M3_OnErrorContainer.copy(alpha = 0.85f),
-                            style = MaterialTheme.typography.labelSmall
-                        )
-                    }
-                }
-                Spacer(modifier = Modifier.height(16.dp))
-            } else if (isSmsPermanentlyDenied) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(M3_ErrorContainer.copy(alpha = 0.3f), RoundedCornerShape(16.dp))
-                        .border(
-                            BorderStroke(1.dp, M3_Error.copy(alpha = 0.2f)),
-                            RoundedCornerShape(16.dp)
-                        )
-                        .padding(14.dp),
-                    verticalAlignment = Alignment.Top
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Warning,
-                        contentDescription = null,
-                        tint = M3_Error,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Column {
-                        Text(
-                            text = "SMS Permission Permanently Denied",
-                            color = M3_OnErrorContainer,
-                            style = AppTypography.bodySmallBold
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = "The app cannot function without SMS access. To enable it:\n1. Click 'Open Settings' below.\n2. Tap 'Permissions'.\n3. Select 'SMS' and set to 'Allow'.",
-                            color = M3_OnErrorContainer.copy(alpha = 0.85f),
-                            style = MaterialTheme.typography.labelSmall
-                        )
-                    }
-                }
-                Spacer(modifier = Modifier.height(16.dp))
-            } else if (deniedCount > 0) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(M3_ErrorContainer.copy(alpha = 0.3f), RoundedCornerShape(16.dp))
-                        .border(
-                            BorderStroke(1.dp, M3_Error.copy(alpha = 0.2f)),
-                            RoundedCornerShape(16.dp)
-                        )
-                        .padding(14.dp),
-                    verticalAlignment = Alignment.Top
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Warning,
-                        contentDescription = null,
-                        tint = M3_Error,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Column {
-                        Text(
-                            text = "SMS Permission Required",
-                            color = M3_OnErrorContainer,
-                            style = AppTypography.bodySmallBold
-                        )
-                        Text(
-                            text = "The app cannot function without SMS access. Please allow it to proceed.",
-                            color = M3_OnErrorContainer.copy(alpha = 0.85f),
-                            style = MaterialTheme.typography.labelSmall
-                        )
-                    }
-                }
-                Spacer(modifier = Modifier.height(16.dp))
-            }
-
-            // Safety Shield Card
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(M3_PosContainer.copy(alpha = 0.2f), RoundedCornerShape(20.dp))
-                    .border(
-                        BorderStroke(1.dp, M3_Pos.copy(alpha = 0.2f)),
-                        RoundedCornerShape(20.dp)
-                    )
-                    .padding(16.dp),
-                verticalAlignment = Alignment.Top
+        if (permanentlyDenied) {
+            Button(
+                onClick = onOpenSettings,
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(14.dp),
+                contentPadding = PaddingValues(vertical = 14.dp)
             ) {
-                Icon(
-                    imageVector = Icons.Rounded.Shield,
-                    contentDescription = null,
-                    tint = M3_Pos,
-                    modifier = Modifier.size(18.dp)
-                )
-                Spacer(modifier = Modifier.width(12.dp))
-                Text(
-                    text = "100% On-Device. No data ever leaves your device. We only use the internet to download the AI model; after that, the app operates completely offline with no cloud servers or trackers.",
-                    color = M3_OnPosContainer,
-                    style = AppTypography.bodySmallBold
-                )
+                Icon(Icons.Rounded.Settings, contentDescription = null)
+                Spacer(Modifier.size(8.dp))
+                Text("Open app settings")
+            }
+        } else {
+            Button(
+                onClick = onRequestPermission,
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(14.dp),
+                contentPadding = PaddingValues(vertical = 14.dp)
+            ) {
+                Text(if (deniedCount == 0) "Allow SMS access" else "Try again")
             }
         }
 
-        Column(
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Spacer(modifier = Modifier.height(24.dp))
-            
-            val buttonText = when {
-                showNotificationWarning -> "Proceed Anyway"
-                isSmsPermanentlyDenied -> "Open Settings"
-                else -> "Allow Permissions"
-            }
-            
-            val onButtonClick: () -> Unit = when {
-                showNotificationWarning -> onProceedAnyway
-                isSmsPermanentlyDenied -> {
-                    {
-                        try {
-                            val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-                                data = Uri.fromParts("package", context.packageName, null)
-                            }
-                            context.startActivity(intent)
-                        } catch (e: Exception) {
-                            Log.e("OnboardingScreen", "Failed to open settings", e)
-                        }
-                        Unit
-                    }
-                }
-                else -> onGrant
-            }
-
-            Button(
-                onClick = onButtonClick,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(48.dp),
-                shape = CircleShape,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = M3_Primary,
-                    contentColor = M3_OnPrimary
-                )
+        if (permanentlyDenied) {
+            Spacer(Modifier.height(8.dp))
+            OutlinedButton(
+                onClick = onRequestPermission,
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(14.dp)
             ) {
-                Text(
-                    text = buttonText,
-                    style = AppTypography.titleSmallBold
-                )
+                Text("Check permission again")
             }
-            Spacer(modifier = Modifier.height(8.dp))
-            TextButton(
-                onClick = onNotNow,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(44.dp)
-            ) {
-                Text(
-                    text = "Not Now",
-                    color = M3_OnSurfaceVariant,
-                    style = MaterialTheme.typography.labelLarge
-                )
-            }
-            Spacer(modifier = Modifier.height(16.dp))
         }
     }
 }
@@ -669,1123 +315,37 @@ internal fun backgroundWorkNoticeText(hasNotificationPermission: Boolean): Strin
         "You can switch apps and return to Pocket Financer to check progress."
     }
 
-@Composable
-private fun BackgroundWorkNotice(
-    hasNotificationPermission: Boolean,
-    modifier: Modifier = Modifier
-) {
-    Surface(
-        modifier = modifier
-            .fillMaxWidth()
-            .semantics(mergeDescendants = true) {},
-        shape = RoundedCornerShape(14.dp),
-        color = M3_SurfaceContainerLow,
-        border = BorderStroke(1.dp, M3_Primary.copy(alpha = 0.2f))
-    ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Icon(
-                imageVector = Icons.Rounded.Notifications,
-                contentDescription = null,
-                tint = M3_Primary,
-                modifier = Modifier.size(18.dp)
-            )
-            Spacer(modifier = Modifier.width(10.dp))
-            Column {
-                Text(
-                    text = "Works in the background",
-                    color = M3_OnSurface,
-                    style = AppTypography.bodySmallBold
-                )
-                Text(
-                    text = backgroundWorkNoticeText(hasNotificationPermission),
-                    color = M3_OnSurfaceVariant,
-                    style = MaterialTheme.typography.labelSmall
-                )
-            }
-        }
-    }
+private fun smsPermissionsPermanentlyDenied(
+    context: Context,
+    deniedCount: Int
+): Boolean {
+    if (deniedCount == 0) return false
+    val activity = context.findActivity() ?: return false
+    val readDenied = ContextCompat.checkSelfPermission(
+        context,
+        Manifest.permission.READ_SMS
+    ) != PackageManager.PERMISSION_GRANTED
+    val receiveDenied = ContextCompat.checkSelfPermission(
+        context,
+        Manifest.permission.RECEIVE_SMS
+    ) != PackageManager.PERMISSION_GRANTED
+    return (readDenied &&
+        !ActivityCompat.shouldShowRequestPermissionRationale(
+            activity,
+            Manifest.permission.READ_SMS
+        )) ||
+        (receiveDenied &&
+            !ActivityCompat.shouldShowRequestPermissionRationale(
+                activity,
+                Manifest.permission.RECEIVE_SMS
+            ))
 }
 
-@Composable
-private fun DownloadSlmStepScreen(
-    selectedSlm: SlmTier?,
-    downloadState: ModelDownloader.DownloadState,
-    isDownloading: Boolean,
-    hasNotificationPermission: Boolean,
-    onDownload: () -> Unit
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(horizontal = 24.dp, vertical = 16.dp)
-            .verticalScroll(rememberScrollState()),
-        horizontalAlignment = Alignment.Start,
-        verticalArrangement = Arrangement.SpaceBetween
-    ) {
-        Column(
-            horizontalAlignment = Alignment.Start,
-            modifier = Modifier.weight(1f, fill = false)
-        ) {
-            Spacer(modifier = Modifier.height(24.dp))
-            Box(
-                modifier = Modifier
-                    .size(56.dp)
-                    .background(M3_SurfaceContainerHigh, RoundedCornerShape(16.dp))
-                    .border(
-                        BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.4f)),
-                        RoundedCornerShape(16.dp)
-                    ),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.Memory,
-                    contentDescription = null,
-                    tint = M3_Primary,
-                    modifier = Modifier.size(24.dp)
-                )
-            }
-
-            Spacer(modifier = Modifier.height(20.dp))
-
-            Text(
-                text = "Build Your Private Engine",
-                color = M3_OnSurface,
-                style = AppTypography.headlineSmallBold
-            )
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Text(
-                text = "We will download a fast, compact starter AI model (~0.7 GB) to get your finance engine running quickly. Higher accuracy models for your phone can be unlocked post-onboarding.",
-                color = M3_OnSurfaceVariant,
-                style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Medium)
-            )
-
-            Spacer(modifier = Modifier.height(20.dp))
-
-            // Model Spec Card
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(M3_SurfaceContainer, RoundedCornerShape(20.dp))
-                    .border(
-                        BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.35f)),
-                        RoundedCornerShape(20.dp)
-                    )
-                    .padding(16.dp)
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "MODEL SPECS",
-                        color = M3_Primary,
-                        style = AppTypography.eyebrow
-                    )
-                    Text(
-                        text = "llama.cpp",
-                        color = M3_OnSurfaceVariant,
-                        style = AppTypography.eyebrow,
-                        modifier = Modifier
-                            .background(M3_SurfaceContainerHigh, RoundedCornerShape(10.dp))
-                            .border(
-                                BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.3f)),
-                                RoundedCornerShape(10.dp)
-                            )
-                            .padding(horizontal = 8.dp, vertical = 2.dp)
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(12.dp))
-
-                Row(
-                    verticalAlignment = Alignment.Bottom
-                ) {
-                    Text(
-                        text = selectedSlm?.name ?: "Detecting Model...",
-                        color = M3_OnSurface,
-                        style = AppTypography.screenHeader
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = if (selectedSlm != null) "${"%.1f".format(selectedSlm.sizeGb)}B Params" else "",
-                        color = M3_OnSurfaceVariant,
-                        style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Medium),
-                        modifier = Modifier.padding(bottom = 2.dp)
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(6.dp))
-
-                Text(
-                    text = selectedSlm?.description ?: "Finding compatible model for your hardware capabilities.",
-                    color = M3_OnSurfaceVariant,
-                    style = MaterialTheme.typography.bodySmall
-                )
-            }
-
-            Spacer(modifier = Modifier.height(20.dp))
-
-            // Interactive Flow Graphic
-            ExtractionDemoGraphic()
-        }
-
-        Column(
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Spacer(modifier = Modifier.height(24.dp))
-
-            val errorText = downloadState.error
-            if (!isDownloading && errorText != null) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(M3_ErrorContainer.copy(alpha = 0.2f), RoundedCornerShape(16.dp))
-                        .border(
-                            BorderStroke(1.dp, M3_Error.copy(alpha = 0.3f)),
-                            RoundedCornerShape(16.dp)
-                        )
-                        .padding(14.dp),
-                    verticalAlignment = Alignment.Top
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Warning,
-                        contentDescription = null,
-                        tint = M3_Error,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Column {
-                        Text(
-                            text = "Download Failed",
-                            color = M3_OnErrorContainer,
-                            style = AppTypography.bodySmallBold
-                        )
-                        Text(
-                            text = errorText,
-                            color = M3_OnErrorContainer.copy(alpha = 0.85f),
-                            style = MaterialTheme.typography.labelSmall
-                        )
-                    }
-                }
-                Spacer(modifier = Modifier.height(16.dp))
-            }
-
-            if (!isDownloading) {
-                Text(
-                    text = if (downloadState.isComplete) {
-                        "The model is ready on this device. Continue to initialize the private engine."
-                    } else {
-                        "Model size: ~${selectedSlm?.sizeMb ?: 1200}MB. This one-time download ensures your data never leaves this device."
-                    },
-                    color = M3_OnSurfaceVariant,
-                    style = MaterialTheme.typography.bodySmall,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp)
-                )
-                Spacer(modifier = Modifier.height(10.dp))
-                Button(
-                    onClick = onDownload,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(48.dp),
-                    shape = CircleShape,
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = M3_Primary,
-                        contentColor = M3_OnPrimary
-                    )
-                ) {
-                    Icon(
-                        imageVector = if (downloadState.isComplete) {
-                            Icons.Rounded.CheckCircle
-                        } else {
-                            Icons.Rounded.Download
-                        },
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = if (downloadState.isComplete) "Continue" else "Download",
-                        style = AppTypography.titleSmallBold
-                    )
-                }
-            } else {
-                val animatedProgress by animateFloatAsState(
-                    targetValue = downloadState.progress,
-                    animationSpec = ProgressIndicatorDefaults.ProgressAnimationSpec,
-                    label = "DownloadProgressAnimation"
-                )
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.Bottom
-                ) {
-                    Text(
-                        text = "Downloading model...",
-                        color = M3_OnSurface,
-                        style = AppTypography.bodySmallBold
-                    )
-                    Text(
-                        text = if (downloadState.progress >= 0.98f) "Finalizing..." else "${"%.0f".format(downloadState.downloadedMb)} / ${"%.0f".format(downloadState.totalMb)} MB",
-                        color = M3_Primary,
-                        style = AppTypography.timestamp
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                LinearProgressIndicator(
-                    progress = { animatedProgress },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(8.dp)
-                        .clip(CircleShape),
-                    color = M3_Primary,
-                    trackColor = M3_SurfaceContainerHighest
-                )
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                val progressPercent = (downloadState.progress * 100).toInt()
-                val speedText = if (downloadState.speedMbps > 0) " • ${"%.1f".format(downloadState.speedMbps)} MB/s" else ""
-                val etaText = if (downloadState.etaSeconds > 0) {
-                    val mins = downloadState.etaSeconds / 60
-                    val secs = downloadState.etaSeconds % 60
-                    " • " + (if (mins > 0) "${mins}m ${secs}s" else "${secs}s") + " left"
-                } else if (downloadState.progress > 0.01f) {
-                    " • Calculating..."
-                } else ""
-
-                Text(
-                    text = "$progressPercent%$speedText$etaText",
-                    color = M3_OnSurfaceVariant,
-                    style = AppTypography.eyebrowBold
-                )
-
-                Spacer(modifier = Modifier.height(12.dp))
-
-                BackgroundWorkNotice(
-                    hasNotificationPermission = hasNotificationPermission
-                )
-            }
-            Spacer(modifier = Modifier.height(16.dp))
-        }
-    }
-}
-
-@Composable
-private fun ExtractionDemoGraphic() {
-    var state by remember { mutableIntStateOf(0) }
-    
-    LaunchedEffect(Unit) {
-        while (true) {
-            delay(4000)
-            state = (state + 1) % 4
-        }
-    }
-
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .animateContentSize()
-            .background(M3_SurfaceContainerLowest, RoundedCornerShape(20.dp))
-            .border(
-                BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.35f)),
-                RoundedCornerShape(20.dp)
-            )
-            .padding(16.dp)
-    ) {
-        Column(
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text(
-                text = "HOW IT WORKS",
-                color = M3_OnSurfaceVariant,
-                style = AppTypography.eyebrow,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.fillMaxWidth()
-            )
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            AnimatedContent(
-                targetState = state,
-                transitionSpec = {
-                    fadeIn(animationSpec = tween(400)).togetherWith(
-                        fadeOut(animationSpec = tween(400))
-                    )
-                },
-                modifier = Modifier.fillMaxWidth(),
-                label = "DemoExtractionContent"
-            ) { showState ->
-                when (showState) {
-                    0 -> {
-                        // Raw SMS Message block
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(M3_SurfaceContainerHigh, RoundedCornerShape(12.dp))
-                                .border(
-                                    BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.3f)),
-                                    RoundedCornerShape(12.dp)
-                                )
-                                .padding(12.dp)
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(
-                                    imageVector = Icons.Rounded.Sms,
-                                    contentDescription = null,
-                                    tint = M3_Primary,
-                                    modifier = Modifier.size(14.dp)
-                                )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(
-                                    text = "INCOMING SMS",
-                                    color = M3_Primary,
-                                    style = AppTypography.eyebrow
-                                )
-                            }
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Text(
-                                text = "AX-HDFCBK: Dear customer, Rs. 5,000.00 debited from HDFC Bank A/C *9141 towards Amazon Pay on 14-Oct-26. Ref: 1098.",
-                                color = M3_OnSurfaceVariant,
-                                style = AppTypography.monoBody,
-                                modifier = Modifier.padding(bottom = 2.dp)
-                            )
-                        }
-                    }
-                    1 -> {
-                        // Extracted JSON block
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(M3_SurfaceContainerLow, RoundedCornerShape(12.dp))
-                                .border(
-                                    BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.3f)),
-                                    RoundedCornerShape(12.dp)
-                                )
-                                .padding(12.dp)
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(
-                                    imageVector = Icons.Rounded.Memory,
-                                    contentDescription = null,
-                                    tint = M3_Primary,
-                                    modifier = Modifier.size(14.dp)
-                                )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(
-                                    text = "LOCAL AI EXTRACTION (JSON)",
-                                    color = M3_Primary,
-                                    style = AppTypography.eyebrow
-                                )
-                            }
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Text(
-                                text = "{",
-                                color = M3_OnSurfaceVariant,
-                                style = AppTypography.monoBody
-                            )
-                            JsonLine("amount", "5000.0", isNumber = true)
-                            JsonLine("merchant", "\"Amazon Pay\"")
-                            JsonLine("account", "\"HDFC *9141\"")
-                            JsonLine("type", "\"debit\"")
-                            JsonLine("date", "\"14-10-2026\"", isLast = true)
-                            Text(
-                                text = "}",
-                                color = M3_OnSurfaceVariant,
-                                style = AppTypography.monoBody
-                            )
-                        }
-                    }
-                    2 -> {
-                        // Encrypted DB Storage
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(M3_SurfaceContainerHigh, RoundedCornerShape(12.dp))
-                                .border(
-                                    BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.3f)),
-                                    RoundedCornerShape(12.dp)
-                                )
-                                .padding(12.dp)
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(
-                                    imageVector = Icons.Rounded.Security,
-                                    contentDescription = null,
-                                    tint = M3_Pos,
-                                    modifier = Modifier.size(14.dp)
-                                )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(
-                                    text = "SECURE DATABASE STORAGE",
-                                    color = M3_Pos,
-                                    style = AppTypography.eyebrow
-                                )
-                            }
-                            Spacer(modifier = Modifier.height(10.dp))
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(36.dp)
-                                        .background(M3_PosContainer.copy(alpha = 0.2f), RoundedCornerShape(8.dp)),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.Lock,
-                                        contentDescription = null,
-                                        tint = M3_Pos,
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                }
-                                Spacer(modifier = Modifier.width(12.dp))
-                                Column {
-                                    Text(
-                                        text = "SQLCipher Local Storage",
-                                        color = M3_OnSurface,
-                                        style = AppTypography.bodySmallBold
-                                    )
-                                    Spacer(modifier = Modifier.height(2.dp))
-                                    Text(
-                                        text = "AES-256 encrypted database. No cloud backups, no external server exposure.",
-                                        color = M3_OnSurfaceVariant,
-                                        style = MaterialTheme.typography.labelSmall
-                                    )
-                                }
-                            }
-                        }
-                    }
-                    else -> {
-                        // Personalized Insights & Analytics
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(M3_SurfaceContainerHigh, RoundedCornerShape(12.dp))
-                                .border(
-                                    BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.3f)),
-                                    RoundedCornerShape(12.dp)
-                                )
-                                .padding(12.dp)
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(
-                                    imageVector = Icons.Rounded.TrendingUp,
-                                    contentDescription = null,
-                                    tint = M3_Primary,
-                                    modifier = Modifier.size(14.dp)
-                                )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(
-                                    text = "SMART FINANCIAL INSIGHTS",
-                                    color = M3_Primary,
-                                    style = AppTypography.eyebrow
-                                )
-                            }
-                            Spacer(modifier = Modifier.height(10.dp))
-                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Column {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.SpaceBetween
-                                    ) {
-                                        Text("Monthly Shopping Spend", color = M3_OnSurface, style = AppTypography.eyebrowBold)
-                                        Text("₹5,000 / ₹40,000", color = M3_OnSurfaceVariant, style = AppTypography.accountCode)
-                                    }
-                                    Spacer(modifier = Modifier.height(4.dp))
-                                    LinearProgressIndicator(
-                                        progress = { 0.125f },
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .height(6.dp)
-                                            .clip(CircleShape),
-                                        color = M3_Primary,
-                                        trackColor = M3_SurfaceContainerHighest
-                                    )
-                                }
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .background(M3_SurfaceContainer, RoundedCornerShape(8.dp))
-                                        .padding(8.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.Lightbulb,
-                                        contentDescription = null,
-                                        tint = M3_Primary,
-                                        modifier = Modifier.size(14.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Text(
-                                        text = "Shopping spends are within your set budget. Great job!",
-                                        color = M3_OnSurfaceVariant,
-                                        style = MaterialTheme.typography.labelSmall
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun JsonLine(key: String, value: String, isNumber: Boolean = false, isLast: Boolean = false) {
-    Row(modifier = Modifier.padding(start = 12.dp)) {
-        Text(
-            text = "\"$key\": ",
-            color = M3_Primary,
-            style = AppTypography.monoBody
-        )
-        Text(
-            text = value + (if (isLast) "" else ","),
-            color = if (isNumber) M3_Error else M3_OnSurface,
-            style = AppTypography.monoBodyBold
-        )
-    }
-}
-
-@Composable
-private fun PipelineStepper(progress: Float) {
-    val steps = listOf("Engine Init", "SMS Filter", "Parse SMS", "DB Save")
-    val currentStep = when {
-        progress < 0.15f -> 0
-        progress < 0.25f -> 1
-        progress < 0.98f -> 2
-        else -> 3
-    }
-
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(M3_SurfaceContainerLow, RoundedCornerShape(12.dp))
-            .border(BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.15f)), RoundedCornerShape(12.dp))
-            .padding(10.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        steps.forEachIndexed { index, stepName ->
-            val isActive = index == currentStep
-            val isDone = index < currentStep
-            
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.Center
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(14.dp)
-                        .background(
-                            color = when {
-                                isDone -> M3_Pos.copy(alpha = 0.2f)
-                                isActive -> M3_Primary.copy(alpha = 0.2f)
-                                else -> M3_SurfaceContainerHighest
-                            },
-                            shape = CircleShape
-                        )
-                        .border(
-                            width = 1.dp,
-                            color = when {
-                                isDone -> M3_Pos
-                                isActive -> M3_Primary
-                                else -> M3_OutlineVariant.copy(alpha = 0.5f)
-                            },
-                            shape = CircleShape
-                        ),
-                    contentAlignment = Alignment.Center
-                ) {
-                    if (isDone) {
-                        Icon(
-                            imageVector = Icons.Rounded.Check,
-                            contentDescription = null,
-                            tint = M3_Pos,
-                            modifier = Modifier.size(8.dp)
-                        )
-                    } else if (isActive) {
-                        Box(
-                            modifier = Modifier
-                                .size(5.dp)
-                                .background(M3_Primary, CircleShape)
-                        )
-                    }
-                }
-                Spacer(modifier = Modifier.width(4.dp))
-                Text(
-                    text = stepName,
-                    color = when {
-                        isDone -> M3_OnSurfaceVariant
-                        isActive -> Color.White
-                        else -> M3_OnSurfaceVariant.copy(alpha = 0.5f)
-                    },
-                    style = AppTypography.eyebrow.copy(fontWeight = if (isActive) FontWeight.Bold else FontWeight.Medium)
-                )
-            }
-            if (index < steps.size - 1) {
-                Icon(
-                    imageVector = Icons.Rounded.ChevronRight,
-                    contentDescription = null,
-                    tint = M3_OnSurfaceVariant.copy(alpha = 0.3f),
-                    modifier = Modifier.size(10.dp)
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun SyncingStepScreen(
-    progress: Float,
-    message: String,
-    loadError: String?,
-    logs: List<String>,
-    etaSeconds: Int,
-    totalMessages: Int,
-    transactionalCount: Int,
-    parsedCount: Int,
-    spendsTotal: Double,
-    recentTransactions: List<ExtractedTxPreview>,
-    hasNotificationPermission: Boolean
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(horizontal = 24.dp, vertical = 16.dp)
-            .verticalScroll(rememberScrollState()),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        if (loadError != null) {
-            Spacer(modifier = Modifier.height(48.dp))
-            Icon(
-                imageVector = Icons.Rounded.Error,
-                contentDescription = null,
-                tint = M3_Error,
-                modifier = Modifier.size(48.dp)
-            )
-            Spacer(modifier = Modifier.height(16.dp))
-            Text(
-                text = "Sync Failed",
-                color = M3_OnSurface,
-                style = AppTypography.screenHeader
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-            Text(
-                text = loadError,
-                color = M3_Error,
-                style = MaterialTheme.typography.bodySmall,
-                textAlign = TextAlign.Center,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp)
-            )
-        } else {
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // 1. Progress Hub: Circular Progress Wheel
-            Box(
-                modifier = Modifier
-                    .size(140.dp)
-                    .background(M3_SurfaceContainerLow, CircleShape)
-                    .border(BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.15f)), CircleShape),
-                contentAlignment = Alignment.Center
-            ) {
-                val animatedProgress by animateFloatAsState(
-                    targetValue = progress,
-                    animationSpec = ProgressIndicatorDefaults.ProgressAnimationSpec,
-                    label = "SyncProgressAnimation"
-                )
-
-                CircularProgressIndicator(
-                    progress = { 1f },
-                    modifier = Modifier.fillMaxSize().padding(3.dp),
-                    color = M3_SurfaceContainerHighest.copy(alpha = 0.4f),
-                    strokeWidth = 4.dp
-                )
-
-                CircularProgressIndicator(
-                    progress = { animatedProgress },
-                    modifier = Modifier.fillMaxSize().padding(3.dp),
-                    color = M3_Primary,
-                    strokeWidth = 4.dp
-                )
-
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    Text(
-                        text = "${(progress * 100).toInt()}%",
-                        color = Color.White,
-                        style = AppTypography.headlineMediumBold
-                    )
-                    Spacer(modifier = Modifier.height(2.dp))
-                    
-                    val etaText = if (etaSeconds > 0) {
-                        val mins = etaSeconds / 60
-                        val secs = etaSeconds % 60
-                        if (mins > 0) {
-                            "~${mins}m ${secs}s left"
-                        } else {
-                            "~${secs}s left"
-                        }
-                    } else {
-                        "SYNCING"
-                    }
-                    Text(
-                        text = etaText,
-                        color = M3_OnSurfaceVariant,
-                        style = AppTypography.timestamp
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // 2. Current Action Ticker
-            Text(
-                text = message,
-                color = Color.White,
-                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
-                textAlign = TextAlign.Center,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.padding(horizontal = 16.dp)
-            )
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            BackgroundWorkNotice(
-                hasNotificationPermission = hasNotificationPermission
-            )
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // 3. Stage Stepper (Pipeline Stage Tracker)
-            PipelineStepper(progress = progress)
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // 4. Live Stats Grid (Spends and Parse Count Cards)
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                // Spends Card
-                Column(
-                    modifier = Modifier
-                        .weight(1f)
-                        .background(M3_SurfaceContainerLow, RoundedCornerShape(16.dp))
-                        .border(BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.2f)), RoundedCornerShape(16.dp))
-                        .padding(12.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "SPENDS DETECTED",
-                            color = M3_OnSurfaceVariant,
-                            style = AppTypography.eyebrow
-                        )
-                        Icon(
-                            imageVector = Icons.Rounded.TrendingDown,
-                            contentDescription = null,
-                            tint = M3_Pos,
-                            modifier = Modifier.size(12.dp)
-                        )
-                    }
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Text(
-                        text = "₹${"%,.2f".format(spendsTotal)}",
-                        color = Color.White,
-                        style = AppTypography.sectionHeadingBold
-                    )
-                }
-
-                // AI Pipeline Card
-                Column(
-                    modifier = Modifier
-                        .weight(1f)
-                        .background(M3_SurfaceContainerLow, RoundedCornerShape(16.dp))
-                        .border(BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.2f)), RoundedCornerShape(16.dp))
-                        .padding(12.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "AI PIPELINE",
-                            color = M3_OnSurfaceVariant,
-                            style = AppTypography.eyebrow
-                        )
-                        Icon(
-                            imageVector = Icons.Rounded.Memory,
-                            contentDescription = null,
-                            tint = M3_Primary,
-                            modifier = Modifier.size(12.dp)
-                        )
-                    }
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Text(
-                        text = "$parsedCount / ${if (transactionalCount > 0) transactionalCount else "-"}",
-                        color = Color.White,
-                        style = AppTypography.sectionHeadingBold
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // 5. Rolling Transaction Feed
-            AnimatedVisibility(
-                visible = recentTransactions.isNotEmpty(),
-                enter = fadeIn()
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(M3_SurfaceContainerLow, RoundedCornerShape(16.dp))
-                        .border(BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.2f)), RoundedCornerShape(16.dp))
-                        .padding(12.dp)
-                ) {
-                    Text(
-                        text = "LIVE EXTRACTIONS",
-                        color = M3_Primary,
-                        style = AppTypography.eyebrow,
-                        modifier = Modifier.padding(bottom = 8.dp)
-                    )
-                    
-                    Column(
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        recentTransactions.take(2).forEach { tx ->
-                            key(tx.merchant + tx.amount) {
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .background(M3_SurfaceContainerHighest.copy(alpha = 0.3f), RoundedCornerShape(12.dp))
-                                        .border(BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.1f)), RoundedCornerShape(12.dp))
-                                        .padding(8.dp)
-                                        .animateContentSize(),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(28.dp)
-                                            .background(M3_Primary.copy(alpha = 0.15f), CircleShape),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Rounded.ReceiptLong,
-                                            contentDescription = null,
-                                            tint = M3_Primary,
-                                            modifier = Modifier.size(14.dp)
-                                        )
-                                    }
-                                    Spacer(modifier = Modifier.width(10.dp))
-                                    Column(
-                                        modifier = Modifier.weight(1f)
-                                    ) {
-                                        Text(
-                                            text = tx.merchant,
-                                            color = M3_OnSurface,
-                                            style = AppTypography.eyebrowBold,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                        Text(
-                                            text = "On-Device extraction",
-                                            color = M3_OnSurfaceVariant,
-                                            style = MaterialTheme.typography.bodySmall
-                                        )
-                                    }
-                                    Text(
-                                        text = "₹${"%,.2f".format(tx.amount)}",
-                                        color = if (tx.type == "debit") M3_OnSurface else M3_Pos,
-                                        style = AppTypography.eyebrowBold
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            if (recentTransactions.isNotEmpty()) {
-                Spacer(modifier = Modifier.height(16.dp))
-            }
-
-            // 6. Rotating Tips Carousel
-            val techTips = remember {
-                listOf(
-                    "🔒 100% On-Device: Your financial data is parsed locally by the AI. It never reaches the cloud.",
-                    "🚀 Hardware Accelerated: Optimized matrix operations run locally using optimized CPU instructions.",
-                    "💾 AES-256 Encrypted: Extracted transactions are stored in a secure local SQLCipher database.",
-                    "💡 Smart Filters: Promotional messages and personal chats are filtered out instantly, preserving privacy.",
-                    "🤖 Local AI: A specialized Small Language Model extracts dates, merchants, and amounts with high accuracy."
-                )
-            }
-            var currentTipIndex by remember { mutableIntStateOf(0) }
-            LaunchedEffect(Unit) {
-                while (true) {
-                    delay(5000)
-                    currentTipIndex = (currentTipIndex + 1) % techTips.size
-                }
-            }
-
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(M3_SurfaceContainerLowest, RoundedCornerShape(16.dp))
-                    .border(BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.2f)), RoundedCornerShape(16.dp))
-                    .padding(12.dp)
-            ) {
-                Row(
-                    verticalAlignment = Alignment.Top,
-                    modifier = Modifier.padding(2.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Lightbulb,
-                        contentDescription = null,
-                        tint = M3_Primary,
-                        modifier = Modifier.size(16.dp).padding(top = 1.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    AnimatedContent(
-                        targetState = techTips[currentTipIndex],
-                        transitionSpec = {
-                            fadeIn(animationSpec = tween(400)).togetherWith(
-                                fadeOut(animationSpec = tween(400))
-                            )
-                        },
-                        label = "TipsCarouselAnimation"
-                    ) { tipText ->
-                        Text(
-                            text = tipText,
-                            color = M3_OnSurfaceVariant,
-                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Medium)
-                        )
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // 7. Raw Engine Logs Drawer (Collapsible)
-            var showLogs by remember { mutableStateOf(false) }
-            
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(M3_SurfaceContainerLow, RoundedCornerShape(12.dp))
-                    .border(BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.15f)), RoundedCornerShape(12.dp))
-                    .animateContentSize()
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp))
-                        .clickable { showLogs = !showLogs }
-                        .padding(horizontal = 12.dp, vertical = 10.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(
-                            modifier = Modifier
-                                .size(6.dp)
-                                .background(Color(0xFF4CAF50), CircleShape)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = "RAW ENGINE LOGS",
-                            color = M3_OnSurfaceVariant,
-                            style = AppTypography.eyebrow
-                        )
-                    }
-                    Icon(
-                        imageVector = if (showLogs) Icons.Rounded.KeyboardArrowUp else Icons.Rounded.KeyboardArrowDown,
-                        contentDescription = if (showLogs) "Collapse" else "Expand",
-                        tint = M3_OnSurfaceVariant,
-                        modifier = Modifier.size(16.dp)
-                    )
-                }
-
-                if (showLogs) {
-                    Divider(color = M3_OutlineVariant.copy(alpha = 0.15f))
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(130.dp)
-                            .padding(12.dp)
-                    ) {
-                        val scrollState = rememberScrollState()
-                        LaunchedEffect(logs.size) {
-                            scrollState.animateScrollTo(scrollState.maxValue)
-                        }
-
-                        Column(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .verticalScroll(scrollState),
-                            verticalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            if (logs.isEmpty()) {
-                                Text(
-                                    text = "▶ Awaiting pipeline connection...",
-                                    color = M3_OnSurfaceVariant.copy(alpha = 0.5f),
-                                    style = AppTypography.monoBody
-                                )
-                            } else {
-                                logs.forEach { log ->
-                                    val isArrow = log.startsWith("➔") || log.contains("➔")
-                                    val isError = log.startsWith("Error")
-                                    val color = when {
-                                        isError -> M3_Error
-                                        isArrow -> M3_Primary
-                                        else -> M3_OnSurfaceVariant
-                                    }
-                                    Text(
-                                        text = log,
-                                        color = color,
-                                        style = AppTypography.monoBody
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(24.dp))
-        }
-    }
-}
-
-private fun Modifier.fillGridModifier(): Modifier = this
-    .fillMaxWidth()
-    .background(M3_Background)
-
-private fun android.content.Context.findActivity(): Activity? {
-    var context = this
-    while (context is ContextWrapper) {
-        if (context is Activity) return context
-        context = context.baseContext
+private fun Context.findActivity(): Activity? {
+    var current = this
+    while (current is ContextWrapper) {
+        if (current is Activity) return current
+        current = current.baseContext
     }
     return null
 }
