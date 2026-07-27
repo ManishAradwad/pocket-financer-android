@@ -38,7 +38,12 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Before
@@ -55,8 +60,15 @@ class SmsWorkSchedulerImplTest {
     @Before
     fun setUp() {
         mockkObject(WorkManager.Companion)
+        mockkObject(SmsNotificationHelper)
         mockkStatic(Log::class)
         every { Log.i(any(), any()) } returns 0
+        every {
+            SmsNotificationHelper.cancelCandidateNotification(
+                any(),
+                any()
+            )
+        } returns Unit
         every { WorkManager.getInstance(context) } returns workManager
         every { automaticPreferences.enabled } returns enabled
         coEvery {
@@ -80,6 +92,9 @@ class SmsWorkSchedulerImplTest {
         )
         coEvery { ingestionRepository.discardPendingAutomatic() } returns 0
         coEvery {
+            ingestionRepository.pendingAutomaticCandidates()
+        } returns emptyList()
+        coEvery {
             ingestionRepository.pendingAutomaticCandidateKeys()
         } returns emptyList()
     }
@@ -87,6 +102,7 @@ class SmsWorkSchedulerImplTest {
     @After
     fun tearDown() {
         unmockkObject(WorkManager.Companion)
+        unmockkObject(SmsNotificationHelper)
         unmockkStatic(Log::class)
     }
 
@@ -146,6 +162,37 @@ class SmsWorkSchedulerImplTest {
                     any(),
                     any<ExistingWorkPolicy>(),
                     any<OneTimeWorkRequest>()
+                )
+            }
+        }
+
+    @Test
+    fun `disabled intake cancels notifications for pending candidates it deletes`() =
+        runTest {
+            enabled.value = false
+            val pending = pendingCandidate()
+            coEvery {
+                ingestionRepository.pendingAutomaticCandidates()
+            } returns listOf(pending)
+            coEvery {
+                ingestionRepository.discardPendingAutomatic()
+            } returns 1
+            val scheduler = SmsWorkSchedulerImpl(
+                context,
+                SmsWorkAdmissionGate(),
+                ingestionRepository,
+                automaticPreferences
+            )
+
+            assertEquals(
+                SmsScheduleResult.AUTOMATIC_DISABLED,
+                scheduler.scheduleSmsParsing(transactionSms())
+            )
+
+            verify(exactly = 1) {
+                SmsNotificationHelper.cancelCandidateNotification(
+                    context,
+                    pending.candidateKey
                 )
             }
         }
@@ -328,6 +375,25 @@ class SmsWorkSchedulerImplTest {
         providerMessageId = "42"
     )
 
+    private fun pendingCandidate() = QueuedSmsCandidate(
+        candidateKey = "pending-notification",
+        sourceIdentity = SmsSourceIdentity.androidSms(
+            providerMessageId = null,
+            sender = "AX-HDFCBK",
+            body = "Rs 500 debited",
+            sourceTimestamp = 1_000L,
+            messageType = 1
+        ),
+        sender = "AX-HDFCBK",
+        rawMessage = "Rs 500 debited",
+        date = 1_000L,
+        sourceTimestamp = 1_000L,
+        messageType = 1,
+        origin = SmsCandidateOrigin.AUTOMATIC,
+        claimToken = null,
+        attemptCount = 0
+    )
+
     private fun completedOperation(): Operation {
         val future = TestListenableFuture<Operation.State.SUCCESS>()
         future.complete(Operation.SUCCESS)
@@ -468,6 +534,93 @@ class SmsParserWorkerPolicyTest {
             }
         }
 
+    @Test
+    fun `lost retry ownership finishes without a futile WorkManager retry`() =
+        runTest {
+            val ingestionRepository = mockk<SmsIngestionRepository>()
+            val automaticPreferences =
+                mockk<AutomaticProcessingPreferences>()
+            coEvery {
+                automaticPreferences
+                    .withConsistencyBoundary<SmsCandidateRetrySettlement>(any())
+            } coAnswers {
+                firstArg<suspend (Boolean) -> SmsCandidateRetrySettlement>()
+                    .invoke(true)
+            }
+            coEvery {
+                ingestionRepository.releaseForRetry(
+                    candidateKey = "opaque-key",
+                    claimToken = "stale-owner",
+                    error = "local failure"
+                )
+            } returns false
+
+            assertEquals(
+                SmsCandidateRetrySettlement.FINISHED,
+                settleClaimedCandidateForRetry(
+                    candidate = queuedCandidate(SmsCandidateOrigin.AUTOMATIC),
+                    claimToken = "stale-owner",
+                    error = "local failure",
+                    automaticProcessingPreferences = automaticPreferences,
+                    ingestionRepository = ingestionRepository
+                )
+            )
+        }
+
+    @Test
+    fun `model prerequisite retries do not consume operational failure budget`() {
+        assertTrue(
+            hasRetryBudget(
+                SmsCandidateRetryMode.UNTIL_MODEL_PREPARED,
+                runAttemptCount = Int.MAX_VALUE
+            )
+        )
+        assertTrue(
+            hasRetryBudget(
+                SmsCandidateRetryMode.BOUNDED_OPERATIONAL,
+                runAttemptCount = MAX_OPERATIONAL_RETRY_ATTEMPTS - 1
+            )
+        )
+        assertFalse(
+            hasRetryBudget(
+                SmsCandidateRetryMode.BOUNDED_OPERATIONAL,
+                runAttemptCount = MAX_OPERATIONAL_RETRY_ATTEMPTS
+            )
+        )
+    }
+
+    @Test
+    @OptIn(ExperimentalCoroutinesApi::class)
+    fun `cancellation waits for non-cancellable settlement and remains cancelled`() =
+        runTest {
+            val settlementStarted = CompletableDeferred<Unit>()
+            val allowSettlement = CompletableDeferred<Unit>()
+            var completionCause: Throwable? = null
+            val job = launch {
+                try {
+                    awaitCancellation()
+                } catch (cancelled: CancellationException) {
+                    rethrowAfterNonCancellableSettlement(cancelled) {
+                        settlementStarted.complete(Unit)
+                        allowSettlement.await()
+                    }
+                }
+            }
+            job.invokeOnCompletion { completionCause = it }
+            runCurrent()
+
+            job.cancel(CancellationException("worker stopped"))
+            settlementStarted.await()
+            runCurrent()
+
+            assertFalse(job.isCompleted)
+            allowSettlement.complete(Unit)
+            job.join()
+
+            assertTrue(job.isCancelled)
+            assertEquals("worker stopped", completionCause?.message)
+        }
+
     private fun queuedCandidate(
         origin: SmsCandidateOrigin
     ): QueuedSmsCandidate = QueuedSmsCandidate(
@@ -579,6 +732,28 @@ class SmsParserWorkerPolicyTest {
             }
         }
     }
+
+    @Test
+    fun `candidate fetch and claim exceptions remain retryable until durable settlement`() =
+        runTest {
+            listOf(
+                "encrypted candidate fetch failed",
+                "automatic candidate claim failed"
+            ).forEach { failureMessage ->
+                val retry = ListenableWorker.Result.retry()
+                var reported: Exception? = null
+
+                val result = protectSmsParserChain(
+                    onFailure = { reported = it },
+                    retryOrFinishChain = { retry }
+                ) {
+                    throw IllegalStateException(failureMessage)
+                }
+
+                assertSame(retry, result)
+                assertEquals(failureMessage, reported?.message)
+            }
+        }
 }
 
 private class TestListenableFuture<T> : ListenableFuture<T> {

@@ -20,22 +20,46 @@ interface QueuedSmsCandidateDao {
         WHERE sourceConnector = :connector
           AND (
             sourceMessageId = :messageId
-            OR sourceFingerprint = :fingerprint
-            OR sourceAlternateFingerprint = :fingerprint
             OR (
-                :alternateFingerprint IS NOT NULL
+                :providerMessageId IS NOT NULL
+                AND sourceProviderMessageId = :providerMessageId
+            )
+            OR (
+                (
+                    :providerMessageId IS NULL
+                    OR sourceProviderMessageId IS NULL
+                )
                 AND (
-                    sourceFingerprint = :alternateFingerprint
-                    OR sourceAlternateFingerprint = :alternateFingerprint
+                    sourceFingerprint = :fingerprint
+                    OR sourceAlternateFingerprint = :fingerprint
+                    OR (
+                        :alternateFingerprint IS NOT NULL
+                        AND (
+                            sourceFingerprint = :alternateFingerprint
+                            OR sourceAlternateFingerprint =
+                                :alternateFingerprint
+                        )
+                    )
                 )
             )
           )
+        ORDER BY
+            CASE
+                WHEN sourceMessageId = :messageId THEN 0
+                WHEN :providerMessageId IS NOT NULL
+                    AND sourceProviderMessageId = :providerMessageId THEN 1
+                WHEN sourceProviderMessageId IS NULL THEN 2
+                ELSE 3
+            END,
+            createdAt ASC,
+            candidateKey ASC
         LIMIT 1
         """
     )
     suspend fun findBySource(
         connector: String,
         messageId: String,
+        providerMessageId: String?,
         fingerprint: String,
         alternateFingerprint: String?
     ): QueuedSmsCandidateEntity?
@@ -43,7 +67,17 @@ interface QueuedSmsCandidateDao {
     @Query(
         """
         UPDATE queued_sms_candidates
-        SET sourceProviderMessageId =
+        SET sourceMessageId =
+                CASE
+                    WHEN :providerMessageId IS NOT NULL
+                        AND (
+                            sourceProviderMessageId IS NULL
+                            OR sourceProviderMessageId = :providerMessageId
+                        )
+                        THEN :messageId
+                    ELSE sourceMessageId
+                END,
+            sourceProviderMessageId =
                 COALESCE(sourceProviderMessageId, :providerMessageId),
             sourceAlternateFingerprint =
                 COALESCE(
@@ -71,6 +105,7 @@ interface QueuedSmsCandidateDao {
     )
     suspend fun preserveSourceMetadata(
         candidateKey: String,
+        messageId: String,
         providerMessageId: String?,
         fingerprint: String,
         alternateFingerprint: String?,
@@ -155,31 +190,6 @@ interface QueuedSmsCandidateDao {
     @Query(
         """
         DELETE FROM queued_sms_candidates
-        WHERE sourceConnector = :connector
-          AND (
-            sourceMessageId = :messageId
-            OR sourceFingerprint = :fingerprint
-            OR sourceAlternateFingerprint = :fingerprint
-            OR (
-                :alternateFingerprint IS NOT NULL
-                AND (
-                    sourceFingerprint = :alternateFingerprint
-                    OR sourceAlternateFingerprint = :alternateFingerprint
-                )
-            )
-          )
-        """
-    )
-    suspend fun deleteBySource(
-        connector: String,
-        messageId: String,
-        fingerprint: String,
-        alternateFingerprint: String?
-    ): Int
-
-    @Query(
-        """
-        DELETE FROM queued_sms_candidates
         WHERE origin = 'automatic' AND state = 'pending'
         """
     )
@@ -209,6 +219,15 @@ interface QueuedSmsCandidateDao {
         """
     )
     suspend fun getPendingAutomaticKeys(): List<String>
+
+    @Query(
+        """
+        SELECT * FROM queued_sms_candidates
+        WHERE origin = 'automatic' AND state = 'pending'
+        ORDER BY createdAt ASC, candidateKey ASC
+        """
+    )
+    suspend fun getPendingAutomaticCandidates(): List<QueuedSmsCandidateEntity>
 
     @Query("SELECT COUNT(*) FROM queued_sms_candidates")
     suspend fun count(): Int

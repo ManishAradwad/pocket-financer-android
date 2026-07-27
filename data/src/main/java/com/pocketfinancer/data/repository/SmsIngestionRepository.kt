@@ -51,23 +51,28 @@ class SmsIngestionRepository @Inject constructor(
             val existingTransaction = transactionDao.findBySource(
                 connector = source.connector,
                 messageId = source.messageId,
+                providerMessageId = source.providerMessageId,
                 fingerprint = source.fallbackFingerprint,
                 alternateFingerprint = source.alternateFingerprint
             )
             if (existingTransaction != null) {
                 transactionDao.preserveSourceMetadata(
                     transactionId = existingTransaction.id,
+                    messageId = source.messageId,
                     providerMessageId = source.providerMessageId,
                     fingerprint = source.fallbackFingerprint,
                     alternateFingerprint = source.alternateFingerprint,
                     receivedDate = candidate.date
                 )
-                candidateDao.deleteBySource(
+                candidateDao.findBySource(
                     connector = source.connector,
                     messageId = source.messageId,
+                    providerMessageId = source.providerMessageId,
                     fingerprint = source.fallbackFingerprint,
                     alternateFingerprint = source.alternateFingerprint
-                )
+                )?.let { queued ->
+                    candidateDao.deleteByKey(queued.candidateKey)
+                }
                 return@withTransaction AdmissionResult.AlreadySaved(
                     transactionId = existingTransaction.id,
                     candidateKey = source.opaqueCandidateKey
@@ -78,12 +83,14 @@ class SmsIngestionRepository @Inject constructor(
             val existingCandidate = candidateDao.findBySource(
                 connector = source.connector,
                 messageId = source.messageId,
+                providerMessageId = source.providerMessageId,
                 fingerprint = source.fallbackFingerprint,
                 alternateFingerprint = source.alternateFingerprint
             )
             if (existingCandidate != null) {
                 candidateDao.preserveSourceMetadata(
                     candidateKey = existingCandidate.candidateKey,
+                    messageId = source.messageId,
                     providerMessageId = source.providerMessageId,
                     fingerprint = source.fallbackFingerprint,
                     alternateFingerprint = source.alternateFingerprint,
@@ -124,6 +131,7 @@ class SmsIngestionRepository @Inject constructor(
             val conflictingCandidate = candidateDao.findBySource(
                 connector = source.connector,
                 messageId = source.messageId,
+                providerMessageId = source.providerMessageId,
                 fingerprint = source.fallbackFingerprint,
                 alternateFingerprint = source.alternateFingerprint
             ) ?: error(
@@ -131,6 +139,7 @@ class SmsIngestionRepository @Inject constructor(
             )
             candidateDao.preserveSourceMetadata(
                 candidateKey = conflictingCandidate.candidateKey,
+                messageId = source.messageId,
                 providerMessageId = source.providerMessageId,
                 fingerprint = source.fallbackFingerprint,
                 alternateFingerprint = source.alternateFingerprint,
@@ -212,6 +221,9 @@ class SmsIngestionRepository @Inject constructor(
 
     suspend fun pendingAutomaticCandidateKeys(): List<String> =
         candidateDao.getPendingAutomaticKeys()
+
+    suspend fun pendingAutomaticCandidates(): List<QueuedSmsCandidate> =
+        candidateDao.getPendingAutomaticCandidates().map { it.toDomain() }
 
     suspend fun pendingCount(): Int = candidateDao.count()
 

@@ -28,7 +28,9 @@ import com.pocketfinancer.pipeline.SmsFilterPipeline
 import com.pocketfinancer.setup.SetupImportStore
 import com.pocketfinancer.setup.SetupImportState
 import com.pocketfinancer.setup.SetupImportStatus
+import com.pocketfinancer.setup.FakeSharedPreferences
 import com.pocketfinancer.sms.SmsRepository
+import com.pocketfinancer.sms.SmsReader
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
@@ -36,12 +38,376 @@ import io.mockk.mockk
 import io.mockk.mockkStatic
 import io.mockk.unmockkStatic
 import java.io.File
+import kotlin.io.path.createTempDirectory
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
+import io.mockk.verify
 
 class HomeSyncManagerTest {
+
+    @Test
+    fun `recent scan preserves distinct provider ids and fixed coverage end`() =
+        runBlocking {
+            val context = mockk<Context>()
+            val sharedPreferences = mockk<SharedPreferences>()
+            val smsRepository = mockk<SmsRepository>()
+            val transactionRepository =
+                mockk<TransactionRepository>(relaxed = true)
+            val runtime = mockk<SlmRuntime>()
+            val setupPreferences = FakeSharedPreferences()
+            val setupStore = SetupImportStore(
+                setupPreferences.preferences,
+                hasSmsPermissions = true
+            )
+            setupStore.completeRequiredPermissions()
+            setupStore.update {
+                it.copy(
+                    status = SetupImportStatus.READY,
+                    modelPrepared = true
+                )
+            }
+            val first = SmsReader.SmsMessage(
+                address = "AX-BANK",
+                body = "Rs 500 debited from a/c XX0000",
+                date = 5_000L,
+                type = 1,
+                providerMessageId = "provider-1"
+            )
+            val second = first.copy(providerMessageId = "provider-2")
+            var providerMaxDate = -1L
+
+            every {
+                context.getSharedPreferences(
+                    ".app_settings",
+                    Context.MODE_PRIVATE
+                )
+            } returns sharedPreferences
+            every {
+                sharedPreferences.getBoolean(
+                    "onboarding_completed",
+                    false
+                )
+            } returns true
+            every { smsRepository.hasPermissions() } returns true
+            every {
+                smsRepository.fetchHistory(
+                    daysBack = 7,
+                    limit = Int.MAX_VALUE,
+                    maxDate = any()
+                )
+            } answers {
+                providerMaxDate = thirdArg()
+                listOf(first, second)
+            }
+            coEvery {
+                transactionRepository.preserveSourceMetadataIfExists(
+                    any(),
+                    any()
+                )
+            } returns false
+            every { runtime.state } returns
+                MutableStateFlow(SlmRuntimeState())
+
+            val manager = HomeSyncManager(
+                context = context,
+                smsRepository = smsRepository,
+                smsFilterPipeline = SmsFilterPipeline(),
+                transactionRepository = transactionRepository,
+                accountRepository = mockk(relaxed = true),
+                slmRuntime = runtime,
+                appFlowCoordinator = SlmAppFlowCoordinator(),
+                modelStorage = mockk(relaxed = true),
+                deviceCapabilities = mockk(relaxed = true),
+                promptBuilder = mockk(relaxed = true),
+                extractionParser = mockk(relaxed = true),
+                slmProcessingPreferences = mockk(relaxed = true),
+                setupImportStore = setupStore
+            )
+
+            manager.checkForUnsyncedSms()
+
+            assertEquals(2, manager.syncState.value.queue.size)
+            assertEquals(
+                setOf("provider-1", "provider-2"),
+                manager.syncState.value.queue
+                    .mapNotNull { it.sourceIdentity.providerMessageId }
+                    .toSet()
+            )
+            assertTrue(providerMaxDate > 0L)
+            assertEquals(
+                providerMaxDate,
+                setupStore.state.value.recentCoverageEndMillis
+            )
+            assertEquals(
+                2,
+                setupStore.state.value.recentEligibleCandidateCount
+            )
+            assertEquals(
+                0,
+                setupStore.state.value.recentProcessedCount
+            )
+        }
+
+    @Test
+    fun `recent provider scan waits for in flight manual execution`() =
+        runBlocking {
+            val modelDirectory =
+                createTempDirectory("home-operation-lock").toFile()
+            val modelFile = File(
+                modelDirectory,
+                SlmTier.QWEN3_0_6B_Q8_0.modelFile
+            )
+            modelFile.writeBytes(byteArrayOf(1))
+            try {
+                val context = mockk<Context>()
+                val sharedPreferences = mockk<SharedPreferences>()
+                val smsRepository = mockk<SmsRepository>()
+                val transactionRepository =
+                    mockk<TransactionRepository>(relaxed = true)
+                val runtime = mockk<SlmRuntime>()
+                val lease = mockk<SlmLease>()
+                val storage = mockk<SlmModelStorage>()
+                val deviceCapabilities = mockk<DeviceCapabilities>()
+                val promptBuilder = mockk<PromptBuilder>()
+                val preferences = mockk<SlmProcessingPreferences>()
+                val extractionStarted = CompletableDeferred<Unit>()
+                val allowExtraction = CompletableDeferred<Unit>()
+                val spec = SlmModelSpec(
+                    modelId = SlmTier.QWEN3_0_6B_Q8_0.id,
+                    modelPath = modelFile.absolutePath,
+                    artifactRevision = "test",
+                    hasThinkingMode = false
+                )
+
+                every {
+                    context.getSharedPreferences(
+                        ".app_settings",
+                        Context.MODE_PRIVATE
+                    )
+                } returns sharedPreferences
+                every {
+                    sharedPreferences.getBoolean(
+                        "onboarding_completed",
+                        false
+                    )
+                } returns true
+                every {
+                    sharedPreferences.getString("selected_slm_id", null)
+                } returns null
+                every { smsRepository.hasPermissions() } returns true
+                every {
+                    smsRepository.fetchHistory(
+                        daysBack = 7,
+                        limit = Int.MAX_VALUE,
+                        maxDate = any()
+                    )
+                } returns emptyList()
+                every { runtime.state } returns
+                    MutableStateFlow(SlmRuntimeState())
+                every { deviceCapabilities.assessDevice() } returns
+                    testDeviceInfo()
+                every { storage.modelDirectory } returns modelDirectory
+                every { storage.modelFile(any()) } answers {
+                    File(modelDirectory, firstArg<String>())
+                }
+                every { preferences.gbnfGrammarEnabled } returns
+                    MutableStateFlow(false)
+                every { lease.model } returns spec
+                every { lease.isReleased } returns false
+                every { lease.owner } returns SlmRuntimeOwner.HOME_SYNC
+                coEvery {
+                    runtime.acquire(SlmRuntimeOwner.HOME_SYNC, any())
+                } returns lease
+                coEvery { lease.release() } returns Unit
+                coEvery {
+                    transactionRepository.exists(any<SmsSourceIdentity>())
+                } returns false
+                coEvery {
+                    transactionRepository.preserveSourceMetadataIfExists(
+                        any(),
+                        any()
+                    )
+                } returns false
+                every {
+                    promptBuilder.buildExtractionPrompt(any(), any())
+                } returns "raw prompt"
+                every {
+                    promptBuilder.buildChatPrompt(any(), any())
+                } returns "chat prompt"
+                every { promptBuilder.getStaticPrefix() } returns
+                    "static prefix"
+                coEvery { lease.extract(any()) } coAnswers {
+                    extractionStarted.complete(Unit)
+                    allowExtraction.await()
+                    SlmExtractionResult.Null(model = spec)
+                }
+
+                val manager = HomeSyncManager(
+                    context = context,
+                    smsRepository = smsRepository,
+                    smsFilterPipeline = SmsFilterPipeline(),
+                    transactionRepository = transactionRepository,
+                    accountRepository = mockk(relaxed = true),
+                    slmRuntime = runtime,
+                    appFlowCoordinator = SlmAppFlowCoordinator(),
+                    modelStorage = storage,
+                    deviceCapabilities = deviceCapabilities,
+                    promptBuilder = promptBuilder,
+                    extractionParser = mockk(relaxed = true),
+                    slmProcessingPreferences = preferences,
+                    setupImportStore = readySetupStore()
+                )
+                manager.queueIncomingSms(
+                    address = "AX-BANK",
+                    body = "Rs 500 debited from a/c XX0000",
+                    date = 1_000L
+                )
+
+                val execution = async(Dispatchers.Default) {
+                    manager.executeSync(mockk())
+                }
+                withTimeout(5_000L) {
+                    extractionStarted.await()
+                }
+                val scan = async(Dispatchers.Default) {
+                    manager.checkForUnsyncedSms()
+                }
+                delay(100L)
+
+                verify(exactly = 0) {
+                    smsRepository.fetchHistory(
+                        daysBack = any(),
+                        limit = any(),
+                        maxDate = any()
+                    )
+                }
+
+                allowExtraction.complete(Unit)
+                withTimeout(5_000L) {
+                    execution.await()
+                    scan.await()
+                }
+                verify(exactly = 1) {
+                    smsRepository.fetchHistory(
+                        daysBack = 7,
+                        limit = Int.MAX_VALUE,
+                        maxDate = any()
+                    )
+                }
+            } finally {
+                modelDirectory.deleteRecursively()
+            }
+        }
+
+    @Test
+    fun `foreground manual operation completes inside existing admission during model handoff`() =
+        runBlocking {
+            val coordinator = SlmAppFlowCoordinator()
+            val context = mockk<Context>()
+            val sharedPreferences = mockk<SharedPreferences>()
+            val smsRepository = mockk<SmsRepository>()
+            val transactionRepository =
+                mockk<TransactionRepository>(relaxed = true)
+            val runtime = mockk<SlmRuntime>()
+            val setupStore = readySetupStore()
+
+            every {
+                context.getSharedPreferences(
+                    ".app_settings",
+                    Context.MODE_PRIVATE
+                )
+            } returns sharedPreferences
+            every {
+                sharedPreferences.getBoolean(
+                    "onboarding_completed",
+                    false
+                )
+            } returns true
+            every { smsRepository.hasPermissions() } returns true
+            every {
+                smsRepository.fetchHistory(
+                    daysBack = 7,
+                    limit = Int.MAX_VALUE,
+                    maxDate = any()
+                )
+            } returns emptyList()
+            every { runtime.state } returns
+                MutableStateFlow(SlmRuntimeState())
+
+            val manager = HomeSyncManager(
+                context = context,
+                smsRepository = smsRepository,
+                smsFilterPipeline = SmsFilterPipeline(),
+                transactionRepository = transactionRepository,
+                accountRepository = mockk(relaxed = true),
+                slmRuntime = runtime,
+                appFlowCoordinator = coordinator,
+                modelStorage = mockk(relaxed = true),
+                deviceCapabilities = mockk(relaxed = true),
+                promptBuilder = mockk(relaxed = true),
+                extractionParser = mockk(relaxed = true),
+                slmProcessingPreferences = mockk(relaxed = true),
+                setupImportStore = setupStore
+            )
+            val outerAdmissionReady = CompletableDeferred<Unit>()
+            val continueInsidePause = CompletableDeferred<Unit>()
+
+            val serviceOperation = async(Dispatchers.Default) {
+                val admittedFlow = coordinator.enterWhenAvailable(
+                    SlmRuntimeOwner.HOME_SYNC
+                )
+                try {
+                    outerAdmissionReady.complete(Unit)
+                    continueInsidePause.await()
+                    manager.checkForUnsyncedSms(admittedFlow)
+                    assertEquals(
+                        HomeSyncState.RecentScanOutcome.SUCCESS,
+                        manager.syncState.value.recentScanOutcome
+                    )
+                    manager.executeSync(context, admittedFlow)
+                } finally {
+                    admittedFlow.release()
+                }
+            }
+            outerAdmissionReady.await()
+            val modelHandoff = async(Dispatchers.Default) {
+                val upgradeFlow = coordinator.enterWhenAvailable(
+                    SlmRuntimeOwner.MODEL_UPGRADE
+                )
+                try {
+                    val admissionPause = checkNotNull(
+                        coordinator.tryPauseAdmissionAndDrainOthers(
+                            SlmRuntimeOwner.MODEL_UPGRADE
+                        )
+                    )
+                    admissionPause.release()
+                } finally {
+                    upgradeFlow.release()
+                }
+            }
+
+            withTimeout(5_000L) {
+                coordinator.state.first { it.admissionPaused }
+            }
+            continueInsidePause.complete(Unit)
+            withTimeout(5_000L) {
+                serviceOperation.await()
+                modelHandoff.await()
+            }
+            assertEquals(
+                HomeSyncState.RecentScanOutcome.SUCCESS,
+                manager.syncState.value.recentScanOutcome
+            )
+        }
 
     @Test
     fun `flow contention is not reported as an empty successful scan`() =
@@ -89,7 +455,8 @@ class HomeSyncManagerTest {
     @Test
     fun `saved and concurrent-existing terminal rows discard Home source evidence`() =
         runBlocking {
-            val modelDirectory = createTempDir(prefix = "home-sync-privacy")
+            val modelDirectory =
+                createTempDirectory("home-sync-privacy").toFile()
             val modelFile = File(
                 modelDirectory,
                 SlmTier.QWEN3_0_6B_Q8_0.modelFile
@@ -134,6 +501,12 @@ class HomeSyncManagerTest {
                 } returns MutableStateFlow(false)
                 coEvery {
                     transactionRepository.exists(any<SmsSourceIdentity>())
+                } returns false
+                coEvery {
+                    transactionRepository.preserveSourceMetadataIfExists(
+                        any(),
+                        any()
+                    )
                 } returns false
                 every {
                     deviceCapabilities.assessDevice()
@@ -278,7 +651,7 @@ class HomeSyncManagerTest {
 
     @Test
     fun `grammar changes apply between SMS items in a foreground batch`() = runBlocking {
-        val modelDirectory = createTempDir(prefix = "home-sync-models")
+        val modelDirectory = createTempDirectory("home-sync-models").toFile()
         val modelFile = File(modelDirectory, SlmTier.QWEN3_0_6B_Q8_0.modelFile)
         modelFile.writeBytes(byteArrayOf(1))
         mockkStatic(Log::class)
@@ -315,6 +688,12 @@ class HomeSyncManagerTest {
             every { preferences.gbnfGrammarEnabled } returns gbnfEnabled
             coEvery {
                 transactionRepository.exists(any<SmsSourceIdentity>())
+            } returns false
+            coEvery {
+                transactionRepository.preserveSourceMetadataIfExists(
+                    any(),
+                    any()
+                )
             } returns false
             every { deviceCapabilities.assessDevice() } returns device
             every { storage.modelDirectory } returns modelDirectory

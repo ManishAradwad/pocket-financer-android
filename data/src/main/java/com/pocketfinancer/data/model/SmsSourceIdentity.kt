@@ -39,12 +39,16 @@ data class SmsSourceIdentity(
     /**
      * Opaque key safe to persist in WorkManager Data and notification ids.
      * It contains no sender, body, provider id, or timestamp in plaintext.
+     *
+     * The connector's authoritative message id is the consistency boundary:
+     * provider-backed rows with identical evidence remain distinct, while a
+     * provider-less delivery still uses its deterministic fallback message id.
      */
     val opaqueCandidateKey: String
         get() = "sms_" + sha256(
             lengthDelimited(
                 connector,
-                fallbackFingerprint
+                messageId
             )
         )
 

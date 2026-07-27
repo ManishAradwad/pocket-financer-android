@@ -95,6 +95,7 @@ data class SettingsUiState(
     val automaticProcessingChangeRunning: Boolean = false,
     val automaticProcessingError: String? = null,
     val gbnfGrammarEnabled: Boolean = false,
+    val gbnfGrammarError: String? = null,
     val readSmsPermissionGranted: Boolean = false,
     val receiveSmsPermissionGranted: Boolean = false,
     val notificationPermissionRequired: Boolean = false,
@@ -681,7 +682,16 @@ class SettingsViewModel @Inject constructor(
     }
 
     fun setGbnfGrammarEnabled(enabled: Boolean) {
-        slmProcessingPreferences.setGbnfGrammarEnabled(enabled)
+        try {
+            slmProcessingPreferences.setGbnfGrammarEnabled(enabled)
+            _state.value = _state.value.copy(gbnfGrammarError = null)
+        } catch (error: Exception) {
+            _state.value = _state.value.copy(
+                gbnfGrammarError =
+                    "Grammar preference was not changed: " +
+                        (error.message ?: "preference storage unavailable")
+            )
+        }
     }
 
     fun refreshPermissionHealth() {
@@ -721,15 +731,21 @@ class SettingsViewModel @Inject constructor(
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Exception) {
+                val automaticUpdatesStillEnabled =
+                    automaticProcessingPreferences.enabled.value
                 _state.value = _state.value.copy(
-                    automaticProcessingError = if (
-                        !enabled
-                    ) {
-                        "Automatic updates remain off, but pending-work cleanup failed: " +
-                            (error.message ?: "unknown error")
-                    } else {
-                        "Automatic updates remain off because pending-work cleanup failed: " +
-                            (error.message ?: "unknown error")
+                    automaticProcessingError = when {
+                        !enabled && automaticUpdatesStillEnabled ->
+                            "Automatic updates are still on because turning them off " +
+                                "could not be saved: " +
+                                (error.message ?: "unknown error")
+                        !enabled ->
+                            "Automatic updates are off, but pending-work cleanup failed: " +
+                                (error.message ?: "unknown error")
+                        else ->
+                            "Automatic updates remain off because the change could not " +
+                                "be completed: " +
+                                (error.message ?: "unknown error")
                     }
                 )
             } finally {

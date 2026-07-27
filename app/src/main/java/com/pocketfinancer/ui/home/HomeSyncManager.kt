@@ -3,6 +3,7 @@ package com.pocketfinancer.ui.home
 import android.content.Context
 import android.util.Log
 import com.pocketfinancer.SlmAppFlowCoordinator
+import com.pocketfinancer.SlmAppFlowLease
 import com.pocketfinancer.data.repository.AccountRepository
 import com.pocketfinancer.data.model.SmsSourceIdentity
 import com.pocketfinancer.data.repository.TransactionRepository
@@ -25,6 +26,7 @@ import com.pocketfinancer.setup.SetupActionableError
 import com.pocketfinancer.setup.SetupImportState
 import com.pocketfinancer.setup.SetupImportStore
 import com.pocketfinancer.sms.SmsRepository
+import com.pocketfinancer.sms.SmsReader
 import com.pocketfinancer.toModelSpec
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
@@ -100,6 +102,106 @@ internal fun SyncSmsItem.hasDiagnosticSourceEvidence(): Boolean =
         sender.isNotBlank() &&
         body.isNotBlank()
 
+/**
+ * Provider ids are authoritative when both sides have them. Fingerprints are
+ * only a bridge for a provider-less broadcast meeting its later provider row;
+ * using them between two provider rows would collapse legitimate identical
+ * messages that have distinct Android `_id` values.
+ */
+internal fun sameQueuedSmsSource(
+    first: SmsSourceIdentity,
+    second: SmsSourceIdentity
+): Boolean {
+    if (first.connector != second.connector) return false
+    if (first.messageId == second.messageId) return true
+    if (
+        first.providerMessageId != null &&
+        second.providerMessageId != null
+    ) {
+        return false
+    }
+    val firstFingerprints = setOfNotNull(
+        first.fallbackFingerprint,
+        first.alternateFingerprint
+    )
+    val secondFingerprints = setOfNotNull(
+        second.fallbackFingerprint,
+        second.alternateFingerprint
+    )
+    return firstFingerprints.any(secondFingerprints::contains)
+}
+
+private fun List<SyncSmsItem>.distinctSmsSources(): List<SyncSmsItem> {
+    // Provider-backed identities are considered first so one ambiguous
+    // provider-less broadcast can bridge to at most one authoritative row,
+    // never collapse two distinct provider rows.
+    val providerBacked = filter {
+        it.sourceIdentity.providerMessageId != null
+    }
+    val providerLess = filter {
+        it.sourceIdentity.providerMessageId == null
+    }
+    return (providerBacked + providerLess)
+        .fold(mutableListOf()) { distinct, item ->
+            if (
+                distinct.none {
+                    sameQueuedSmsSource(
+                        it.sourceIdentity,
+                        item.sourceIdentity
+                    )
+                }
+            ) {
+                distinct += item
+            }
+            distinct
+        }
+}
+
+internal fun mergeRecentScanQueue(
+    currentQueue: List<SyncSmsItem>,
+    providerMessages: List<SmsReader.SmsMessage>
+): List<SyncSmsItem> {
+    val unmatchedCurrent = currentQueue.toMutableList()
+    val scanned = providerMessages.map { message ->
+        val source = message.sourceIdentity
+        val exactIndex = unmatchedCurrent.indexOfFirst {
+            it.sourceIdentity.connector == source.connector &&
+                it.sourceIdentity.messageId == source.messageId
+        }
+        val bridgeIndex = if (exactIndex >= 0) {
+            -1
+        } else {
+            unmatchedCurrent.indexOfFirst {
+                sameQueuedSmsSource(it.sourceIdentity, source)
+            }
+        }
+        val matchedIndex = exactIndex.takeIf { it >= 0 } ?: bridgeIndex
+        val existing = matchedIndex
+            .takeIf { it >= 0 }
+            ?.let(unmatchedCurrent::removeAt)
+        if (
+            existing != null &&
+            existing.sourceIdentity.providerMessageId != null
+        ) {
+            existing
+        } else {
+            // A provider row enriches the one provider-less queue item it can
+            // unambiguously consume. Its authoritative id then keeps any
+            // second byte-identical provider row distinct.
+            SyncSmsItem(
+                id = source.opaqueCandidateKey,
+                sender = message.address,
+                body = message.body,
+                date = message.date,
+                messageType = message.type,
+                sourceIdentity = source,
+                status = existing?.status ?: "pending"
+            )
+        }
+    }
+    return (scanned + unmatchedCurrent).distinctSmsSources()
+}
+
 data class HomeSyncState(
     val status: Status = Status.IDLE,
     val queue: List<SyncSmsItem> = emptyList(),
@@ -142,130 +244,164 @@ class HomeSyncManager @Inject constructor(
     private val setupImportStore: SetupImportStore
 ) {
     private val historyScanPolicy = AdaptiveHistoryScanPolicy()
-    private val executionMutex = Mutex()
+    /**
+     * One operation boundary owns both provider reads and queue execution.
+     * Separate locks allow a scan to replace the queue while inference is
+     * mutating it, so the full operations intentionally share this mutex.
+     */
+    private val operationMutex = Mutex()
+    private var recentScanCandidateKeys: Set<String> = emptySet()
+    private var recentScanCompletedAtMillis: Long? = null
     private val _syncState = MutableStateFlow(HomeSyncState())
     val syncState: StateFlow<HomeSyncState> = _syncState.asStateFlow()
 
-    suspend fun checkForUnsyncedSms() = withContext(Dispatchers.IO) {
-        if (_syncState.value.status == HomeSyncState.Status.SYNCING) return@withContext
-        val flowLease = appFlowCoordinator.tryEnter(SlmRuntimeOwner.HOME_SYNC)
-            ?: run {
+    suspend fun checkForUnsyncedSms() =
+        checkForUnsyncedSmsWithAdmission(admittedFlow = null)
+
+    internal suspend fun checkForUnsyncedSms(
+        admittedFlow: SlmAppFlowLease
+    ) = checkForUnsyncedSmsWithAdmission(admittedFlow)
+
+    private suspend fun checkForUnsyncedSmsWithAdmission(
+        admittedFlow: SlmAppFlowLease?
+    ) = withContext(Dispatchers.IO) {
+        operationMutex.withLock {
+            requireHomeSyncAdmission(admittedFlow)
+            if (_syncState.value.status == HomeSyncState.Status.SYNCING) {
+                return@withLock
+            }
+            var ownedFlowLease: SlmAppFlowLease? = null
+            if (admittedFlow == null) {
+                ownedFlowLease =
+                    appFlowCoordinator.tryEnter(SlmRuntimeOwner.HOME_SYNC)
+                if (ownedFlowLease == null) {
+                    recordManualOperationError(
+                        code = "RECENT_SCAN_NOT_STARTED",
+                        message =
+                            "The recent scan is waiting for another local setup or maintenance operation.",
+                        actionLabel = "Try recent scan again"
+                    )
+                    _syncState.value = _syncState.value.copy(
+                        recentScanOutcome =
+                            HomeSyncState.RecentScanOutcome.NOT_RUN,
+                        scanError =
+                            "The recent scan is waiting for another local setup or maintenance operation."
+                    )
+                    return@withLock
+                }
+            }
+
+            try {
+                val onboardingComplete = context
+                    .getSharedPreferences(APP_SETTINGS, Context.MODE_PRIVATE)
+                    .getBoolean(ONBOARDING_COMPLETED, false)
+                if (!onboardingComplete) return@withLock
+                if (
+                    !manualRecentSyncAvailable(
+                        setupImportStore.state.value.status
+                    )
+                ) {
+                    _syncState.value = _syncState.value.copy(
+                        recentScanOutcome =
+                            HomeSyncState.RecentScanOutcome.FAILED,
+                        scanError =
+                            "Resume the first-run import before scanning recent alerts."
+                    )
+                    return@withLock
+                }
+                if (!smsRepository.hasPermissions()) {
+                    publishRecentPermissionNeeded()
+                    return@withLock
+                }
+                val scanWindowDays = historyScanPolicy.firstWindowDays
+                // One immutable upper bound owns both provider selection and
+                // persisted coverage. Messages arriving later are handled by
+                // normal intake or the next manual scan.
+                val durableRecent = setupImportStore.state.value
+                val providerMaxDate = recentScanProviderMaxDate(
+                    state = durableRecent,
+                    scanWindowDays = scanWindowDays,
+                    nowMillis = System.currentTimeMillis()
+                )
+                val rawMessages = smsRepository.fetchHistory(
+                    daysBack = scanWindowDays,
+                    // Persisted coverage must describe a complete provider read,
+                    // not the first page of a potentially larger inbox window.
+                    limit = Int.MAX_VALUE,
+                    maxDate = providerMaxDate
+                )
+                val transactional = rawMessages.filter { message ->
+                    smsFilterPipeline.isTransactional(
+                        message.address,
+                        message.body
+                    )
+                }
+                val currentQueue = _syncState.value.queue.filter {
+                    it.status == "pending" || it.status == "syncing"
+                }
+                val unsyncedMessages = transactional
+                    .filter { message ->
+                        !transactionRepository.preserveSourceMetadataIfExists(
+                            sourceIdentity = message.sourceIdentity,
+                            receivedDate = message.date
+                        )
+                    }
+                if (!smsRepository.hasPermissions()) {
+                    publishRecentPermissionNeeded()
+                    return@withLock
+                }
+                val mergedQueue = mergeRecentScanQueue(
+                    currentQueue = currentQueue,
+                    providerMessages = unsyncedMessages
+                )
+                val scannedCandidateKeys = unsyncedMessages
+                    .mapTo(mutableSetOf()) {
+                        it.sourceIdentity.opaqueCandidateKey
+                    }
+                val loadedModel = slmRuntime.state.value.loadedModel
+                val completedAt = System.currentTimeMillis()
+                recentScanCandidateKeys = scannedCandidateKeys
+                recentScanCompletedAtMillis = completedAt
+                _syncState.value = HomeSyncState(
+                    status = HomeSyncState.Status.IDLE,
+                    queue = mergedQueue,
+                    hasThinkingMode = loadedModel?.hasThinkingMode ?: false,
+                    activeModelName =
+                        loadedModel?.modelPath?.let { File(it).name },
+                    recentScanOutcome =
+                        HomeSyncState.RecentScanOutcome.SUCCESS,
+                    recentScanWindowDays = scanWindowDays,
+                    lastSuccessfulScanMillis = completedAt
+                )
+                recordManualScanSuccess(
+                    scanWindowDays = scanWindowDays,
+                    providerMaxDate = providerMaxDate,
+                    completedAt = completedAt,
+                    providerMessageCount = rawMessages.size,
+                    eligibleCandidateCount = scannedCandidateKeys.size
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: SecurityException) {
+                Log.w(TAG, "SMS permission was removed during recent scan", e)
+                publishRecentPermissionNeeded()
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed checking for unsynced SMS", e)
                 recordManualOperationError(
-                    code = "RECENT_SCAN_NOT_STARTED",
-                    message =
-                        "The recent scan is waiting for another local setup or maintenance operation.",
+                    code = "RECENT_SMS_SCAN_FAILED",
+                    message = e.message ?: "The recent SMS scan failed.",
                     actionLabel = "Try recent scan again"
                 )
                 _syncState.value = _syncState.value.copy(
-                    recentScanOutcome =
-                        HomeSyncState.RecentScanOutcome.NOT_RUN,
-                    scanError =
-                        "The recent scan is waiting for another local setup or maintenance operation."
-                )
-                return@withContext
-            }
-
-        try {
-            val onboardingComplete = context
-                .getSharedPreferences(APP_SETTINGS, Context.MODE_PRIVATE)
-                .getBoolean(ONBOARDING_COMPLETED, false)
-            if (!onboardingComplete) return@withContext
-            if (
-                !manualRecentSyncAvailable(
-                    setupImportStore.state.value.status
-                )
-            ) {
-                _syncState.value = _syncState.value.copy(
+                    status = HomeSyncState.Status.IDLE,
                     recentScanOutcome =
                         HomeSyncState.RecentScanOutcome.FAILED,
-                    scanError =
-                        "Resume the first-run import before scanning recent alerts."
+                    scanError = e.message ?: "The recent SMS scan failed."
                 )
-                return@withContext
-            }
-            if (!smsRepository.hasPermissions()) {
-                setupImportStore.reconcilePermission(granted = false)
-                _syncState.value = _syncState.value.copy(
-                    recentScanOutcome =
-                        HomeSyncState.RecentScanOutcome.PERMISSION_NEEDED,
-                    scanError = "SMS access is required to scan recent alerts."
-                )
-                return@withContext
-            }
-            val scanWindowDays = historyScanPolicy.firstWindowDays
-            val rawMessages = smsRepository.fetchHistory(
-                daysBack = scanWindowDays,
-                // Persisted coverage must describe a complete provider read,
-                // not the first page of a potentially larger inbox window.
-                limit = Int.MAX_VALUE
-            )
-            val transactional = rawMessages.filter { message ->
-                smsFilterPipeline.isTransactional(message.address, message.body)
-            }
-            val currentQueue = _syncState.value.queue.filter {
-                it.status == "pending" || it.status == "syncing"
-            }
-            val unsynced = transactional
-                .filter { message ->
-                    !transactionRepository.exists(message.sourceIdentity)
+            } finally {
+                withContext(NonCancellable) {
+                    ownedFlowLease?.release()
                 }
-                .map { message ->
-                    currentQueue.find {
-                        it.sourceIdentity.connector ==
-                            message.sourceIdentity.connector &&
-                            (
-                                it.sourceIdentity.messageId ==
-                                    message.sourceIdentity.messageId ||
-                                    it.sourceIdentity.fallbackFingerprint ==
-                                        message.sourceIdentity.fallbackFingerprint
-                            )
-                    } ?: SyncSmsItem(
-                        id = message.sourceIdentity.opaqueCandidateKey,
-                        sender = message.address,
-                        body = message.body,
-                        date = message.date,
-                        messageType = message.type,
-                        sourceIdentity = message.sourceIdentity,
-                        status = "pending"
-                    )
-                }
-            val loadedModel = slmRuntime.state.value.loadedModel
-            val completedAt = System.currentTimeMillis()
-            _syncState.value = HomeSyncState(
-                status = HomeSyncState.Status.IDLE,
-                queue = (currentQueue + unsynced).distinctBy {
-                    it.sourceIdentity.connector to
-                        it.sourceIdentity.fallbackFingerprint
-                },
-                hasThinkingMode = loadedModel?.hasThinkingMode ?: false,
-                activeModelName = loadedModel?.modelPath?.let { File(it).name },
-                recentScanOutcome = HomeSyncState.RecentScanOutcome.SUCCESS,
-                recentScanWindowDays = scanWindowDays,
-                lastSuccessfulScanMillis = completedAt
-            )
-            recordManualScanSuccess(
-                scanWindowDays = scanWindowDays,
-                completedAt = completedAt,
-                providerMessageCount = rawMessages.size,
-                eligibleCandidateCount = transactional.size
-            )
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed checking for unsynced SMS", e)
-            recordManualOperationError(
-                code = "RECENT_SMS_SCAN_FAILED",
-                message = e.message ?: "The recent SMS scan failed.",
-                actionLabel = "Try recent scan again"
-            )
-            _syncState.value = _syncState.value.copy(
-                status = HomeSyncState.Status.IDLE,
-                recentScanOutcome = HomeSyncState.RecentScanOutcome.FAILED,
-                scanError = e.message ?: "The recent SMS scan failed."
-            )
-        } finally {
-            withContext(NonCancellable) {
-                flowLease.release()
             }
         }
     }
@@ -275,13 +411,34 @@ class HomeSyncManager @Inject constructor(
      * independent FIFO native request so other runtime callers can interleave.
      */
     @Suppress("UNUSED_PARAMETER")
-    suspend fun executeSync(serviceContext: Context) = withContext(Dispatchers.IO) {
-        executionMutex.withLock {
-            // SyncService is already a foreground service. Wait through the
-            // short selected-model handoff instead of returning and posting a
-            // false completion while queued incoming SMS remain unprocessed.
-            val flowLease =
-                appFlowCoordinator.enterWhenAvailable(SlmRuntimeOwner.HOME_SYNC)
+    suspend fun executeSync(serviceContext: Context) =
+        executeSyncWithAdmission(
+            serviceContext = serviceContext,
+            admittedFlow = null
+        )
+
+    internal suspend fun executeSync(
+        serviceContext: Context,
+        admittedFlow: SlmAppFlowLease
+    ) = executeSyncWithAdmission(serviceContext, admittedFlow)
+
+    @Suppress("UNUSED_PARAMETER")
+    private suspend fun executeSyncWithAdmission(
+        serviceContext: Context,
+        admittedFlow: SlmAppFlowLease?
+    ) = withContext(Dispatchers.IO) {
+        operationMutex.withLock {
+            requireHomeSyncAdmission(admittedFlow)
+            // Standalone callers wait through the selected-model handoff.
+            // SyncService supplies the one outer lease that owns scan,
+            // processing, persistence, and terminal notification publication.
+            val ownedFlowLease = if (admittedFlow == null) {
+                appFlowCoordinator.enterWhenAvailable(
+                    SlmRuntimeOwner.HOME_SYNC
+                )
+            } else {
+                null
+            }
             try {
                 val onboardingComplete = context
                     .getSharedPreferences(APP_SETTINGS, Context.MODE_PRIVATE)
@@ -302,9 +459,20 @@ class HomeSyncManager @Inject constructor(
                 executeSyncLocked()
             } finally {
                 withContext(NonCancellable) {
-                    flowLease.release()
+                    ownedFlowLease?.release()
                 }
             }
+        }
+    }
+
+    private fun requireHomeSyncAdmission(
+        admittedFlow: SlmAppFlowLease?
+    ) {
+        require(
+            admittedFlow == null ||
+                admittedFlow.owner == SlmRuntimeOwner.HOME_SYNC
+        ) {
+            "Manual sync requires HOME_SYNC app-flow admission"
         }
     }
 
@@ -369,7 +537,12 @@ class HomeSyncManager @Inject constructor(
                 // this request is queued/running applies to the next item.
                 val useGrammar = slmProcessingPreferences.gbnfGrammarEnabled.value
 
-                if (transactionRepository.exists(item.sourceIdentity)) {
+                if (
+                    transactionRepository.preserveSourceMetadataIfExists(
+                        sourceIdentity = item.sourceIdentity,
+                        receivedDate = item.date
+                    )
+                ) {
                     updateItemStatus(index, "already_saved")
                     index++
                     continue
@@ -518,6 +691,7 @@ class HomeSyncManager @Inject constructor(
                 _syncState.value.jsonOutput
             }
         )
+        recordManualProcessingProgress(queue)
     }
 
     private suspend fun persistSuccessfulExtraction(
@@ -579,6 +753,7 @@ class HomeSyncManager @Inject constructor(
             thinkingOutput = "",
             jsonOutput = ""
         )
+        recordManualProcessingProgress(queue)
     }
 
     suspend fun queueIncomingSms(
@@ -615,14 +790,9 @@ class HomeSyncManager @Inject constructor(
             }
 
             val queue = _syncState.value.queue.toMutableList()
-            if (queue.any {
-                    it.sourceIdentity.connector == sourceIdentity.connector &&
-                        (
-                            it.sourceIdentity.messageId ==
-                                sourceIdentity.messageId ||
-                                it.sourceIdentity.fallbackFingerprint ==
-                                    sourceIdentity.fallbackFingerprint
-                            )
+            if (
+                queue.any {
+                    sameQueuedSmsSource(it.sourceIdentity, sourceIdentity)
                 }
             ) {
                 Log.i(TAG, "Incoming SMS source is already queued. Skipping.")
@@ -683,6 +853,7 @@ class HomeSyncManager @Inject constructor(
 
     private fun recordManualScanSuccess(
         scanWindowDays: Int,
+        providerMaxDate: Long,
         completedAt: Long,
         providerMessageCount: Int,
         eligibleCandidateCount: Int
@@ -693,12 +864,50 @@ class HomeSyncManager @Inject constructor(
             } else {
                 it.withSuccessfulRecentScan(
                     scanWindowDays = scanWindowDays,
+                    providerMaxDate = providerMaxDate,
                     completedAt = completedAt,
                     providerMessageCount = providerMessageCount,
                     eligibleCandidateCount = eligibleCandidateCount
                 )
             }
         }
+    }
+
+    private fun recordManualProcessingProgress(queue: List<SyncSmsItem>) {
+        val expectedScanCompletedAt = recentScanCompletedAtMillis ?: return
+        if (recentScanCandidateKeys.isEmpty()) return
+        val tracked = queue.filter { it.id in recentScanCandidateKeys }
+        val processed = tracked.count { it.status in TERMINAL_ITEM_STATUSES }
+        val saved = tracked.count {
+            it.status == "synced" || it.status == "already_saved"
+        }
+        val rejected = tracked.count { it.status == "filtered_out" }
+        val failed = tracked.count { it.status == "error" }
+        setupImportStore.update { state ->
+            if (
+                state.lastSuccessfulRecentScanMillis !=
+                    expectedScanCompletedAt
+            ) {
+                state
+            } else {
+                state.copy(
+                    recentProcessedCount = processed,
+                    recentSavedCount = saved,
+                    recentRejectedCount = rejected,
+                    recentFailedCount = failed
+                )
+            }
+        }
+    }
+
+    private fun publishRecentPermissionNeeded() {
+        setupImportStore.reconcilePermission(granted = false)
+        _syncState.value = _syncState.value.copy(
+            status = HomeSyncState.Status.IDLE,
+            recentScanOutcome =
+                HomeSyncState.RecentScanOutcome.PERMISSION_NEEDED,
+            scanError = "SMS access is required to scan recent alerts."
+        )
     }
 
     private fun clearManualOperationError() {
@@ -727,6 +936,8 @@ class HomeSyncManager @Inject constructor(
     }
 
     fun resetState() {
+        recentScanCandidateKeys = emptySet()
+        recentScanCompletedAtMillis = null
         _syncState.value = HomeSyncState()
     }
 
@@ -745,6 +956,7 @@ class HomeSyncManager @Inject constructor(
 
 internal fun SetupImportState.withSuccessfulRecentScan(
     scanWindowDays: Int,
+    providerMaxDate: Long,
     completedAt: Long,
     providerMessageCount: Int,
     eligibleCandidateCount: Int
@@ -754,15 +966,34 @@ internal fun SetupImportState.withSuccessfulRecentScan(
     }
     return copy(
         recentCoverageStartMillis =
-            completedAt - TimeUnit.DAYS.toMillis(scanWindowDays.toLong()),
-        recentCoverageEndMillis = completedAt,
+            (
+                providerMaxDate -
+                    TimeUnit.DAYS.toMillis(scanWindowDays.toLong())
+            ).coerceAtLeast(0L),
+        recentCoverageEndMillis = providerMaxDate,
         recentScanWindowDays = scanWindowDays,
         recentProviderMessageCount = providerMessageCount.coerceAtLeast(0),
         recentEligibleCandidateCount = eligibleCandidateCount.coerceAtLeast(0),
+        recentProcessedCount = 0,
+        recentSavedCount = 0,
+        recentRejectedCount = 0,
+        recentFailedCount = 0,
         lastSuccessfulRecentScanMillis = completedAt,
         actionableError = null
     )
 }
+
+internal fun recentScanProviderMaxDate(
+    state: SetupImportState,
+    scanWindowDays: Int,
+    nowMillis: Long
+): Long =
+    state.recentCoverageEndMillis
+        ?.takeIf {
+            state.recentProcessingNeedsAttention &&
+                state.recentScanWindowDays == scanWindowDays
+        }
+        ?: nowMillis
 
 internal fun manualProcessingFailureError(
     failedCount: Int

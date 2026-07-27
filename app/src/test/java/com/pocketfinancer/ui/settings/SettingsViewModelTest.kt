@@ -94,6 +94,25 @@ class SettingsViewModelTest {
         }
 
     @Test
+    fun `failed grammar persistence leaves observed value and surfaces recovery copy`() =
+        runTest(dispatcher) {
+            val fixture = fixture(gbnfInitiallyEnabled = false)
+            every {
+                fixture.preferences.setGbnfGrammarEnabled(true)
+            } throws IllegalStateException("preference storage unavailable")
+            val viewModel = fixture.createViewModel()
+            runCurrent()
+
+            viewModel.setGbnfGrammarEnabled(true)
+
+            assertFalse(viewModel.state.value.gbnfGrammarEnabled)
+            assertTrue(
+                viewModel.state.value.gbnfGrammarError
+                    ?.contains("was not changed") == true
+            )
+        }
+
+    @Test
     fun `permission health reflects revocation and recovery after refresh`() =
         runTest(dispatcher) {
             val fixture = fixture()
@@ -214,6 +233,61 @@ class SettingsViewModelTest {
         }
 
     @Test
+    fun `failed OFF persistence truthfully reports automatic updates remain on`() =
+        runTest(dispatcher) {
+            val fixture = fixture(automaticProcessingInitiallyEnabled = true)
+            coEvery {
+                fixture.automaticProcessingPreferences
+                    .disableAndCleanupPending(any())
+            } throws IllegalStateException("preference storage unavailable")
+            val viewModel = fixture.createViewModel()
+            runCurrent()
+
+            viewModel.setProcessIncomingSms(false)
+            runCurrent()
+
+            assertTrue(viewModel.state.value.processIncomingSms)
+            assertTrue(
+                viewModel.state.value.automaticProcessingError
+                    ?.contains("still on") == true
+            )
+            coVerify(exactly = 0) {
+                fixture.smsWorkController.discardPendingAutomaticWork()
+            }
+        }
+
+    @Test
+    fun `failed ON persistence does not falsely blame pending cleanup`() =
+        runTest(dispatcher) {
+            val fixture = fixture(automaticProcessingInitiallyEnabled = false)
+            coEvery {
+                fixture.automaticProcessingPreferences
+                    .enableAfterCleanupPending(any())
+            } coAnswers {
+                firstArg<suspend () -> Int>().invoke()
+                throw IllegalStateException("preference storage unavailable")
+            }
+            val viewModel = fixture.createViewModel()
+            runCurrent()
+
+            viewModel.setProcessIncomingSms(true)
+            runCurrent()
+
+            assertFalse(viewModel.state.value.processIncomingSms)
+            assertTrue(
+                viewModel.state.value.automaticProcessingError
+                    ?.contains("change could not be completed") == true
+            )
+            assertFalse(
+                viewModel.state.value.automaticProcessingError
+                    ?.contains("cleanup failed") == true
+            )
+            coVerify(exactly = 1) {
+                fixture.smsWorkController.discardPendingAutomaticWork()
+            }
+        }
+
+    @Test
     fun `test SMS snapshots disabled grammar for the complete queued inference`() =
         runTest(dispatcher) {
             val fixture = fixture(gbnfInitiallyEnabled = false, modelLoaded = true)
@@ -273,6 +347,9 @@ class SettingsViewModelTest {
             )
             coVerify(exactly = 0) {
                 fixture.transactionRepository.insert(any())
+            }
+            coVerify(exactly = 0) {
+                fixture.transactionRepository.insertIfAbsent(any())
             }
         }
 

@@ -21,7 +21,28 @@ class AdaptiveHistoryScanPolicyTest {
                 windowDays = 90,
                 reason = SetupEmptyReason.EMPTY_INBOX
             ),
-            policy.decide(90, providerMessageCount = 0, eligibleCandidateCount = 0)
+            policy.decide(
+                90,
+                providerMessageCount = 0,
+                eligibleCandidateCount = 0,
+                inboxHasAnyMessage = false
+            )
+        )
+    }
+
+    @Test
+    fun `messages only outside ninety days are not called an empty inbox`() {
+        assertEquals(
+            HistoryScanDecision.NoEligibleHistory(
+                windowDays = 90,
+                reason = SetupEmptyReason.NO_ELIGIBLE_WITHIN_90_DAYS
+            ),
+            policy.decide(
+                90,
+                providerMessageCount = 0,
+                eligibleCandidateCount = 0,
+                inboxHasAnyMessage = true
+            )
         )
     }
 

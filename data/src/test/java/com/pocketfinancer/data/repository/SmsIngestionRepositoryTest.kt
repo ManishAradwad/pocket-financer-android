@@ -79,6 +79,14 @@ class SmsIngestionRepositoryTest {
             val second = ingestionRepository.admit(provider)
 
             assertEquals(first.candidateKey, second.candidateKey)
+            assertEquals(
+                broadcast.sourceIdentity.opaqueCandidateKey,
+                second.candidateKey
+            )
+            assertFalse(
+                provider.sourceIdentity.opaqueCandidateKey ==
+                    second.candidateKey
+            )
             assertEquals(1, ingestionRepository.pendingCount())
             assertEquals(
                 "991",
@@ -93,17 +101,23 @@ class SmsIngestionRepositoryTest {
                     ?.alternateFingerprint
             )
             assertEquals(
+                provider.sourceIdentity.messageId,
+                ingestionRepository.get(first.candidateKey)
+                    ?.sourceIdentity
+                    ?.messageId
+            )
+            assertEquals(
                 receivedAt,
                 ingestionRepository.get(first.candidateKey)?.date
             )
         }
 
     @Test
-    fun `concurrent retries admit one durable candidate`() = runBlocking {
+    fun `concurrent fallback retries admit one durable candidate`() = runBlocking {
         val attempts = coroutineScope {
             List(12) {
                 async(Dispatchers.Default) {
-                    ingestionRepository.admit(candidate(providerId = "42"))
+                    ingestionRepository.admit(candidate(providerId = null))
                 }
             }.awaitAll()
         }
@@ -135,12 +149,31 @@ class SmsIngestionRepositoryTest {
         }
 
     @Test
+    fun `exact identical candidates with distinct provider ids coexist`() =
+        runBlocking {
+            val first = candidate(providerId = "provider-a")
+            val second = candidate(providerId = "provider-b")
+
+            val admissions = listOf(
+                ingestionRepository.admit(first),
+                ingestionRepository.admit(second)
+            )
+
+            assertEquals(2, ingestionRepository.pendingCount())
+            assertEquals(2, admissions.map { it.candidateKey }.distinct().size)
+            assertFalse(
+                first.sourceIdentity.opaqueCandidateKey ==
+                    second.sourceIdentity.opaqueCandidateKey
+            )
+        }
+
+    @Test
     fun `automatic off removes pending but preserves claimed and manual candidates`() =
         runBlocking {
             val claimedAdmission = ingestionRepository.admit(
                 candidate(providerId = "1", body = "Rs 1 debited")
             )
-            ingestionRepository.admit(
+            val pendingAdmission = ingestionRepository.admit(
                 candidate(providerId = "2", body = "Rs 2 debited")
             )
             val manual = candidate(
@@ -154,6 +187,11 @@ class SmsIngestionRepositoryTest {
                     claimedAdmission.candidateKey,
                     claimToken = "running-worker"
                 )
+            )
+            assertEquals(
+                listOf(pendingAdmission.candidateKey),
+                ingestionRepository.pendingAutomaticCandidates()
+                    .map { it.candidateKey }
             )
 
             assertEquals(1, ingestionRepository.discardPendingAutomatic())
@@ -284,11 +322,11 @@ class SmsIngestionRepositoryTest {
         }
 
     @Test
-    fun `concurrent transaction persistence inserts once and consumes candidate`() =
+    fun `concurrent fallback persistence inserts once and consumes candidate`() =
         runBlocking {
-            val admitted = ingestionRepository.admit(candidate(providerId = "77"))
+            val admitted = ingestionRepository.admit(candidate(providerId = null))
             val account = accountRepository.ensureDefault()
-            val source = candidate(providerId = "77").sourceIdentity
+            val source = candidate(providerId = null).sourceIdentity
             val newTransaction = TransactionRepository.NewTransaction(
                 amount = 500.0,
                 merchant = "Merchant",
@@ -312,6 +350,83 @@ class SmsIngestionRepositoryTest {
             assertEquals(1, transactionRepository.count())
             assertNull(ingestionRepository.get(admitted.candidateKey))
             assertTrue(transactionRepository.exists(source))
+        }
+
+    @Test
+    fun `exact provider match wins and distinct authoritative ids are not merged`() =
+        runBlocking {
+            val account = accountRepository.ensureDefault()
+            val firstSource = candidate(providerId = "provider-a").sourceIdentity
+            val secondSource = candidate(providerId = "provider-b").sourceIdentity
+            val unknownProvider = candidate(
+                providerId = "provider-c"
+            ).sourceIdentity
+            val fallbackSource = candidate(providerId = null).sourceIdentity
+
+            val first = transactionRepository.insertIfAbsent(
+                transaction(firstSource, account.id)
+            )
+            val second = transactionRepository.insertIfAbsent(
+                transaction(secondSource, account.id)
+            )
+            val firstRetry = transactionRepository.insertIfAbsent(
+                transaction(firstSource, account.id)
+            )
+
+            assertTrue(first.inserted)
+            assertTrue(second.inserted)
+            assertFalse(firstRetry.inserted)
+            assertEquals(first.transaction.id, firstRetry.transaction.id)
+            assertFalse(first.transaction.id == second.transaction.id)
+            assertEquals(2, transactionRepository.count())
+            assertEquals(
+                first.transaction.id,
+                transactionRepository.findBySource(firstSource)?.id
+            )
+            assertEquals(
+                second.transaction.id,
+                transactionRepository.findBySource(secondSource)?.id
+            )
+            assertFalse(transactionRepository.exists(unknownProvider))
+
+            // A provenance-free broadcast is allowed to fall back to evidence.
+            assertTrue(transactionRepository.exists(fallbackSource))
+        }
+
+    @Test
+    fun `skip path enriches broadcast transaction with provider provenance`() =
+        runBlocking {
+            val account = accountRepository.ensureDefault()
+            val broadcastSource = candidate(providerId = null).sourceIdentity
+            val providerSource = candidate(providerId = "provider-a")
+                .sourceIdentity
+            val distinctProvider = candidate(providerId = "provider-b")
+                .sourceIdentity
+            val saved = transactionRepository.insertIfAbsent(
+                transaction(broadcastSource, account.id)
+            )
+
+            assertTrue(
+                transactionRepository.preserveSourceMetadataIfExists(
+                    sourceIdentity = providerSource,
+                    receivedDate = TEST_DATE + 500L
+                )
+            )
+
+            val enriched = assertNotNull(
+                transactionRepository.findBySource(providerSource)
+            )
+            assertEquals(saved.transaction.id, enriched.id)
+            assertEquals("provider-a", enriched.sourceIdentity?.providerMessageId)
+            assertEquals(providerSource.messageId, enriched.sourceIdentity?.messageId)
+            assertEquals(TEST_DATE + 500L, enriched.date)
+            assertFalse(
+                transactionRepository.preserveSourceMetadataIfExists(
+                    sourceIdentity = distinctProvider,
+                    receivedDate = TEST_DATE + 500L
+                )
+            )
+            assertEquals(1, transactionRepository.count())
         }
 
     @Test
@@ -390,7 +505,77 @@ class SmsIngestionRepositoryTest {
 
             assertEquals(0, transactionRepository.count())
             assertEquals(0, ingestionRepository.pendingCount())
+            assertTrue(accountRepository.getAllOnce().isEmpty())
             assertNull(transactionRepository.findBySource(savedSource))
+        }
+
+    @Test
+    fun `file backed restart preserves raw evidence and provider identity`() =
+        runBlocking {
+            val context = ApplicationProvider.getApplicationContext<Context>()
+            val databaseName = "raw-evidence-restart.db"
+            context.deleteDatabase(databaseName)
+            val source = candidate(providerId = "restart-provider").sourceIdentity
+            var savedId: String? = null
+
+            val firstDatabase = Room.databaseBuilder(
+                context,
+                AppDatabase::class.java,
+                databaseName
+            )
+                .allowMainThreadQueries()
+                .build()
+            try {
+                val firstAccountRepository = AccountRepository(
+                    firstDatabase.accountDao(),
+                    firstDatabase.transactionDao(),
+                    runConsolidationOnInit = false
+                )
+                val firstRepository = TransactionRepository(
+                    firstDatabase,
+                    firstDatabase.transactionDao(),
+                    firstAccountRepository,
+                    firstDatabase.queuedSmsCandidateDao()
+                )
+                val account = firstAccountRepository.ensureDefault()
+                savedId = firstRepository.insert(
+                    transaction(source, account.id)
+                ).id
+            } finally {
+                firstDatabase.close()
+            }
+
+            val reopenedDatabase = Room.databaseBuilder(
+                context,
+                AppDatabase::class.java,
+                databaseName
+            )
+                .allowMainThreadQueries()
+                .build()
+            try {
+                val reopenedAccountRepository = AccountRepository(
+                    reopenedDatabase.accountDao(),
+                    reopenedDatabase.transactionDao(),
+                    runConsolidationOnInit = false
+                )
+                val reopenedRepository = TransactionRepository(
+                    reopenedDatabase,
+                    reopenedDatabase.transactionDao(),
+                    reopenedAccountRepository,
+                    reopenedDatabase.queuedSmsCandidateDao()
+                )
+                val reloaded = assertNotNull(
+                    reopenedRepository.findBySource(source)
+                )
+
+                assertEquals(savedId, reloaded.id)
+                assertEquals(TEST_BODY, reloaded.rawMessage)
+                assertEquals(TEST_SENDER, reloaded.sender)
+                assertEquals(source, reloaded.sourceIdentity)
+            } finally {
+                reopenedDatabase.close()
+                context.deleteDatabase(databaseName)
+            }
         }
 
     private fun candidate(
@@ -418,6 +603,20 @@ class SmsIngestionRepositoryTest {
             origin = origin
         )
     }
+
+    private fun transaction(
+        sourceIdentity: SmsSourceIdentity,
+        accountId: String
+    ) = TransactionRepository.NewTransaction(
+        amount = 500.0,
+        merchant = "Merchant",
+        date = TEST_DATE,
+        type = TransactionType.DEBIT,
+        accountId = accountId,
+        rawMessage = TEST_BODY,
+        sender = TEST_SENDER,
+        sourceIdentity = sourceIdentity
+    )
 
     private companion object {
         const val TEST_SENDER = "AX-HDFCBK"

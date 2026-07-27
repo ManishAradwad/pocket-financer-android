@@ -9,6 +9,8 @@ import com.pocketfinancer.data.model.Transaction
 import com.pocketfinancer.data.model.TransactionType
 import androidx.room.withTransaction
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 import java.util.UUID
 import javax.inject.Inject
@@ -25,17 +27,27 @@ class TransactionRepository @Inject constructor(
     suspend fun clearDatabase() {
         appDatabase.clearAllTables()
     }
-    fun getAllByDateDesc(): Flow<List<Transaction>> =
-        transactionDao.getAllByDateDesc().map { list -> list.map { it.toDomain() } }
+    fun getAllByDateDesc(): Flow<List<Transaction>> = ledgerFlow {
+        transactionDao.getAllByDateDesc()
+    }
 
     fun getByDateRange(startMs: Long, endMs: Long): Flow<List<Transaction>> =
-        transactionDao.getByDateRange(startMs, endMs).map { list -> list.map { it.toDomain() } }
+        ledgerFlow { transactionDao.getByDateRange(startMs, endMs) }
 
     fun getByType(type: TransactionType): Flow<List<Transaction>> =
-        transactionDao.getByType(type.name.lowercase()).map { list -> list.map { it.toDomain() } }
+        ledgerFlow { transactionDao.getByType(type.name.lowercase()) }
 
     fun getRecent(limit: Int = 20): Flow<List<Transaction>> =
-        transactionDao.getRecent(limit).map { list -> list.map { it.toDomain() } }
+        ledgerFlow { transactionDao.getRecent(limit) }
+
+    private fun ledgerFlow(
+        source: () -> Flow<List<TransactionEntity>>
+    ): Flow<List<Transaction>> = flow {
+        accountRepository.ensureInitialConsolidation()
+        emitAll(
+            source().map { list -> list.map { it.toDomain() } }
+        )
+    }
 
     /**
      * Compatibility adapter for existing UI callers. Source uniqueness still
@@ -76,6 +88,7 @@ class TransactionRepository @Inject constructor(
             val existing = transactionDao.findBySource(
                 connector = source.connector,
                 messageId = source.messageId,
+                providerMessageId = source.providerMessageId,
                 fingerprint = source.fallbackFingerprint,
                 alternateFingerprint = source.alternateFingerprint
             )
@@ -91,6 +104,7 @@ class TransactionRepository @Inject constructor(
                     transactionDao.findBySource(
                         connector = source.connector,
                         messageId = source.messageId,
+                        providerMessageId = source.providerMessageId,
                         fingerprint = source.fallbackFingerprint,
                         alternateFingerprint = source.alternateFingerprint
                     ) ?: error("Transaction source conflict could not be resolved")
@@ -98,39 +112,25 @@ class TransactionRepository @Inject constructor(
             }
             transactionDao.preserveSourceMetadata(
                 transactionId = owned.id,
+                messageId = source.messageId,
                 providerMessageId = source.providerMessageId,
                 fingerprint = source.fallbackFingerprint,
                 alternateFingerprint = source.alternateFingerprint,
                 receivedDate = data.date
             )
-            candidateDao.deleteBySource(
+            candidateDao.findBySource(
                 connector = source.connector,
                 messageId = source.messageId,
+                providerMessageId = source.providerMessageId,
                 fingerprint = source.fallbackFingerprint,
                 alternateFingerprint = source.alternateFingerprint
-            )
-            val preservedAlternate = owned.sourceAlternateFingerprint
-                ?: when {
-                    owned.sourceFingerprint != source.fallbackFingerprint ->
-                        source.fallbackFingerprint
-                    source.alternateFingerprint != null &&
-                        owned.sourceFingerprint != source.alternateFingerprint ->
-                        source.alternateFingerprint
-                    else -> null
-                }
-            owned.copy(
-                date = if (
-                    owned.sourceProviderMessageId == null &&
-                    source.providerMessageId != null
-                ) {
-                    data.date
-                } else {
-                    owned.date
-                },
-                sourceProviderMessageId =
-                    owned.sourceProviderMessageId ?: source.providerMessageId,
-                sourceAlternateFingerprint = preservedAlternate
-            ) to inserted
+            )?.let { matchingCandidate ->
+                candidateDao.deleteByKey(matchingCandidate.candidateKey)
+            }
+            (
+                transactionDao.getById(owned.id)
+                    ?: error("Persisted transaction disappeared")
+                ) to inserted
         }
         return InsertResult(
             transaction = persisted.first.toDomain(),
@@ -173,14 +173,55 @@ class TransactionRepository @Inject constructor(
         transactionDao.existsBySource(
             connector = sourceIdentity.connector,
             messageId = sourceIdentity.messageId,
+            providerMessageId = sourceIdentity.providerMessageId,
             fingerprint = sourceIdentity.fallbackFingerprint,
             alternateFingerprint = sourceIdentity.alternateFingerprint
         )
+
+    /**
+     * Atomically resolves an existing source and promotes fallback-only
+     * provenance when a later provider row supplies an authoritative id.
+     *
+     * Callers that skip parsing because a transaction already exists should
+     * use this method instead of a read-only [exists] check. It also removes at
+     * most one matching queued copy after the ledger owns the raw evidence.
+     */
+    suspend fun preserveSourceMetadataIfExists(
+        sourceIdentity: SmsSourceIdentity,
+        receivedDate: Long? = null
+    ): Boolean = appDatabase.withTransaction {
+        val existing = transactionDao.findBySource(
+            connector = sourceIdentity.connector,
+            messageId = sourceIdentity.messageId,
+            providerMessageId = sourceIdentity.providerMessageId,
+            fingerprint = sourceIdentity.fallbackFingerprint,
+            alternateFingerprint = sourceIdentity.alternateFingerprint
+        ) ?: return@withTransaction false
+        transactionDao.preserveSourceMetadata(
+            transactionId = existing.id,
+            messageId = sourceIdentity.messageId,
+            providerMessageId = sourceIdentity.providerMessageId,
+            fingerprint = sourceIdentity.fallbackFingerprint,
+            alternateFingerprint = sourceIdentity.alternateFingerprint,
+            receivedDate = receivedDate
+        )
+        candidateDao.findBySource(
+            connector = sourceIdentity.connector,
+            messageId = sourceIdentity.messageId,
+            providerMessageId = sourceIdentity.providerMessageId,
+            fingerprint = sourceIdentity.fallbackFingerprint,
+            alternateFingerprint = sourceIdentity.alternateFingerprint
+        )?.let { matchingCandidate ->
+            candidateDao.deleteByKey(matchingCandidate.candidateKey)
+        }
+        true
+    }
 
     suspend fun findBySource(sourceIdentity: SmsSourceIdentity): Transaction? =
         transactionDao.findBySource(
             connector = sourceIdentity.connector,
             messageId = sourceIdentity.messageId,
+            providerMessageId = sourceIdentity.providerMessageId,
             fingerprint = sourceIdentity.fallbackFingerprint,
             alternateFingerprint = sourceIdentity.alternateFingerprint
         )?.toDomain()

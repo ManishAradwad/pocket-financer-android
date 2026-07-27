@@ -1,0 +1,409 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 5,
+    "identityHash": "ecdafd20b97e20049bc4369bd955493c",
+    "entities": [
+      {
+        "tableName": "transactions",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `amount` REAL NOT NULL, `merchant` TEXT NOT NULL, `date` INTEGER NOT NULL, `type` TEXT NOT NULL, `accountId` TEXT NOT NULL, `rawMessage` TEXT NOT NULL, `sender` TEXT NOT NULL, `isEdited` INTEGER NOT NULL, `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, `slmPromptEvalMs` INTEGER, `slmEvalMs` INTEGER, `slmNumTokens` INTEGER, `slmModelName` TEXT, `sourceConnector` TEXT NOT NULL, `sourceProviderMessageId` TEXT, `sourceMessageId` TEXT NOT NULL, `sourceFingerprint` TEXT NOT NULL, `sourceAlternateFingerprint` TEXT, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "amount",
+            "columnName": "amount",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "merchant",
+            "columnName": "merchant",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "date",
+            "columnName": "date",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "type",
+            "columnName": "type",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "accountId",
+            "columnName": "accountId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "rawMessage",
+            "columnName": "rawMessage",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sender",
+            "columnName": "sender",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isEdited",
+            "columnName": "isEdited",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "slmPromptEvalMs",
+            "columnName": "slmPromptEvalMs",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "slmEvalMs",
+            "columnName": "slmEvalMs",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "slmNumTokens",
+            "columnName": "slmNumTokens",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "slmModelName",
+            "columnName": "slmModelName",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "sourceConnector",
+            "columnName": "sourceConnector",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceProviderMessageId",
+            "columnName": "sourceProviderMessageId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "sourceMessageId",
+            "columnName": "sourceMessageId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceFingerprint",
+            "columnName": "sourceFingerprint",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceAlternateFingerprint",
+            "columnName": "sourceAlternateFingerprint",
+            "affinity": "TEXT"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_transactions_accountId",
+            "unique": false,
+            "columnNames": [
+              "accountId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_transactions_accountId` ON `${TABLE_NAME}` (`accountId`)"
+          },
+          {
+            "name": "index_transactions_date",
+            "unique": false,
+            "columnNames": [
+              "date"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_transactions_date` ON `${TABLE_NAME}` (`date`)"
+          },
+          {
+            "name": "index_transactions_type",
+            "unique": false,
+            "columnNames": [
+              "type"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_transactions_type` ON `${TABLE_NAME}` (`type`)"
+          },
+          {
+            "name": "index_transactions_sourceConnector_sourceMessageId",
+            "unique": true,
+            "columnNames": [
+              "sourceConnector",
+              "sourceMessageId"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_transactions_sourceConnector_sourceMessageId` ON `${TABLE_NAME}` (`sourceConnector`, `sourceMessageId`)"
+          },
+          {
+            "name": "index_transactions_sourceConnector_sourceFingerprint",
+            "unique": false,
+            "columnNames": [
+              "sourceConnector",
+              "sourceFingerprint"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_transactions_sourceConnector_sourceFingerprint` ON `${TABLE_NAME}` (`sourceConnector`, `sourceFingerprint`)"
+          },
+          {
+            "name": "index_transactions_sourceConnector_sourceAlternateFingerprint",
+            "unique": false,
+            "columnNames": [
+              "sourceConnector",
+              "sourceAlternateFingerprint"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_transactions_sourceConnector_sourceAlternateFingerprint` ON `${TABLE_NAME}` (`sourceConnector`, `sourceAlternateFingerprint`)"
+          }
+        ]
+      },
+      {
+        "tableName": "accounts",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `name` TEXT NOT NULL, `bank` TEXT NOT NULL, `type` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "name",
+            "columnName": "name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "bank",
+            "columnName": "bank",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "type",
+            "columnName": "type",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        }
+      },
+      {
+        "tableName": "queued_sms_candidates",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`candidateKey` TEXT NOT NULL, `sourceConnector` TEXT NOT NULL, `sourceMessageId` TEXT NOT NULL, `sourceFingerprint` TEXT NOT NULL, `sourceAlternateFingerprint` TEXT, `sourceProviderMessageId` TEXT, `sender` TEXT NOT NULL, `rawMessage` TEXT NOT NULL, `date` INTEGER NOT NULL, `sourceTimestamp` INTEGER NOT NULL, `messageType` INTEGER NOT NULL, `origin` TEXT NOT NULL, `state` TEXT NOT NULL, `claimToken` TEXT, `claimedAt` INTEGER, `attemptCount` INTEGER NOT NULL, `lastError` TEXT, `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`candidateKey`))",
+        "fields": [
+          {
+            "fieldPath": "candidateKey",
+            "columnName": "candidateKey",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceConnector",
+            "columnName": "sourceConnector",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceMessageId",
+            "columnName": "sourceMessageId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceFingerprint",
+            "columnName": "sourceFingerprint",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceAlternateFingerprint",
+            "columnName": "sourceAlternateFingerprint",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "sourceProviderMessageId",
+            "columnName": "sourceProviderMessageId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "sender",
+            "columnName": "sender",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "rawMessage",
+            "columnName": "rawMessage",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "date",
+            "columnName": "date",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceTimestamp",
+            "columnName": "sourceTimestamp",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "messageType",
+            "columnName": "messageType",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "origin",
+            "columnName": "origin",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "state",
+            "columnName": "state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "claimToken",
+            "columnName": "claimToken",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "claimedAt",
+            "columnName": "claimedAt",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "attemptCount",
+            "columnName": "attemptCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastError",
+            "columnName": "lastError",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "candidateKey"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_queued_sms_candidates_sourceConnector_sourceMessageId",
+            "unique": true,
+            "columnNames": [
+              "sourceConnector",
+              "sourceMessageId"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_queued_sms_candidates_sourceConnector_sourceMessageId` ON `${TABLE_NAME}` (`sourceConnector`, `sourceMessageId`)"
+          },
+          {
+            "name": "index_queued_sms_candidates_sourceConnector_sourceFingerprint",
+            "unique": false,
+            "columnNames": [
+              "sourceConnector",
+              "sourceFingerprint"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_queued_sms_candidates_sourceConnector_sourceFingerprint` ON `${TABLE_NAME}` (`sourceConnector`, `sourceFingerprint`)"
+          },
+          {
+            "name": "index_queued_sms_candidates_sourceConnector_sourceAlternateFingerprint",
+            "unique": false,
+            "columnNames": [
+              "sourceConnector",
+              "sourceAlternateFingerprint"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_queued_sms_candidates_sourceConnector_sourceAlternateFingerprint` ON `${TABLE_NAME}` (`sourceConnector`, `sourceAlternateFingerprint`)"
+          },
+          {
+            "name": "index_queued_sms_candidates_origin_state",
+            "unique": false,
+            "columnNames": [
+              "origin",
+              "state"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_queued_sms_candidates_origin_state` ON `${TABLE_NAME}` (`origin`, `state`)"
+          }
+        ]
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'ecdafd20b97e20049bc4369bd955493c')"
+    ]
+  }
+}

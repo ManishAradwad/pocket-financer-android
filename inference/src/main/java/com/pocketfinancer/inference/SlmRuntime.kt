@@ -81,6 +81,7 @@ value class SlmRuntimeOwner(val value: String) {
         val ONBOARDING = SlmRuntimeOwner("onboarding")
         val MODEL_UPGRADE = SlmRuntimeOwner("model-upgrade")
         val SMS_WORKER = SlmRuntimeOwner("sms-worker")
+        val LEDGER_EDIT = SlmRuntimeOwner("ledger-edit")
         val SETTINGS_TEST = SlmRuntimeOwner("settings-test")
         val SETTINGS_MANUAL = SlmRuntimeOwner("settings-manual")
     }

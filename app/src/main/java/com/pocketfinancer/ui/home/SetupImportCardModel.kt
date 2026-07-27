@@ -53,6 +53,7 @@ internal fun manualRecentSyncAvailable(
 
 internal fun setupImportCardModel(
     state: SetupImportState,
+    automaticProcessingEnabled: Boolean = true,
     nowMillis: Long = System.currentTimeMillis()
 ): SetupImportCardModel {
     val needsExplicitModelPreparation =
@@ -87,16 +88,59 @@ internal fun setupImportCardModel(
                     error.code.startsWith("MANUAL_")
                 )
     }
-    if (manualError != null) {
+    val recentProcessingNeedsAttention =
+        manualRecentSyncAvailable(state.status) &&
+            state.recentProcessingNeedsAttention
+    if (manualError != null || recentProcessingNeedsAttention) {
+        val unfinishedCount =
+            (
+                state.recentEligibleCandidateCount -
+                    state.recentProcessedCount
+            ).coerceAtLeast(0)
         return SetupImportCardModel(
             eyebrow = "RECENT SCAN NEEDS ATTENTION",
-            title = "The recent SMS scan did not finish",
-            body =
-                "${manualError.message} Your previously verified coverage is unchanged.",
+            title = if (manualError?.code?.startsWith("RECENT_") == true) {
+                "The recent SMS scan did not finish"
+            } else {
+                "Some recent alerts still need attention"
+            },
+            body = manualError?.let { error ->
+                if (error.code.startsWith("RECENT_")) {
+                    "${error.message} Your previously verified coverage is unchanged."
+                } else {
+                    "${error.message} The verified provider range is preserved; " +
+                        "a new scan can safely rediscover unfinished messages."
+                }
+            } ?: buildString {
+                if (unfinishedCount > 0) {
+                    append(
+                        "$unfinishedCount eligible alert" +
+                            if (unfinishedCount == 1) {
+                                " was not completed."
+                            } else {
+                                "s were not completed."
+                            }
+                    )
+                }
+                if (state.recentFailedCount > 0) {
+                    if (isNotEmpty()) append(" ")
+                    append(
+                        "${state.recentFailedCount} alert" +
+                            if (state.recentFailedCount == 1) {
+                                " needs another attempt."
+                            } else {
+                                "s need another attempt."
+                            }
+                    )
+                }
+                append(
+                    " Scan again to rediscover unfinished messages safely."
+                )
+            },
             evidence = coverageDescription(state),
             primaryAction = SetupCardAction.RETRY_RECENT_SYNC,
-            primaryLabel = manualError.actionLabel
-                .takeIf { it.isNotBlank() }
+            primaryLabel = manualError?.actionLabel
+                ?.takeIf { it.isNotBlank() }
                 ?: "Try recent scan again"
         )
     }
@@ -149,9 +193,9 @@ internal fun setupImportCardModel(
             else -> "Checking the last $days days"
         },
         body = "Messages are filtered locally before any model parsing. This state is saved so an interruption is visible.",
-        // Counts are reset before provider I/O, while coverage still describes
-        // the previous successful window. Showing either as current evidence
-        // here would be misleading.
+        // Persisted counts and coverage continue to describe the last
+        // successful provider read until this query commits. Showing them as
+        // evidence for the active window would be misleading.
         evidence = null,
         showProgress = true
     )
@@ -193,7 +237,11 @@ internal fun setupImportCardModel(
     }
 
     SetupImportStatus.READY_NO_HISTORY -> SetupImportCardModel(
-        eyebrow = "READY FOR THE NEXT ALERT",
+        eyebrow = if (automaticProcessingEnabled) {
+            "READY FOR THE NEXT ALERT"
+        } else {
+            "READY · AUTOMATIC UPDATES OFF"
+        },
         title = when (state.emptyReason) {
             SetupEmptyReason.EMPTY_INBOX ->
                 "No SMS were found in the checked history"
@@ -203,11 +251,22 @@ internal fun setupImportCardModel(
                 "Potential alerts were checked, but none were saved"
             SetupEmptyReason.NO_ADDITIONAL_MESSAGES ->
                 "No additional eligible alerts were found"
+            SetupEmptyReason.NO_ELIGIBLE_WITHIN_90_DAYS ->
+                "No eligible alerts were found in the last 90 days"
             else -> "No eligible transaction history was found"
         },
         body = buildString {
             append(coverageDescription(state))
-            append(" Pocket Financer will capture the next eligible alert.")
+            if (automaticProcessingEnabled) {
+                append(
+                    " Pocket Financer will capture the next eligible alert."
+                )
+            } else {
+                append(
+                    " Pocket Financer will not process new alerts " +
+                        "automatically. Run a manual scan or turn updates back on."
+                )
+            }
         },
         evidence = scanEvidence(state),
         primaryAction = SetupCardAction.SCAN_OLDER,
@@ -279,7 +338,8 @@ private fun coverageIsFresh(
         state.recentCoverageEndMillis
             .takeIf { state.hasVerifiedRecentCoverage }
     ).maxOrNull() ?: return false
-    return coverageEnd >= nowMillis - TimeUnit.HOURS.toMillis(24) &&
+    return !state.recentProcessingNeedsAttention &&
+        coverageEnd >= nowMillis - TimeUnit.HOURS.toMillis(24) &&
         coverageEnd <= nowMillis + TimeUnit.MINUTES.toMillis(5)
 }
 
@@ -295,7 +355,21 @@ private fun scanEvidence(state: SetupImportState): String? {
     ) {
         return buildString {
             append("Recent scan: ${state.recentProviderMessageCount} messages checked")
-            append(" Â· ${state.recentEligibleCandidateCount} eligible")
+            append(" · ${state.recentEligibleCandidateCount} eligible")
+            if (state.recentSavedCount > 0) {
+                append(" · ${state.recentSavedCount} saved")
+            }
+            if (state.recentRejectedCount > 0) {
+                append(" · ${state.recentRejectedCount} rejected")
+            }
+            val pending = (
+                state.recentEligibleCandidateCount -
+                    state.recentProcessedCount
+            ).coerceAtLeast(0)
+            if (pending > 0) append(" · $pending unfinished")
+            if (state.recentFailedCount > 0) {
+                append(" · ${state.recentFailedCount} failed")
+            }
         }
     }
     if (!state.hasVerifiedCoverage && state.providerMessageCount == 0) return null

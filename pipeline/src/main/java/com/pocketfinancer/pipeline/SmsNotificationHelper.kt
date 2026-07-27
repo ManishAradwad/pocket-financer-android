@@ -22,25 +22,26 @@ object SmsNotificationHelper {
      * Create the notification channel required for posting notifications on API 26+.
      */
     fun createNotificationChannel(context: Context) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val name = "SMS Transaction Sync"
-            val descriptionText = "Displays stages of local transaction SMS parsing and sync alerts."
-            val importance = NotificationManager.IMPORTANCE_LOW
-            val channel = NotificationChannel(CHANNEL_ID, name, importance).apply {
-                description = descriptionText
-            }
-            val notificationManager: NotificationManager =
-                context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            notificationManager.createNotificationChannel(channel)
+        val name = "SMS Transaction Sync"
+        val descriptionText =
+            "Displays stages of local transaction SMS parsing and sync alerts."
+        val importance = NotificationManager.IMPORTANCE_LOW
+        val channel = NotificationChannel(CHANNEL_ID, name, importance).apply {
+            description = descriptionText
         }
+        val notificationManager: NotificationManager =
+            context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        notificationManager.createNotificationChannel(channel)
     }
 
     /**
-     * Get a unique notification ID for a specific SMS.
+     * Get a stable notification ID for one durable ingestion candidate.
+     *
+     * The opaque key includes connector provenance and the authoritative
+     * provider message ID when available. Sender + timestamp is not sufficient:
+     * legitimate provider rows may share both values.
      */
-    fun getNotificationId(sender: String, date: Long): Int {
-        return (sender + date.toString()).hashCode()
-    }
+    fun getNotificationId(candidateKey: String): Int = candidateKey.hashCode()
 
     private fun getAppPendingIntent(context: Context): PendingIntent {
         val intent = context.packageManager.getLaunchIntentForPackage(context.packageName)?.apply {
@@ -86,10 +87,9 @@ object SmsNotificationHelper {
     /**
      * Post a notification indicating that an SMS has been skipped because it is non-transactional.
      */
-    @Suppress("UNUSED_PARAMETER")
-    fun showSkippedNotification(context: Context, sender: String, body: String, date: Long) {
+    fun showSkippedNotification(context: Context, candidateKey: String) {
         createNotificationChannel(context)
-        val notificationId = getNotificationId(sender, date)
+        val notificationId = getNotificationId(candidateKey)
 
         val builder = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_sys_warning) // fallback built-in icon
@@ -107,12 +107,11 @@ object SmsNotificationHelper {
      */
     fun showProcessingNotification(
         context: Context,
-        sender: String,
-        date: Long,
+        candidateKey: String,
         stageText: String
     ) {
         createNotificationChannel(context)
-        val notificationId = getNotificationId(sender, date)
+        val notificationId = getNotificationId(candidateKey)
 
         val builder = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_notify_sync)
@@ -131,11 +130,10 @@ object SmsNotificationHelper {
      */
     fun showWaitingForModelNotification(
         context: Context,
-        sender: String,
-        date: Long
+        candidateKey: String
     ) {
         createNotificationChannel(context)
-        val notificationId = getNotificationId(sender, date)
+        val notificationId = getNotificationId(candidateKey)
 
         val builder = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_notify_sync_noanim)
@@ -156,11 +154,10 @@ object SmsNotificationHelper {
      */
     fun showRetryNotification(
         context: Context,
-        sender: String,
-        date: Long
+        candidateKey: String
     ) {
         createNotificationChannel(context)
-        val notificationId = getNotificationId(sender, date)
+        val notificationId = getNotificationId(candidateKey)
 
         val builder = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_notify_sync_noanim)
@@ -179,18 +176,18 @@ object SmsNotificationHelper {
      */
     fun showSuccessNotification(
         context: Context,
-        sender: String,
-        date: Long,
-        amount: Double,
-        merchant: String
+        candidateKey: String,
+        amount: Double
     ) {
         createNotificationChannel(context)
-        val notificationId = getNotificationId(sender, date)
+        val notificationId = getNotificationId(candidateKey)
 
         val builder = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_sys_download_done)
-            .setContentTitle("SMS Synced")
-            .setContentText("Extracted ₹${"%,.2f".format(amount)} at $merchant.")
+            .setContentTitle("Transaction saved locally")
+            .setContentText(
+                "Saved a ₹${"%,.2f".format(amount)} transaction from this SMS."
+            )
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .setOngoing(false) // Can be swiped away now
             .setAutoCancel(true)
@@ -204,12 +201,11 @@ object SmsNotificationHelper {
      */
     fun showFailureNotification(
         context: Context,
-        sender: String,
-        date: Long,
+        candidateKey: String,
         reason: String
     ) {
         createNotificationChannel(context)
-        val notificationId = getNotificationId(sender, date)
+        val notificationId = getNotificationId(candidateKey)
 
         val builder = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_notify_error)
@@ -228,12 +224,11 @@ object SmsNotificationHelper {
      */
     fun cancelCandidateNotification(
         context: Context,
-        sender: String,
-        date: Long
+        candidateKey: String
     ) {
         try {
             NotificationManagerCompat.from(context).cancel(
-                getNotificationId(sender, date)
+                getNotificationId(candidateKey)
             )
         } catch (_: Exception) {
             // Notification cleanup must not change durable work settlement.

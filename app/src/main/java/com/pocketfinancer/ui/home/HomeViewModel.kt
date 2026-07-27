@@ -15,6 +15,7 @@ import kotlinx.coroutines.launch
 import com.pocketfinancer.pipeline.SmsFilterPipeline
 import com.pocketfinancer.pipeline.PromptBuilder
 import com.pocketfinancer.pipeline.ExtractionParser
+import com.pocketfinancer.pipeline.AutomaticProcessingPreferences
 import com.pocketfinancer.hardware.DeviceCapabilities
 import com.pocketfinancer.hardware.SlmTier
 import com.pocketfinancer.hardware.isPublishedModelArtifact
@@ -62,7 +63,9 @@ data class HomeUiState(
     val totalTransactionCount: Int = 0,
     val syncState: HomeSyncState = HomeSyncState(),
     val upgradeRecommendation: ModelUpgradeRecommendation = ModelUpgradeRecommendation(),
-    val setupImportState: SetupImportState = SetupImportState()
+    val setupImportState: SetupImportState = SetupImportState(),
+    val automaticProcessingEnabled: Boolean =
+        AutomaticProcessingPreferences.DEFAULT_ENABLED
 )
 
 @HiltViewModel
@@ -79,7 +82,9 @@ class HomeViewModel @Inject constructor(
     private val modelDownloader: ModelDownloader,
     private val onboardingSyncManager: OnboardingSyncManager,
     private val smsRepository: SmsRepository,
-    private val setupImportStore: SetupImportStore
+    private val setupImportStore: SetupImportStore,
+    private val automaticProcessingPreferences:
+        AutomaticProcessingPreferences
 ) : ViewModel() {
 
     private val _selectedPeriod = MutableStateFlow("Day")
@@ -93,7 +98,8 @@ class HomeViewModel @Inject constructor(
         modelDownloader.state,
         onboardingSyncManager.syncState,
         _isDismissed,
-        setupImportStore.state
+        setupImportStore.state,
+        automaticProcessingPreferences.enabled
     ) { flows ->
         @Suppress("UNCHECKED_CAST")
         val txs = flows[0] as List<Transaction>
@@ -103,6 +109,7 @@ class HomeViewModel @Inject constructor(
         val onboardingSyncState = flows[4] as OnboardingSyncManager.OnboardingSyncState
         val isDismissed = flows[5] as Boolean
         val setupImportState = flows[6] as SetupImportState
+        val automaticProcessingEnabled = flows[7] as Boolean
 
         val periodDataMap = calculatePeriodData(txs)
         val device = deviceCapabilities.assessDevice()
@@ -173,7 +180,8 @@ class HomeViewModel @Inject constructor(
             totalTransactionCount = txs.size,
             syncState = syncState,
             upgradeRecommendation = upgradeRec,
-            setupImportState = setupImportState
+            setupImportState = setupImportState,
+            automaticProcessingEnabled = automaticProcessingEnabled
         )
     }.stateIn(
         scope = viewModelScope,

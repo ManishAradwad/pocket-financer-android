@@ -136,4 +136,24 @@ class SmsReader @Inject constructor(
         }
         return results
     }
+
+    /**
+     * Cheap existence probe used to distinguish an actually empty inbox from
+     * one whose messages are all older than the adaptive discovery window.
+     *
+     * Only `_id` is projected and at most the first provider row is inspected;
+     * no SMS body or sender is materialized.
+     */
+    fun hasAnyInboxMessage(maxDate: Long = Long.MAX_VALUE): Boolean {
+        val cursor = context.contentResolver.query(
+            Uri.parse("content://sms/inbox"),
+            arrayOf("_id"),
+            "date <= ?",
+            arrayOf(maxDate.toString()),
+            "date DESC"
+        ) ?: throw IllegalStateException(
+            "The SMS provider did not return a readable inbox cursor."
+        )
+        return cursor.use { it.moveToFirst() }
+    }
 }

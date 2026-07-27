@@ -79,6 +79,7 @@ class SetupImportStoreTest {
                 status = SetupImportStatus.PROCESSING,
                 coverageWindowDays = 30,
                 activeScanWindowDays = 30,
+                activeScanProviderMaxDateMillis = 250,
                 coverageStartMillis = 100,
                 coverageEndMillis = 200,
                 providerMessageCount = 15,
@@ -100,6 +101,7 @@ class SetupImportStoreTest {
         assertEquals(SetupImportStore.ERROR_INTERRUPTED, restarted.actionableError?.code)
         assertEquals(30, restarted.coverageWindowDays)
         assertEquals(30, restarted.activeScanWindowDays)
+        assertEquals(250L, restarted.activeScanProviderMaxDateMillis)
         assertEquals(1, restarted.savedCount)
         assertTrue(restarted.modelPrepared)
     }
@@ -181,6 +183,7 @@ class SetupImportStoreTest {
             it.copy(
                 status = SetupImportStatus.SCANNING,
                 activeScanWindowDays = 36_500,
+                activeScanProviderMaxDateMillis = 9_000,
                 providerMessageCount = 0,
                 eligibleCandidateCount = 0
             )
@@ -203,6 +206,7 @@ class SetupImportStoreTest {
         assertEquals(SetupImportStatus.FAILED, restarted.status)
         assertEquals(30, restarted.coverageWindowDays)
         assertEquals(36_500, restarted.activeScanWindowDays)
+        assertEquals(9_000L, restarted.activeScanProviderMaxDateMillis)
         assertEquals(100L, restarted.coverageStartMillis)
         assertEquals(200L, restarted.coverageEndMillis)
         assertEquals(200L, restarted.lastSuccessfulScanMillis)
@@ -331,6 +335,10 @@ class SetupImportStoreTest {
                 recentScanWindowDays = 7,
                 recentProviderMessageCount = 18,
                 recentEligibleCandidateCount = 2,
+                recentProcessedCount = 2,
+                recentSavedCount = 1,
+                recentRejectedCount = 1,
+                recentFailedCount = 0,
                 lastSuccessfulRecentScanMillis = 400
             )
         }
@@ -349,7 +357,46 @@ class SetupImportStoreTest {
         assertEquals(7, restarted.recentScanWindowDays)
         assertEquals(18, restarted.recentProviderMessageCount)
         assertEquals(2, restarted.recentEligibleCandidateCount)
+        assertEquals(2, restarted.recentProcessedCount)
+        assertEquals(1, restarted.recentSavedCount)
+        assertEquals(1, restarted.recentRejectedCount)
+        assertEquals(0, restarted.recentFailedCount)
         assertEquals(400L, restarted.lastSuccessfulRecentScanMillis)
+    }
+
+    @Test
+    fun `unfinished recent candidate remains visible after process restart`() {
+        val fake = FakeSharedPreferences()
+        val firstProcess = SetupImportStore(
+            fake.preferences,
+            hasSmsPermissions = true
+        )
+        firstProcess.update {
+            it.copy(
+                status = SetupImportStatus.READY,
+                recentCoverageStartMillis = 100,
+                recentCoverageEndMillis = 200,
+                recentScanWindowDays = 7,
+                recentProviderMessageCount = 8,
+                recentEligibleCandidateCount = 2,
+                recentProcessedCount = 1,
+                recentSavedCount = 1,
+                lastSuccessfulRecentScanMillis = 210,
+                modelPrepared = true
+            )
+        }
+
+        val restarted = SetupImportStore(
+            fake.preferences,
+            hasSmsPermissions = true
+        ).state.value
+
+        assertEquals(SetupImportStatus.READY, restarted.status)
+        assertTrue(restarted.hasVerifiedRecentCoverage)
+        assertTrue(restarted.hasIncompleteRecentProcessing)
+        assertTrue(restarted.recentProcessingNeedsAttention)
+        assertEquals(1, restarted.recentProcessedCount)
+        assertEquals(1, restarted.recentSavedCount)
     }
 
     @Test
@@ -519,6 +566,7 @@ class SetupImportStoreTest {
                 coverageEndMillis = 200,
                 coverageWindowDays = 90,
                 activeScanWindowDays = 90,
+                activeScanProviderMaxDateMillis = 500,
                 providerMessageCount = 40,
                 eligibleCandidateCount = 4,
                 processedCount = 4,
@@ -531,6 +579,9 @@ class SetupImportStoreTest {
                 recentScanWindowDays = 7,
                 recentProviderMessageCount = 8,
                 recentEligibleCandidateCount = 2,
+                recentProcessedCount = 2,
+                recentSavedCount = 1,
+                recentRejectedCount = 1,
                 lastSuccessfulRecentScanMillis = 400,
                 modelDownloadConfirmed = true,
                 modelPrepared = true
@@ -563,12 +614,17 @@ class SetupImportStoreTest {
         assertEquals(SetupImportStatus.NOT_STARTED, restarted.state.value.status)
         assertNull(restarted.state.value.coverageStartMillis)
         assertNull(restarted.state.value.coverageWindowDays)
+        assertNull(restarted.state.value.activeScanProviderMaxDateMillis)
         assertNull(restarted.state.value.recentCoverageStartMillis)
         assertNull(restarted.state.value.recentScanWindowDays)
         assertEquals(0, restarted.state.value.providerMessageCount)
         assertEquals(0, restarted.state.value.processedCount)
         assertEquals(0, restarted.state.value.recentProviderMessageCount)
         assertEquals(0, restarted.state.value.recentEligibleCandidateCount)
+        assertEquals(0, restarted.state.value.recentProcessedCount)
+        assertEquals(0, restarted.state.value.recentSavedCount)
+        assertEquals(0, restarted.state.value.recentRejectedCount)
+        assertEquals(0, restarted.state.value.recentFailedCount)
         assertTrue(restarted.state.value.modelDownloadConfirmed)
         assertTrue(restarted.state.value.modelPrepared)
     }

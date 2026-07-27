@@ -35,7 +35,7 @@ import javax.inject.Singleton
         AccountEntity::class,
         QueuedSmsCandidateEntity::class
     ],
-    version = 4,
+    version = 5,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -324,6 +324,59 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * Makes connector message ids authoritative.
+         *
+         * A fallback message id already embeds the deterministic fingerprint,
+         * so the unique message-id index continues to serialize concurrent
+         * provider-less retries. The fingerprint itself must not be unique:
+         * two provider rows can legitimately contain byte-for-byte identical
+         * evidence while carrying different provider ids.
+         *
+         * Existing rows and candidate primary keys are deliberately left
+         * untouched. In particular, a V4 candidate enriched after a broadcast
+         * keeps the key already referenced by WorkManager.
+         */
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "DROP INDEX IF EXISTS " +
+                        "`index_transactions_sourceConnector_sourceFingerprint`"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS " +
+                        "`index_transactions_sourceConnector_sourceFingerprint` " +
+                        "ON `transactions` (`sourceConnector`, `sourceFingerprint`)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS " +
+                        "`index_transactions_sourceConnector_" +
+                        "sourceAlternateFingerprint` " +
+                        "ON `transactions` " +
+                        "(`sourceConnector`, `sourceAlternateFingerprint`)"
+                )
+                db.execSQL(
+                    "DROP INDEX IF EXISTS " +
+                        "`index_queued_sms_candidates_sourceConnector_" +
+                        "sourceFingerprint`"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS " +
+                        "`index_queued_sms_candidates_sourceConnector_" +
+                        "sourceFingerprint` " +
+                        "ON `queued_sms_candidates` " +
+                        "(`sourceConnector`, `sourceFingerprint`)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS " +
+                        "`index_queued_sms_candidates_sourceConnector_" +
+                        "sourceAlternateFingerprint` " +
+                        "ON `queued_sms_candidates` " +
+                        "(`sourceConnector`, `sourceAlternateFingerprint`)"
+                )
+            }
+        }
+
         private fun ContentValues.putNullableLong(
             column: String,
             cursor: android.database.Cursor,
@@ -363,7 +416,12 @@ abstract class AppDatabase : RoomDatabase() {
 
             val builder = Room.databaseBuilder(context, AppDatabase::class.java, DB_NAME)
                 .openHelperFactory(factory)
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                .addMigrations(
+                    MIGRATION_1_2,
+                    MIGRATION_2_3,
+                    MIGRATION_3_4,
+                    MIGRATION_4_5
+                )
 
             return builder.build()
         }

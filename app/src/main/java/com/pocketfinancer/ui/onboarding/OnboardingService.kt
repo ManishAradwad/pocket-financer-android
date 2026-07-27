@@ -28,6 +28,7 @@ import com.pocketfinancer.setup.AdaptiveHistoryScanPolicy
 import com.pocketfinancer.setup.HistoryScanDecision
 import com.pocketfinancer.setup.SetupActionableError
 import com.pocketfinancer.setup.SetupEmptyReason
+import com.pocketfinancer.setup.SetupImportState
 import com.pocketfinancer.setup.SetupImportStatus
 import com.pocketfinancer.setup.SetupImportStore
 import com.pocketfinancer.setup.SetupPauseReason
@@ -711,7 +712,10 @@ class OnboardingService : Service() {
             suspend fun completeRun(
                 notificationTitle: String,
                 notificationText: String
-            ) {
+            ): Boolean {
+                if (!ensureSmsPermissionForTerminalPublication()) {
+                    return false
+                }
                 val stillOwnsSelection = withContext(NonCancellable) {
                     handoff.commit {
                         persistCompletedSelection(slm)
@@ -725,6 +729,7 @@ class OnboardingService : Service() {
                     title = notificationTitle,
                     text = notificationText
                 )
+                return true
             }
 
             addLog("Model: Loaded successfully on device CPU.")
@@ -743,22 +748,27 @@ class OnboardingService : Service() {
                 coveredWindowDays = coveredHistoryWindowDays,
                 resumeWindowDays = resumeHistoryWindowDays
             )
+            // Every adaptive query shares one immutable upper bound. Coverage
+            // therefore describes exactly what the provider was asked for,
+            // even when discovery widens from 7 to 30 to 90 days.
+            val durableBeforeScan = setupImportStore.state.value
+            val providerMaxDate = historicalScanProviderMaxDate(
+                state = durableBeforeScan,
+                resumeWindowDays = resumeHistoryWindowDays,
+                nowMillis = System.currentTimeMillis()
+            )
             var rawMessages =
                 emptyList<com.pocketfinancer.sms.SmsReader.SmsMessage>()
             var transactionalMessages =
                 emptyList<com.pocketfinancer.sms.SmsReader.SmsMessage>()
+            var alreadySavedCount = 0
 
             while (true) {
                 setupImportStore.update {
                     it.copy(
                         status = SetupImportStatus.SCANNING,
                         activeScanWindowDays = historyWindowDays,
-                        providerMessageCount = 0,
-                        eligibleCandidateCount = 0,
-                        processedCount = 0,
-                        savedCount = 0,
-                        rejectedCount = 0,
-                        failedCount = 0,
+                        activeScanProviderMaxDateMillis = providerMaxDate,
                         emptyReason = null,
                         pauseReason = null,
                         actionableError = null
@@ -785,7 +795,8 @@ class OnboardingService : Service() {
                     withContext(Dispatchers.IO) {
                         smsRepository.fetchHistory(
                             daysBack = historyWindowDays,
-                            limit = Int.MAX_VALUE
+                            limit = Int.MAX_VALUE,
+                            maxDate = providerMaxDate
                         )
                     }
                 } catch (securityError: SecurityException) {
@@ -799,6 +810,10 @@ class OnboardingService : Service() {
                     }
                     return
                 }
+                if (!smsRepository.hasPermissions()) {
+                    ensureSmsPermissionForTerminalPublication()
+                    return
+                }
                 val deterministicallyEligible = rawMessages.filter { message ->
                     smsFilterPipeline.isTransactional(
                         message.address,
@@ -810,26 +825,65 @@ class OnboardingService : Service() {
                         com.pocketfinancer.sms.SmsReader.SmsMessage
                     >()
                     for (message in deterministicallyEligible) {
-                        if (!transactionRepository.exists(message.sourceIdentity)) {
+                        if (
+                            !transactionRepository
+                                .preserveSourceMetadataIfExists(
+                                    sourceIdentity = message.sourceIdentity,
+                                    receivedDate = message.date
+                                )
+                        ) {
                             unsaved += message
                         }
                     }
                     unsaved
                 }
-                val alreadySavedCount =
+                alreadySavedCount =
                     deterministicallyEligible.size - transactionalMessages.size
+                val inboxHasAnyMessage = if (
+                    rawMessages.isEmpty() &&
+                    historyWindowDays >=
+                        historyScanPolicy.widestAutomaticWindowDays
+                ) {
+                    try {
+                        withContext(Dispatchers.IO) {
+                            smsRepository.hasAnyInboxMessage(providerMaxDate)
+                        }
+                    } catch (securityError: SecurityException) {
+                        setupImportStore.reconcilePermission(granted = false)
+                        syncManager.updateState {
+                            it.copy(
+                                isRunning = false,
+                                modelLoadError =
+                                    "SMS access was removed during the scan."
+                            )
+                        }
+                        return
+                    }
+                } else {
+                    null
+                }
+                if (!smsRepository.hasPermissions()) {
+                    ensureSmsPermissionForTerminalPublication()
+                    return
+                }
                 val scanCompletedAt = System.currentTimeMillis()
                 setupImportStore.update {
                     it.copy(
-                        coverageStartMillis = scanCompletedAt -
-                            TimeUnit.DAYS.toMillis(
-                                historyWindowDays.toLong()
-                            ),
-                        coverageEndMillis = scanCompletedAt,
+                        coverageStartMillis = (
+                            providerMaxDate -
+                                TimeUnit.DAYS.toMillis(
+                                    historyWindowDays.toLong()
+                                )
+                            ).coerceAtLeast(0L),
+                        coverageEndMillis = providerMaxDate,
                         coverageWindowDays = historyWindowDays,
                         providerMessageCount = rawMessages.size,
                         eligibleCandidateCount =
-                            transactionalMessages.size,
+                            deterministicallyEligible.size,
+                        processedCount = alreadySavedCount,
+                        savedCount = alreadySavedCount,
+                        rejectedCount = 0,
+                        failedCount = 0,
                         lastSuccessfulScanMillis = scanCompletedAt
                     )
                 }
@@ -855,7 +909,8 @@ class OnboardingService : Service() {
                         windowDays = historyWindowDays,
                         providerMessageCount = rawMessages.size,
                         eligibleCandidateCount =
-                            transactionalMessages.size
+                            transactionalMessages.size,
+                        inboxHasAnyMessage = inboxHasAnyMessage
                     )
                 ) {
                     is HistoryScanDecision.Widen -> {
@@ -869,6 +924,15 @@ class OnboardingService : Service() {
                     is HistoryScanDecision.Process -> break
 
                     is HistoryScanDecision.NoEligibleHistory -> {
+                        if (!ensureSmsPermissionForTerminalPublication()) {
+                            return
+                        }
+                        val terminalStatus =
+                            if (alreadySavedCount > 0) {
+                                SetupImportStatus.READY
+                            } else {
+                                SetupImportStatus.READY_NO_HISTORY
+                            }
                         val terminalEmptyReason =
                             if (alreadySavedCount > 0) {
                                 SetupEmptyReason.NO_ADDITIONAL_MESSAGES
@@ -877,9 +941,9 @@ class OnboardingService : Service() {
                             }
                         setupImportStore.update {
                             it.copy(
-                                status =
-                                    SetupImportStatus.READY_NO_HISTORY,
+                                status = terminalStatus,
                                 activeScanWindowDays = null,
+                                activeScanProviderMaxDateMillis = null,
                                 emptyReason = terminalEmptyReason,
                                 actionableError = null
                             )
@@ -887,15 +951,26 @@ class OnboardingService : Service() {
                         syncManager.updateState {
                             it.copy(
                                 syncProgress = 1f,
-                                syncMessage =
-                                    "Ready for the next eligible alert."
+                                syncMessage = if (
+                                    terminalStatus ==
+                                        SetupImportStatus.READY
+                                ) {
+                                    "Saved transaction history is ready."
+                                } else {
+                                    "Ready for a future manual or automatic scan."
+                                }
                             )
                         }
                         completeRun(
                             notificationTitle =
                                 "Pocket Financer Is Ready",
-                            notificationText =
-                                "No eligible history was found. New alerts will be captured."
+                            notificationText = if (
+                                terminalStatus == SetupImportStatus.READY
+                            ) {
+                                "Previously saved transaction history is ready."
+                            } else {
+                                "No eligible history was found in the checked range."
+                            }
                         )
                         return
                     }
@@ -909,8 +984,8 @@ class OnboardingService : Service() {
             setupImportStore.update {
                 it.copy(
                     status = SetupImportStatus.PROCESSING,
-                    processedCount = 0,
-                    savedCount = 0,
+                    processedCount = alreadySavedCount,
+                    savedCount = alreadySavedCount,
                     rejectedCount = 0,
                     failedCount = 0,
                     emptyReason = null,
@@ -925,7 +1000,7 @@ class OnboardingService : Service() {
         val loopStartTime = System.currentTimeMillis()
         val defaultTimePerTxMs = 10000L
         var parsedCount = 0
-        var processedCount = 0
+        var processedCount = alreadySavedCount
         var rejectedCount = 0
         var failedCount = 0
         var concurrentDuplicateCount = 0
@@ -986,7 +1061,10 @@ class OnboardingService : Service() {
                 setupImportStore.update {
                     it.copy(
                         processedCount = processedCount,
-                        savedCount = parsedCount,
+                        savedCount =
+                            alreadySavedCount +
+                                parsedCount +
+                                concurrentDuplicateCount,
                         rejectedCount = rejectedCount,
                         failedCount = failedCount
                     )
@@ -1035,7 +1113,10 @@ class OnboardingService : Service() {
             setupImportStore.update {
                 it.copy(
                     processedCount = processedCount,
-                    savedCount = parsedCount,
+                    savedCount =
+                        alreadySavedCount +
+                            parsedCount +
+                            concurrentDuplicateCount,
                     rejectedCount = rejectedCount,
                     failedCount = failedCount
                 )
@@ -1055,18 +1136,34 @@ class OnboardingService : Service() {
             0.98f
         )
 
+        if (!ensureSmsPermissionForTerminalPublication()) {
+            return
+        }
+        val terminalSavedCount =
+            alreadySavedCount + parsedCount + concurrentDuplicateCount
         val terminalStatus = setupTerminalStatus(
-            savedCount = parsedCount,
+            savedCount = terminalSavedCount,
             failedCount = failedCount,
-            concurrentDuplicateCount = concurrentDuplicateCount
+            concurrentDuplicateCount = 0
         )
         setupImportStore.update {
             it.copy(
                 status = terminalStatus,
+                processedCount = processedCount,
+                savedCount = terminalSavedCount,
+                rejectedCount = rejectedCount,
+                failedCount = failedCount,
                 activeScanWindowDays = if (
                     terminalStatus == SetupImportStatus.FAILED
                 ) {
                     it.activeScanWindowDays
+                } else {
+                    null
+                },
+                activeScanProviderMaxDateMillis = if (
+                    terminalStatus == SetupImportStatus.FAILED
+                ) {
+                    it.activeScanProviderMaxDateMillis
                 } else {
                     null
                 },
@@ -1127,7 +1224,7 @@ class OnboardingService : Service() {
                 SetupImportStatus.FAILED ->
                     "$parsedCount saved; $failedCount need another attempt."
                 SetupImportStatus.READY_NO_HISTORY ->
-                    "No transaction was saved. New eligible alerts will be captured."
+                    "No transaction was saved from the checked candidates."
                 else -> "$parsedCount transaction${if (parsedCount == 1) "" else "s"} saved locally."
             }
         )
@@ -1137,6 +1234,28 @@ class OnboardingService : Service() {
                 provisionalPin?.rollbackUnlessCommitted()
             }
         }
+    }
+
+    /**
+     * Permission can be revoked while provider rows are filtered or while the
+     * model is parsing an already-read candidate. Re-check immediately before
+     * any READY publication so restart/recovery shows the permission gate
+     * instead of a stale terminal success.
+     */
+    private fun ensureSmsPermissionForTerminalPublication(): Boolean {
+        if (smsRepository.hasPermissions()) return true
+        setupImportStore.reconcilePermission(granted = false)
+        syncManager.updateState {
+            it.copy(
+                isRunning = false,
+                isDownloading = false,
+                isCancellationAllowed = false,
+                syncMessage = "SMS access must be restored to finish setup.",
+                modelLoadError =
+                    "SMS access was removed before setup could finish."
+            )
+        }
+        return false
     }
 
     private fun persistCompletedSelection(slm: SlmTier): Boolean {
@@ -1218,6 +1337,24 @@ internal fun initialHistoryWindowDays(
     coveredWindowDays: Int?,
     resumeWindowDays: Int?
 ): Int = resumeWindowDays ?: policy.firstWindowAfter(coveredWindowDays)
+
+internal fun historicalScanProviderMaxDate(
+    state: SetupImportState,
+    resumeWindowDays: Int?,
+    nowMillis: Long
+): Long =
+    state.activeScanProviderMaxDateMillis
+        ?.takeIf {
+            resumeWindowDays != null &&
+                state.activeScanWindowDays == resumeWindowDays
+        }
+        ?: state.coverageEndMillis
+            ?.takeIf {
+                resumeWindowDays != null &&
+                    state.coverageWindowDays == resumeWindowDays &&
+                    state.lastSuccessfulScanMillis != null
+            }
+        ?: nowMillis
 
 internal fun scrubCompletedOnboardingState(
     state: OnboardingSyncManager.OnboardingSyncState

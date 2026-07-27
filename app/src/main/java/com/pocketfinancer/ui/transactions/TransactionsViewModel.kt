@@ -15,7 +15,10 @@ import com.pocketfinancer.pipeline.SmsFilterPipeline
 import com.pocketfinancer.pipeline.PromptBuilder
 import com.pocketfinancer.pipeline.ExtractionParser
 import com.pocketfinancer.inference.SlmRuntime
+import com.pocketfinancer.inference.SlmRuntimeOwner
+import com.pocketfinancer.SlmAppFlowCoordinator
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -23,6 +26,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
 enum class SortOption {
@@ -51,7 +55,8 @@ class TransactionsViewModel @Inject constructor(
     private val smsFilterPipeline: SmsFilterPipeline,
     private val promptBuilder: PromptBuilder,
     private val slmRuntime: SlmRuntime,
-    private val extractionParser: ExtractionParser
+    private val extractionParser: ExtractionParser,
+    private val appFlowCoordinator: SlmAppFlowCoordinator
 ) : ViewModel() {
 
     private val _activeSegment = MutableStateFlow("All")
@@ -165,20 +170,22 @@ class TransactionsViewModel @Inject constructor(
         accountName: String
     ) {
         viewModelScope.launch {
-            val account = accountRepository.getOrCreate(
-                name = accountName.trim(),
-                bank = "Unknown Account",
-                type = "auto-extracted"
-            )
-            val updated = transactionRepository.updateTransaction(
-                id = id,
-                amount = amount,
-                merchant = merchant,
-                type = type,
-                accountId = account.id
-            )
-            if (_selectedTransaction.value?.id == id) {
-                _selectedTransaction.value = updated
+            withLedgerEditAdmission(appFlowCoordinator) {
+                val account = accountRepository.getOrCreate(
+                    name = accountName.trim(),
+                    bank = "Unknown Account",
+                    type = "auto-extracted"
+                )
+                val updated = transactionRepository.updateTransaction(
+                    id = id,
+                    amount = amount,
+                    merchant = merchant,
+                    type = type,
+                    accountId = account.id
+                )
+                if (_selectedTransaction.value?.id == id) {
+                    _selectedTransaction.value = updated
+                }
             }
         }
     }
@@ -222,5 +229,25 @@ class TransactionsViewModel @Inject constructor(
     private companion object {
         const val SOURCE_EVIDENCE_UNAVAILABLE =
             "Source evidence is unavailable after terminal processing."
+    }
+}
+
+/**
+ * Admits the complete financial write before it can create an account or
+ * mutate a ledger row. Erase-all pauses this coordinator, cancels and joins
+ * already-admitted edits, then rejects new edits until encrypted tables are
+ * empty and the shell has been durably reset.
+ */
+internal suspend fun <T> withLedgerEditAdmission(
+    coordinator: SlmAppFlowCoordinator,
+    block: suspend () -> T
+): T? {
+    val lease = coordinator.tryEnter(SlmRuntimeOwner.LEDGER_EDIT) ?: return null
+    return try {
+        block()
+    } finally {
+        withContext(NonCancellable) {
+            lease.release()
+        }
     }
 }

@@ -20,6 +20,8 @@ data class SetupImportState(
      * resumable without falsely claiming the read already succeeded.
      */
     val activeScanWindowDays: Int? = null,
+    /** Immutable provider upper bound for the active historical scan. */
+    val activeScanProviderMaxDateMillis: Long? = null,
     val providerMessageCount: Int = 0,
     val eligibleCandidateCount: Int = 0,
     val processedCount: Int = 0,
@@ -38,6 +40,17 @@ data class SetupImportState(
     val recentScanWindowDays: Int? = null,
     val recentProviderMessageCount: Int = 0,
     val recentEligibleCandidateCount: Int = 0,
+    /**
+     * Durable outcome counters for the most recent manual provider scan.
+     *
+     * The Home queue is process memory only. Keeping these counts beside the
+     * verified provider range prevents a killed process from turning unfinished
+     * candidates into a misleading "up to date" state.
+     */
+    val recentProcessedCount: Int = 0,
+    val recentSavedCount: Int = 0,
+    val recentRejectedCount: Int = 0,
+    val recentFailedCount: Int = 0,
     val lastSuccessfulRecentScanMillis: Long? = null,
     val emptyReason: SetupEmptyReason? = null,
     val pauseReason: SetupPauseReason? = null,
@@ -61,6 +74,14 @@ data class SetupImportState(
                 recentCoverageEndMillis != null &&
                 recentScanWindowDays != null &&
                 lastSuccessfulRecentScanMillis != null
+
+    val hasIncompleteRecentProcessing: Boolean
+        get() =
+            hasVerifiedRecentCoverage &&
+                recentProcessedCount < recentEligibleCandidateCount
+
+    val recentProcessingNeedsAttention: Boolean
+        get() = hasIncompleteRecentProcessing || recentFailedCount > 0
 
     companion object {
         val ACTIVE_STATUSES = setOf(

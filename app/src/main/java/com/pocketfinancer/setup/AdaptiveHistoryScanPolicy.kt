@@ -32,7 +32,13 @@ class AdaptiveHistoryScanPolicy(
     fun decide(
         windowDays: Int,
         providerMessageCount: Int,
-        eligibleCandidateCount: Int
+        eligibleCandidateCount: Int,
+        /**
+         * Supplied only at the widest automatic boundary when the selected
+         * range itself is empty. `null` means the coordinator did not perform
+         * the cheap all-history existence probe.
+         */
+        inboxHasAnyMessage: Boolean? = null
     ): HistoryScanDecision {
         require(providerMessageCount >= 0)
         require(eligibleCandidateCount >= 0)
@@ -49,9 +55,12 @@ class AdaptiveHistoryScanPolicy(
             HistoryScanDecision.NoEligibleHistory(
                 windowDays = windowDays,
                 reason = when {
-                    providerMessageCount == 0 ->
+                    providerMessageCount > 0 ->
+                        SetupEmptyReason.FILTERED_OUT
+                    inboxHasAnyMessage == false ->
                         SetupEmptyReason.EMPTY_INBOX
-                    else -> SetupEmptyReason.FILTERED_OUT
+                    else ->
+                        SetupEmptyReason.NO_ELIGIBLE_WITHIN_90_DAYS
                 }
             )
         }
