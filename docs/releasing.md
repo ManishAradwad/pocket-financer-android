@@ -280,9 +280,12 @@ artifacts being immutable.
 - **Release PR does not appear:** confirm the merged squash title is `feat:`,
   `fix:`, or breaking; inspect the Release Please workflow; confirm the token is
   present and unexpired. Do not create a tag manually.
-- **Release PR CI does not start:** confirm the workflow used
-  `RELEASE_PLEASE_TOKEN`, not only `GITHUB_TOKEN`, and that the token can create
-  pull-request events.
+- **Release PR CI does not start:** with the built-in `GITHUB_TOKEN`, the
+  Release workflow explicitly dispatches `ci.yml` on the updated release
+  branch. Confirm the release job still has `actions: write`, `ci.yml` still
+  supports `workflow_dispatch`, and the dispatched run targets the release PR
+  head. If `RELEASE_PLEASE_TOKEN` is configured, its normal pull-request event
+  is expected to start CI instead.
 - **Signing fails:** verify only the existence and exact names of the four
   secrets, the stored alias, and the keystore backup. Do not echo decoded
   material or weaken the build to accept an unsigned APK.
