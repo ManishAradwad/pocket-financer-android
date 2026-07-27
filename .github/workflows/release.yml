@@ -229,6 +229,7 @@ jobs:
           echo "apk-name=$apk_name" >> "$GITHUB_OUTPUT"
 
       - name: Preserve release diagnostics
+        if: always()
         uses: actions/upload-artifact@v6
         with:
           name: release-diagnostics-${{ env.RELEASE_TAG }}
