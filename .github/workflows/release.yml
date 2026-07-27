@@ -21,6 +21,7 @@ jobs:
     if: github.event_name != 'workflow_dispatch' || inputs.release_tag == ''
     runs-on: ubuntu-latest
     permissions:
+      actions: write
       contents: write
       issues: write
       pull-requests: write
@@ -37,6 +38,31 @@ jobs:
         uses: googleapis/release-please-action@v5
         with:
           token: ${{ secrets.RELEASE_PLEASE_TOKEN || github.token }}
+
+      - name: Trigger CI for updated release pull request
+        if: steps.release.outputs.prs_created == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_PLEASE_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          RELEASE_PR: ${{ steps.release.outputs.pr }}
+          RELEASE_PRS: ${{ steps.release.outputs.prs }}
+        run: |
+          set -euo pipefail
+          if [ -n "$RELEASE_PLEASE_TOKEN" ]; then
+            exit 0
+          fi
+
+          head_branch="$(
+            jq -r '.headBranchName // empty' <<< "$RELEASE_PR"
+          )"
+          if [ -z "$head_branch" ]; then
+            head_branch="$(
+              jq -r '.[0].headBranchName // empty' <<< "$RELEASE_PRS"
+            )"
+          fi
+          test -n "$head_branch"
+          gh workflow run ci.yml --ref "$head_branch"
 
   build-and-publish:
     name: Build, verify, and publish signed APK
@@ -203,6 +229,7 @@ jobs:
           echo "apk-name=$apk_name" >> "$GITHUB_OUTPUT"
 
       - name: Preserve release diagnostics
+        if: always()
         uses: actions/upload-artifact@v6
         with:
           name: release-diagnostics-${{ env.RELEASE_TAG }}
