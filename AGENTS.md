@@ -73,4 +73,6 @@ merged.
 Codex may inspect the release pull request and report whether its version,
 changelog, and checks are correct. Codex must merge it only after the user
 explicitly asks to publish or ship the release. Follow
-`docs/releasing.md` for signing setup, verification, hotfixes, and recovery.
+`docs/ci-cd.md` for the authoritative automation and repository-controls
+reference, and `docs/releasing.md` for signing setup, verification, hotfixes,
+and recovery.

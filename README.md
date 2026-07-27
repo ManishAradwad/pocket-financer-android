@@ -82,12 +82,12 @@ pocket-financer-android/
 
 | Module | Core Responsibility | Key Stack / Components |
 | :--- | :--- | :--- |
-| **[`:app`](file:///d:/Personal_Projects/pocket-financer-android/app)** | Main User Interface & Settings | Jetpack Compose, Navigation Compose, Hilt, Material 3 |
-| **[`:pipeline`](file:///d:/Personal_Projects/pocket-financer-android/pipeline)** | SMS Processing & Parsing Flow orchestration | Kotlin Coroutines, Hilt, JSON Serialization |
-| **[`:inference`](file:///d:/Personal_Projects/pocket-financer-android/inference)** | Model runner & Assets manager | llama.cpp Native C++, Android NDK, CMake, JNI Bridge |
-| **[`:data`](file:///d:/Personal_Projects/pocket-financer-android/data)** | Cryptographic Persistence | Room DB, SQLCipher, SQLite, AES-256 |
-| **[`:sms`](file:///d:/Personal_Projects/pocket-financer-android/sms)** | Message capture and monitoring | Telephony API, ContentProvider, Kotlin Flows |
-| **[`:hardware`](file:///d:/Personal_Projects/pocket-financer-android/hardware)** | CPU features profiling & model tuning | System OS API, Android NDK cpufeatures |
+| **[`:app`](app)** | Main User Interface & Settings | Jetpack Compose, Navigation Compose, Hilt, Material 3 |
+| **[`:pipeline`](pipeline)** | SMS Processing & Parsing Flow orchestration | Kotlin Coroutines, Hilt, JSON Serialization |
+| **[`:inference`](inference)** | Model runner & Assets manager | llama.cpp Native C++, Android NDK, CMake, JNI Bridge |
+| **[`:data`](data)** | Cryptographic Persistence | Room DB, SQLCipher, SQLite, AES-256 |
+| **[`:sms`](sms)** | Message capture and monitoring | Telephony API, ContentProvider, Kotlin Flows |
+| **[`:hardware`](hardware)** | CPU features profiling & model tuning | System OS API, Android NDK cpufeatures |
 
 ---
 
@@ -96,11 +96,11 @@ pocket-financer-android/
 Extracting structured data from highly unstructured, localized SMS alerts (which vary drastically across dozens of Indian financial institutions) requires a reliable and power-efficient parsing mechanism:
 
 1.  **Phase 0: Deterministic SMS Pre-Filtering**:
-    Before waking the SLM execution engine, the incoming message runs through a 6-stage regex validation check ([SmsFilterPipeline.kt](file:///d:/Personal_Projects/pocket-financer-android/pipeline/src/main/java/com/pocketfinancer/pipeline/SmsFilterPipeline.kt)) to assert that the alert contains actual transaction markers (amounts, masked accounts, action verbs) and excludes verification codes/OTPs and pending payment collect requests. If any stage fails, processing terminates instantly (taking less than 1ms), avoiding unnecessary CPU-heavy model evaluations.
+    Before waking the SLM execution engine, the incoming message runs through a 6-stage regex validation check ([SmsFilterPipeline.kt](pipeline/src/main/java/com/pocketfinancer/pipeline/SmsFilterPipeline.kt)) to assert that the alert contains actual transaction markers (amounts, masked accounts, action verbs) and excludes verification codes/OTPs and pending payment collect requests. If any stage fails, processing terminates instantly (taking less than 1ms), avoiding unnecessary CPU-heavy model evaluations.
 2.  **Phase 1: Thinking Pass (Chain of Thought)**:
     For messages that pass the pre-filter, the system builds the inference prompt (merging the system prompt and few-shot examples) and appends `<think>` to the end. The local SLM processes the SMS semantics, reasoning step-by-step to verify transaction details.
 3.  **Phase 2: Structured JSON Generation**:
-    Once the thinking tag is closed with `</think>`, the native JNI engine generates the transaction JSON. The Backus-Naur Form (GBNF) grammar defined in [sms_extraction.gbnf](file:///d:/Personal_Projects/pocket-financer-android/inference/src/main/assets/sms_extraction.gbnf) is optional and defaults off. It can be enabled under Settings → Advanced diagnostics to constrain vocabulary sampling to the expected schema. The value is snapshotted once per SMS, so an in-flight extraction never mixes settings; unconstrained output still passes through the defensive extraction parser and malformed results are rejected:
+    Once the thinking tag is closed with `</think>`, the native JNI engine generates the transaction JSON. The Backus-Naur Form (GBNF) grammar defined in [sms_extraction.gbnf](inference/src/main/assets/sms_extraction.gbnf) is optional and defaults off. It can be enabled under Settings → Advanced diagnostics to constrain vocabulary sampling to the expected schema. The value is snapshotted once per SMS, so an in-flight extraction never mixes settings; unconstrained output still passes through the defensive extraction parser and malformed results are rejected:
     ```json
     {
       "amount": 1500.00,
@@ -192,8 +192,9 @@ cd pocket-financer-android
 Pocket Financer uses short-lived `codex/*` branches, required pull-request CI,
 Conventional Commit titles, and an automated Release Please pull request as the
 explicit publication gate. Start with [CONTRIBUTING.md](CONTRIBUTING.md) for
-feature development and [docs/releasing.md](docs/releasing.md) for versioning,
-signing, stable APK publication, and recovery.
+feature development, [docs/ci-cd.md](docs/ci-cd.md) for the authoritative CI/CD
+and repository-controls reference, and
+[docs/releasing.md](docs/releasing.md) for signing, publication, and recovery.
 
 ---
 

@@ -5,6 +5,9 @@ can continue quickly on short-lived pull requests, while a release is published
 only when the repository owner chooses to merge the automated release pull
 request.
 
+See [ci-cd.md](ci-cd.md) for the authoritative workflow, repository-protection,
+permissions, dependency-update, AI-boundary, and verified-baseline reference.
+
 ## Release model
 
 1. A `codex/*` pull request passes CI and is squash-merged into `main`.
@@ -102,13 +105,19 @@ secret names exist:
 gh secret list
 ```
 
-### 3. Configure the release automation token
+### 3. Optionally configure a dedicated release automation token
 
-Create a fine-grained GitHub personal access token owned by the repository
-owner, restricted to this repository, with the minimum access needed to create
-and update release pull requests, tags, and releases. At minimum, grant
-read/write access to repository contents and pull requests. If the repository's
-label rules require it, grant issues read/write access as well.
+The active workflow can use the built-in `GITHUB_TOKEN`. When that token creates
+or updates a release pull request, the Release workflow explicitly dispatches
+`ci.yml` on the release branch so the required check starts without a personal
+token.
+
+If repository policy later requires a dedicated identity, create a fine-grained
+GitHub personal access token owned by the repository owner, restricted to this
+repository, with the minimum access needed to create and update release pull
+requests, tags, and releases. At minimum, grant read/write access to repository
+contents and pull requests. If the repository's label rules require it, grant
+issues read/write access as well.
 
 Store it as:
 
@@ -116,9 +125,9 @@ Store it as:
 gh secret set RELEASE_PLEASE_TOKEN
 ```
 
-The dedicated token is required because events produced by the default
-`GITHUB_TOKEN` do not start all downstream workflows. Rotate it before expiry
-and update the secret without changing any repository files.
+When configured, rotate the dedicated token before expiry and update the secret
+without changing repository files. When it is absent, preserve the Release
+workflow's `actions: write` permission and explicit CI dispatch fallback.
 
 ### 4. Protect `main`
 
@@ -177,7 +186,9 @@ Before merging the first automated release pull request, verify:
 - Its proposed version is exactly `1.0.0`.
 - `CHANGELOG.md` accurately describes the stable baseline and notable changes.
 - All required CI checks pass at the release pull-request head.
-- All four Android signing secrets and `RELEASE_PLEASE_TOKEN` are configured.
+- All four Android signing secrets are configured. If
+  `RELEASE_PLEASE_TOKEN` is absent, the built-in-token CI dispatch fallback is
+  intact.
 - The production keystore has verified offline backups.
 - The certificate SHA-256 fingerprint is recorded privately.
 - The migration warning above is present in the release notes.
@@ -278,8 +289,11 @@ artifacts being immutable.
 ## Recovery and troubleshooting
 
 - **Release PR does not appear:** confirm the merged squash title is `feat:`,
-  `fix:`, or breaking; inspect the Release Please workflow; confirm the token is
-  present and unexpired. Do not create a tag manually.
+  `fix:`, or breaking, and inspect the Release Please workflow. If
+  `RELEASE_PLEASE_TOKEN` is configured, confirm that dedicated token remains
+  valid. Otherwise confirm the workflow still uses `github.token`, GitHub
+  Actions may create pull requests, and the job retains its documented
+  permissions. Do not create a tag manually.
 - **Release PR CI does not start:** with the built-in `GITHUB_TOKEN`, the
   Release workflow explicitly dispatches `ci.yml` on the updated release
   branch. Confirm the release job still has `actions: write`, `ci.yml` still
