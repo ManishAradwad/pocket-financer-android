@@ -8,7 +8,22 @@ updates:
       day: monday
       time: '04:00'
       timezone: Asia/Kolkata
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 1
+    groups:
+      android-minor-and-patch:
+        applies-to: version-updates
+        patterns:
+          - '*'
+        update-types:
+          - minor
+          - patch
+    # Major Android/Gradle upgrades need an explicit maintainer-reviewed PR.
+    ignore:
+      - dependency-name: '*'
+        update-types:
+          - version-update:semver-major
+    commit-message:
+      prefix: chore(deps)
     labels:
       - dependencies
 
@@ -19,6 +34,21 @@ updates:
       day: monday
       time: '04:30'
       timezone: Asia/Kolkata
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 1
+    groups:
+      actions-minor-and-patch:
+        applies-to: version-updates
+        patterns:
+          - '*'
+        update-types:
+          - minor
+          - patch
+    # Major action upgrades are reviewed separately before changing CI trust.
+    ignore:
+      - dependency-name: '*'
+        update-types:
+          - version-update:semver-major
+    commit-message:
+      prefix: chore(ci)
     labels:
       - dependencies
