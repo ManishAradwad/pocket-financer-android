@@ -289,9 +289,14 @@ artifacts being immutable.
 - **Signer fingerprint changed:** stop publication. Restore the correct
   keystore from an offline backup and investigate secret/key replacement.
 - **Release workflow fails after the release PR merge:** fix the workflow on a
-  normal `codex/fix-<slug>` pull request, rerun the failed workflow when safe,
-  and preserve the allocated version/tag. Do not invent a replacement version
-  manually.
+  normal `codex/fix-<slug>` pull request and preserve the allocated version/tag.
+  After the fix reaches `main`, dispatch the **Release** workflow from `main`
+  with `release_tag` set to the existing draft tag. The recovery path requires
+  that tag to still be a draft, checks out `refs/tags/<release_tag>`, derives and
+  validates its exact version and commit, then rebuilds it with the corrected
+  workflow. Do not rerun an old job after changing the workflow, because GitHub
+  reruns use the workflow definition from the original commit. Do not invent a
+  replacement version manually.
 - **Signing key is lost:** a new key cannot update existing self-distributed
   installations. Treat this as a product migration requiring a new application
   identity or user uninstall/reinstall; do not silently rotate the key.
