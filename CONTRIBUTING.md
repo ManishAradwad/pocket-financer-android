@@ -4,9 +4,8 @@ Pocket Financer uses short-lived branches, protected pull requests,
 Conventional Commit titles, and automated releases. `main` should always be a
 tested, releasable development branch.
 
-The authoritative automation and repository-controls reference is
-[docs/ci-cd.md](docs/ci-cd.md). Release operations and incident recovery are
-documented in [docs/releasing.md](docs/releasing.md).
+CI/CD controls, release operations, and incident recovery are documented in
+[docs/releasing.md](docs/releasing.md).
 
 ## Codex-first development
 

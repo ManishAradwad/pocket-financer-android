@@ -192,9 +192,8 @@ cd pocket-financer-android
 Pocket Financer uses short-lived `codex/*` branches, required pull-request CI,
 Conventional Commit titles, and an automated Release Please pull request as the
 explicit publication gate. Start with [CONTRIBUTING.md](CONTRIBUTING.md) for
-feature development, [docs/ci-cd.md](docs/ci-cd.md) for the authoritative CI/CD
-and repository-controls reference, and
-[docs/releasing.md](docs/releasing.md) for signing, publication, and recovery.
+feature development and [docs/releasing.md](docs/releasing.md) for CI/CD,
+versioning, signing, publication, and recovery.
 
 ---
 
