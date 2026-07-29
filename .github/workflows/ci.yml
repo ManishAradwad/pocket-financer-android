@@ -28,6 +28,31 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Validate release CI dispatch context
+        shell: bash
+        run: |
+          set -euo pipefail
+          workflow=.github/workflows/release.yml
+
+          require_dispatch_pattern() {
+            local pattern="$1"
+            local requirement="$2"
+            if ! grep -Eq -- "$pattern" "$workflow"; then
+              echo "::error file=$workflow::Release PR CI dispatch must $requirement."
+              exit 1
+            fi
+          }
+
+          require_dispatch_pattern \
+            'gh[[:space:]]+workflow[[:space:]]+run[[:space:]]+ci\.yml' \
+            'invoke ci.yml'
+          require_dispatch_pattern \
+            '--repo[[:space:]]+"\$GITHUB_REPOSITORY"' \
+            'use --repo "$GITHUB_REPOSITORY"'
+          require_dispatch_pattern \
+            '--ref[[:space:]]+"\$head_branch"' \
+            'use --ref "$head_branch"'
+
       - name: Set up JDK 17
         uses: actions/setup-java@v5
         with:
