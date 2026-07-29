@@ -31,12 +31,27 @@ class SmsRepository @Inject constructor(
     /**
      * Fetch SMS history from the last N days.
      */
-    fun fetchHistory(daysBack: Int = 90, limit: Int = 500): List<SmsReader.SmsMessage> {
-        val minDate = System.currentTimeMillis() - TimeUnit.DAYS.toMillis(daysBack.toLong())
+    fun fetchHistory(
+        daysBack: Int,
+        limit: Int = 500,
+        maxDate: Long = System.currentTimeMillis()
+    ): List<SmsReader.SmsMessage> {
+        require(daysBack > 0) { "History window must be positive" }
+        require(limit > 0) { "History query limit must be positive" }
+        val minDate = (
+            maxDate - TimeUnit.DAYS.toMillis(daysBack.toLong())
+        ).coerceAtLeast(0L)
         return smsReader.fetchInbox(
-            SmsReader.SmsFilter(minDate = minDate, limit = limit)
+            SmsReader.SmsFilter(
+                minDate = minDate,
+                maxDate = maxDate,
+                limit = limit
+            )
         )
     }
+
+    fun hasAnyInboxMessage(maxDate: Long = System.currentTimeMillis()): Boolean =
+        smsReader.hasAnyInboxMessage(maxDate)
 
     /**
      * Poll inbox periodically for new SMS (fallback when RECEIVE_SMS is denied).

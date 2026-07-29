@@ -32,13 +32,38 @@ class SmsSourceIdentityTest {
             broadcast.fallbackFingerprint,
             provider.fallbackFingerprint
         )
-        assertEquals(broadcast.opaqueCandidateKey, provider.opaqueCandidateKey)
+        assertNotEquals(broadcast.opaqueCandidateKey, provider.opaqueCandidateKey)
         assertEquals(
             legacyReceivedIdentity.fallbackFingerprint,
             provider.alternateFingerprint
         )
         assertEquals("123", provider.providerMessageId)
         assertTrue(provider.messageId.startsWith("provider:"))
+    }
+
+    @Test
+    fun `opaque key follows authoritative provider id`() {
+        val firstProvider = identity(
+            providerId = "123",
+            body = "Rs 500 debited"
+        )
+        val retriedProvider = identity(
+            providerId = "123",
+            body = "Evidence can be corrected by the provider"
+        )
+        val distinctProvider = identity(
+            providerId = "124",
+            body = "Rs 500 debited"
+        )
+
+        assertEquals(
+            firstProvider.opaqueCandidateKey,
+            retriedProvider.opaqueCandidateKey
+        )
+        assertNotEquals(
+            firstProvider.opaqueCandidateKey,
+            distinctProvider.opaqueCandidateKey
+        )
     }
 
     @Test

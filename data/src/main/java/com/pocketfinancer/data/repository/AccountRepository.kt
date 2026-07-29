@@ -4,11 +4,13 @@ import com.pocketfinancer.data.db.dao.AccountDao
 import com.pocketfinancer.data.db.dao.TransactionDao
 import com.pocketfinancer.data.db.entity.AccountEntity
 import com.pocketfinancer.data.model.Account
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import java.util.Locale
 import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -19,17 +21,10 @@ class AccountRepository (
     private val transactionDao: TransactionDao,
     runConsolidationOnInit: Boolean = true
 ) {
-    init {
-        if (runConsolidationOnInit) {
-            CoroutineScope(Dispatchers.IO).launch {
-                try {
-                    consolidateAccounts()
-                } catch (e: Exception) {
-                    // Safe-guard logging
-                }
-            }
-        }
-    }
+    private val accountMutationMutex = Mutex()
+    // Construction cannot suspend. Production setup therefore runs lazily
+    // inside the first account-producing call's mutation boundary.
+    private var initialConsolidationComplete = !runConsolidationOnInit
 
     @Inject
     constructor(
@@ -37,47 +32,89 @@ class AccountRepository (
         transactionDao: TransactionDao
     ) : this(accountDao, transactionDao, runConsolidationOnInit = true)
 
-    suspend fun consolidateAccounts() {
-        val allAccounts = accountDao.getAllOnce()
-        val digitsGroups = allAccounts.filter { normalizeAccountName(it.name) != null }
-            .groupBy { normalizeAccountName(it.name)!!.second }
+    suspend fun consolidateAccounts() = accountMutationMutex.withLock {
+        consolidateAccountsLocked()
+        initialConsolidationComplete = true
+    }
 
-        for ((digits, list) in digitsGroups) {
+    private suspend fun consolidateAccountsLocked() {
+        val allAccounts = accountDao.getAllOnce()
+        val sourceGroups = allAccounts
+            .mapNotNull { account ->
+                normalizeAccountName(account.name)?.let { identity ->
+                    identity to account
+                }
+            }
+            .groupBy(
+                keySelector = { it.first },
+                valueTransform = { it.second }
+            )
+
+        for ((_, list) in sourceGroups) {
             if (list.size <= 1) continue
 
-            val (unknowns, knowns) = list.partition { it.bank == "Unknown Bank" || it.bank == "Unknown Account" || it.bank == "Unknown" }
+            val (unknowns, knowns) = list.partition {
+                isUnknownBank(it.bank)
+            }
 
-            if (knowns.isNotEmpty()) {
-                val canonical = knowns.first()
-                for (dup in unknowns) {
-                    transactionDao.updateTransactionsAccount(dup.id, canonical.id)
-                    accountDao.delete(dup.id)
+            val knownBankGroups = knowns.groupBy {
+                normalizedBank(it.bank)
+            }
+            val knownCanonicals = knownBankGroups.values.map { bankAccounts ->
+                bankAccounts.first().also { canonical ->
+                    mergeAccountsLocked(
+                        canonical = canonical,
+                        duplicates = bankAccounts.drop(1)
+                    )
                 }
+            }
 
-                val knownsByBank = knowns.groupBy { it.bank }
-                for ((bank, bankList) in knownsByBank) {
-                    if (bankList.size > 1) {
-                        val firstKnown = bankList.first()
-                        for (i in 1 until bankList.size) {
-                            val dup = bankList[i]
-                            transactionDao.updateTransactionsAccount(dup.id, firstKnown.id)
-                            accountDao.delete(dup.id)
-                        }
-                    }
-                }
-            } else {
-                val canonical = unknowns.first()
-                for (i in 1 until unknowns.size) {
-                    val dup = unknowns[i]
-                    transactionDao.updateTransactionsAccount(dup.id, canonical.id)
-                    accountDao.delete(dup.id)
-                }
+            if (knownCanonicals.size == 1) {
+                mergeAccountsLocked(
+                    canonical = knownCanonicals.single(),
+                    duplicates = unknowns
+                )
+            } else if (unknowns.size > 1) {
+                mergeAccountsLocked(
+                    canonical = unknowns.first(),
+                    duplicates = unknowns.drop(1)
+                )
             }
         }
     }
 
-    fun getAll(): Flow<List<Account>> =
-        accountDao.getAll().map { list -> list.map { it.toDomain() } }
+    private suspend fun mergeAccountsLocked(
+        canonical: AccountEntity,
+        duplicates: List<AccountEntity>
+    ) {
+        duplicates.forEach { duplicate ->
+            transactionDao.updateTransactionsAccount(
+                duplicate.id,
+                canonical.id
+            )
+            accountDao.delete(duplicate.id)
+        }
+    }
+
+    private suspend fun completeInitialConsolidationLocked() {
+        if (initialConsolidationComplete) return
+        consolidateAccountsLocked()
+        initialConsolidationComplete = true
+    }
+
+    internal suspend fun ensureInitialConsolidation() =
+        accountMutationMutex.withLock {
+            completeInitialConsolidationLocked()
+        }
+
+    fun getAll(): Flow<List<Account>> = flow {
+        ensureInitialConsolidation()
+        emitAll(
+            accountDao.getAll().map { list ->
+                list.map { it.toDomain() }
+            }
+        )
+    }
 
     suspend fun getById(id: String): Account? =
         accountDao.getById(id)?.toDomain()
@@ -88,10 +125,23 @@ class AccountRepository (
     /**
      * Find an existing account by (name, bank) or create it atomically.
      * Used by the pipeline when the SLM extracts an account label.
-     * Normalizes the name and matches by last 4 digits.
+     * Normalizes the category and last four digits before matching.
      */
-    suspend fun getOrCreate(name: String, bank: String, type: String): Account {
-        val finalBank = if (bank == "Unknown Bank" || bank == "Unknown Account" || bank.isBlank()) {
+    suspend fun getOrCreate(
+        name: String,
+        bank: String,
+        type: String
+    ): Account = accountMutationMutex.withLock {
+        completeInitialConsolidationLocked()
+        getOrCreateLocked(name = name, bank = bank, type = type)
+    }
+
+    private suspend fun getOrCreateLocked(
+        name: String,
+        bank: String,
+        type: String
+    ): Account {
+        val finalBank = if (isUnknownBank(bank)) {
             inferBankFromName(name)
         } else {
             bank
@@ -102,15 +152,18 @@ class AccountRepository (
         if (normalizedPair != null) {
             val (category, digits) = normalizedPair
             val capCategory = if (category == "card") "Card" else "A/c"
-            val bankPrefix = if (finalBank != "Unknown Bank" && finalBank != "Unknown Account") "$finalBank " else ""
+            val bankPrefix = if (isUnknownBank(finalBank)) "" else "$finalBank "
             val normalizedName = "$bankPrefix$capCategory XX$digits"
 
-            // Look for existing account with the same digits and bank
+            // Match the normalized category/suffix and a compatible bank.
             val allAccounts = accountDao.getAllOnce()
-            val existing = allAccounts.find { acc ->
-                val pair = normalizeAccountName(acc.name)
-                pair != null && pair.second == digits && (acc.bank == finalBank || finalBank == "Unknown Bank" || finalBank == "Unknown Account" || acc.bank == "Unknown Bank" || acc.bank == "Unknown Account")
+            val sameSourceAccounts = allAccounts.filter { account ->
+                normalizeAccountName(account.name) == normalizedPair
             }
+            val existing = findCompatibleAccount(
+                accounts = sameSourceAccounts,
+                requestedBank = finalBank
+            )
             if (existing != null) {
                 return existing.toDomain()
             }
@@ -139,14 +192,16 @@ class AccountRepository (
         return entity.toDomain()
     }
 
-    private fun normalizeAccountName(account: String): Pair<String, String>? {
+    private fun normalizeAccountName(
+        account: String
+    ): NormalizedAccountIdentity? {
         if (account.isBlank()) return null
         val category = if (account.contains("card", ignoreCase = true)) "card" else "account"
         val runs = Regex("\\d+").findAll(account).toList()
         val longRuns = runs.filter { it.value.length >= 3 }
         if (longRuns.isEmpty()) return null
         val lastDigits = longRuns.last().value.takeLast(4)
-        return Pair(category, lastDigits)
+        return NormalizedAccountIdentity(category, lastDigits)
     }
 
     private fun inferBankFromName(name: String): String {
@@ -165,17 +220,54 @@ class AccountRepository (
      * Returns the default "__UNKNOWN__" account, creating it on first access.
      * Used as a fallback when extraction yields no account info.
      */
-    suspend fun ensureDefault(): Account {
+    suspend fun ensureDefault(): Account = accountMutationMutex.withLock {
+        completeInitialConsolidationLocked()
         val name = "__UNKNOWN__"
         val bank = "Unknown Account"
         val type = "auto-extracted"
 
         val existing = accountDao.findByNameAndBank(name, bank)
             ?: accountDao.findByNameAndBank(name, "Unknown Bank")
-        if (existing != null) return existing.toDomain()
+        if (existing != null) return@withLock existing.toDomain()
 
-        return getOrCreate(name, bank, type)
+        getOrCreateLocked(name, bank, type)
     }
+
+    private fun findCompatibleAccount(
+        accounts: List<AccountEntity>,
+        requestedBank: String
+    ): AccountEntity? {
+        val unknown = accounts.firstOrNull { isUnknownBank(it.bank) }
+        if (isUnknownBank(requestedBank)) {
+            if (unknown != null) return unknown
+            val knownBankGroups = accounts
+                .filterNot { isUnknownBank(it.bank) }
+                .groupBy { normalizedBank(it.bank) }
+            return knownBankGroups
+                .takeIf { it.size == 1 }
+                ?.values
+                ?.single()
+                ?.first()
+        }
+
+        return accounts.firstOrNull {
+            normalizedBank(it.bank) == normalizedBank(requestedBank)
+        } ?: unknown
+    }
+
+    private fun normalizedBank(bank: String): String =
+        bank.trim().lowercase(Locale.ROOT)
+
+    private fun isUnknownBank(bank: String): Boolean =
+        bank.isBlank() ||
+            bank.equals("Unknown Bank", ignoreCase = true) ||
+            bank.equals("Unknown Account", ignoreCase = true) ||
+            bank.equals("Unknown", ignoreCase = true)
+
+    private data class NormalizedAccountIdentity(
+        val category: String,
+        val suffix: String
+    )
 
     private fun AccountEntity.toDomain() = Account(
         id = id,

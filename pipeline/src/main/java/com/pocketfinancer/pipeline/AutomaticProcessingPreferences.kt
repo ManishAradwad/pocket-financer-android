@@ -17,9 +17,11 @@ import kotlinx.coroutines.withContext
  * processed automatically.
  *
  * This class owns preference persistence, observation, and the process-wide
- * consistency boundary shared by intake and WorkManager claims. Disabling
- * automatic processing prevents new or pending automatic work, while a claim
- * that acquired this boundary first finishes and manual scans remain available.
+ * consistency boundary shared by intake and WorkManager claims.
+ * [AutomaticSmsOperationGate] ensures only one automatic candidate can reach
+ * this claim boundary at a time. Disabling therefore prevents new or pending
+ * automatic work while that one operation finishes; manual scans remain
+ * available.
  */
 @Singleton
 class AutomaticProcessingPreferences @Inject constructor(

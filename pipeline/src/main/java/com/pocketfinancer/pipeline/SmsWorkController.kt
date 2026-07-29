@@ -56,8 +56,9 @@ interface SmsWorkController {
 
     /**
      * Applies the automatic-processing consistency boundary without cancelling
-     * a running worker. Pending automatic candidates are deleted atomically;
-     * claimed candidates have already snapshotted ON and finish normally.
+     * the one running worker. Pending automatic candidates are deleted
+     * atomically; the single claimed candidate has already snapshotted ON and
+     * finishes normally.
      *
      * @return number of encrypted pending candidates removed.
      */
@@ -149,7 +150,10 @@ class WorkManagerSmsWorkController @Inject internal constructor(
     }
 
     override suspend fun discardPendingAutomaticWork(): Int =
-        ingestionRepository.discardPendingAutomatic()
+        discardPendingAutomaticCandidatesAndNotifications(
+            context = context,
+            ingestionRepository = ingestionRepository
+        )
 
     private fun cancelUniqueWork(): Operation =
         WorkManager.getInstance(context)
@@ -201,4 +205,19 @@ class WorkManagerSmsWorkController @Inject internal constructor(
             }
         }
     }
+}
+
+internal suspend fun discardPendingAutomaticCandidatesAndNotifications(
+    context: Context,
+    ingestionRepository: SmsIngestionRepository
+): Int {
+    val pending = ingestionRepository.pendingAutomaticCandidates()
+    val removed = ingestionRepository.discardPendingAutomatic()
+    pending.forEach { candidate ->
+        SmsNotificationHelper.cancelCandidateNotification(
+            context = context,
+            candidateKey = candidate.candidateKey
+        )
+    }
+    return removed
 }

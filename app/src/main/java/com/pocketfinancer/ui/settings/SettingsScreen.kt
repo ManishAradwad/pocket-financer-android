@@ -461,6 +461,7 @@ private fun AdvancedDiagnostics(
             Spacer(modifier = Modifier.height(12.dp))
             SlmProcessingCard(
                 enabled = state.gbnfGrammarEnabled,
+                error = state.gbnfGrammarError,
                 onEnabledChange = viewModel::setGbnfGrammarEnabled
             )
             Spacer(modifier = Modifier.height(12.dp))
@@ -987,6 +988,7 @@ private fun ramBadge(tier: DeviceCapabilities.RamTier): Pair<String, Color>? {
 @Composable
 private fun SlmProcessingCard(
     enabled: Boolean,
+    error: String?,
     onEnabledChange: (Boolean) -> Unit
 ) {
     SectionCard(title = "SLM SMS PROCESSING") {
@@ -1026,6 +1028,14 @@ private fun SlmProcessingCard(
                     checkedThumbColor = Color.White,
                     checkedTrackColor = M3_Primary
                 )
+            )
+        }
+        error?.let { message ->
+            Text(
+                text = message,
+                color = M3_Error,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(top = 8.dp)
             )
         }
     }

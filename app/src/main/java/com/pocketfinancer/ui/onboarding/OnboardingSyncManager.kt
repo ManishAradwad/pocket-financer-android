@@ -169,6 +169,15 @@ class OnboardingSyncManager @Inject constructor(
                         SetupImportStatus.DOWNLOADING
                     },
                     activeScanWindowDays = requestedWindowDays,
+                    activeScanProviderMaxDateMillis =
+                        if (
+                            resumeWindowDays != null &&
+                            setup.activeScanWindowDays == resumeWindowDays
+                        ) {
+                            setup.activeScanProviderMaxDateMillis
+                        } else {
+                            null
+                        },
                     pauseReason = null,
                     actionableError = null
                 )

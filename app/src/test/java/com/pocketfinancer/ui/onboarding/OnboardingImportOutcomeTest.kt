@@ -1,6 +1,7 @@
 package com.pocketfinancer.ui.onboarding
 
 import com.pocketfinancer.setup.AdaptiveHistoryScanPolicy
+import com.pocketfinancer.setup.SetupImportState
 import com.pocketfinancer.setup.SetupImportStatus
 import org.junit.Assert.assertEquals
 import org.junit.Test
@@ -15,6 +16,18 @@ class OnboardingImportOutcomeTest {
                 savedCount = 0,
                 failedCount = 0,
                 concurrentDuplicateCount = 1
+            )
+        )
+    }
+
+    @Test
+    fun `resume with a transaction already saved terminates ready`() {
+        assertEquals(
+            SetupImportStatus.READY,
+            setupTerminalStatus(
+                savedCount = 1,
+                failedCount = 0,
+                concurrentDuplicateCount = 0
             )
         )
     }
@@ -51,6 +64,62 @@ class OnboardingImportOutcomeTest {
                 policy = AdaptiveHistoryScanPolicy(),
                 coveredWindowDays = 30,
                 resumeWindowDays = 30
+            )
+        )
+    }
+
+    @Test
+    fun `restart reuses the exact provider upper bound for partial import`() {
+        val state = SetupImportState(
+            coverageStartMillis = 1_000L,
+            coverageEndMillis = 2_000L,
+            coverageWindowDays = 30,
+            lastSuccessfulScanMillis = 2_100L
+        )
+
+        assertEquals(
+            2_000L,
+            historicalScanProviderMaxDate(
+                state = state,
+                resumeWindowDays = 30,
+                nowMillis = 9_000L
+            )
+        )
+        assertEquals(
+            9_000L,
+            historicalScanProviderMaxDate(
+                state = state,
+                resumeWindowDays = null,
+                nowMillis = 9_000L
+            )
+        )
+    }
+
+    @Test
+    fun `restart during adaptive widening reuses the in-flight provider bound`() {
+        val state = SetupImportState(
+            coverageStartMillis = 1_000L,
+            coverageEndMillis = 2_000L,
+            coverageWindowDays = 7,
+            activeScanWindowDays = 30,
+            activeScanProviderMaxDateMillis = 2_500L,
+            lastSuccessfulScanMillis = 2_100L
+        )
+
+        assertEquals(
+            2_500L,
+            historicalScanProviderMaxDate(
+                state = state,
+                resumeWindowDays = 30,
+                nowMillis = 9_000L
+            )
+        )
+        assertEquals(
+            9_000L,
+            historicalScanProviderMaxDate(
+                state = state,
+                resumeWindowDays = null,
+                nowMillis = 9_000L
             )
         )
     }

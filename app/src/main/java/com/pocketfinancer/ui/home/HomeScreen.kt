@@ -63,7 +63,7 @@ fun HomeScreen(
     var showModelDownloadConfirmation by remember { mutableStateOf(false) }
     var showHowThisWorks by remember { mutableStateOf(false) }
     var pendingBackgroundAction by remember {
-        mutableStateOf<SetupCardAction?>(null)
+        mutableStateOf<(() -> Unit)?>(null)
     }
 
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -91,10 +91,10 @@ fun HomeScreen(
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) {
-        pendingBackgroundAction?.let(runSetupAction)
+        pendingBackgroundAction?.invoke()
         pendingBackgroundAction = null
     }
-    val requestNotificationThenRun: (SetupCardAction) -> Unit = { action ->
+    val requestNotificationThenRun: (() -> Unit) -> Unit = { action ->
         val needsRuntimePermission =
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
                 ContextCompat.checkSelfPermission(
@@ -107,7 +107,7 @@ fun HomeScreen(
                 Manifest.permission.POST_NOTIFICATIONS
             )
         } else {
-            runSetupAction(action)
+            action()
         }
     }
     val smsPermissionLauncher = rememberLauncherForActivityResult(
@@ -140,14 +140,20 @@ fun HomeScreen(
             }
             SetupCardAction.PREPARE_MODEL -> {
                 if (state.setupImportState.modelDownloadConfirmed) {
-                    requestNotificationThenRun(action)
+                    requestNotificationThenRun {
+                        runSetupAction(action)
+                    }
                 } else {
                     showModelDownloadConfirmation = true
                 }
             }
             SetupCardAction.RETRY_RECENT_SYNC ->
+                requestNotificationThenRun {
+                    runSetupAction(action)
+                }
+            else -> requestNotificationThenRun {
                 runSetupAction(action)
-            else -> requestNotificationThenRun(action)
+            }
         }
     }
 
@@ -238,6 +244,8 @@ fun HomeScreen(
                 item {
                     SetupImportCard(
                         state = state.setupImportState,
+                        automaticProcessingEnabled =
+                            state.automaticProcessingEnabled,
                         onAction = onSetupAction,
                         onHowThisWorks = { showHowThisWorks = true }
                     )
@@ -361,7 +369,11 @@ fun HomeScreen(
                     item {
                         ModelUpgradeBanner(
                             recommendation = upgradeRec,
-                            onUpgrade = { viewModel.startModelUpgrade() },
+                            onUpgrade = {
+                                requestNotificationThenRun {
+                                    viewModel.startModelUpgrade()
+                                }
+                            },
                             onCancel = { viewModel.cancelModelUpgrade() },
                             onDismiss = { viewModel.dismissUpgradeBanner() }
                         )
@@ -378,10 +390,16 @@ fun HomeScreen(
                     item {
                         SyncStrip(
                             syncState = state.syncState,
-                            onStartSync = { viewModel.startSync() },
+                            onStartSync = {
+                                requestNotificationThenRun {
+                                    viewModel.startSync()
+                                }
+                            },
                             onInspectSync = { showDrawer = true },
                             onCheckForUnsynced = {
-                                viewModel.checkForUnsynced()
+                                requestNotificationThenRun {
+                                    viewModel.checkForUnsynced()
+                                }
                             }
                         )
                     }
@@ -492,7 +510,9 @@ fun HomeScreen(
                                             totalTransactionCount =
                                                 state.totalTransactionCount,
                                             setupStatus =
-                                                state.setupImportState.status
+                                                state.setupImportState.status,
+                                            automaticProcessingEnabled =
+                                                state.automaticProcessingEnabled
                                         ),
                                         color = M3_OnSurfaceVariant,
                                         style = MaterialTheme.typography.bodySmall
@@ -759,7 +779,11 @@ fun HomeScreen(
                         viewModel.confirmModelDownload()
                         showModelDownloadConfirmation = false
                         requestNotificationThenRun(
-                            SetupCardAction.PREPARE_MODEL
+                            {
+                                runSetupAction(
+                                    SetupCardAction.PREPARE_MODEL
+                                )
+                            }
                         )
                     }
                 ) {
@@ -801,10 +825,14 @@ fun HomeScreen(
 @Composable
 private fun SetupImportCard(
     state: com.pocketfinancer.setup.SetupImportState,
+    automaticProcessingEnabled: Boolean,
     onAction: (SetupCardAction) -> Unit,
     onHowThisWorks: () -> Unit
 ) {
-    val model = setupImportCardModel(state)
+    val model = setupImportCardModel(
+        state = state,
+        automaticProcessingEnabled = automaticProcessingEnabled
+    )
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -1912,7 +1940,8 @@ private fun getAccountShortLabel(label: String?): String {
 internal fun selectedPeriodEmptyMessage(
     selectedPeriod: String,
     totalTransactionCount: Int,
-    setupStatus: SetupImportStatus
+    setupStatus: SetupImportStatus,
+    automaticProcessingEnabled: Boolean = true
 ): String {
     if (totalTransactionCount > 0) {
         return "No spending transactions in the selected ${selectedPeriod.lowercase()} period"
@@ -1929,7 +1958,11 @@ internal fun selectedPeriodEmptyMessage(
         SetupImportStatus.FAILED ->
             "No transactions were saved. The setup card explains what needs attention."
         SetupImportStatus.READY_NO_HISTORY ->
-            "No eligible transaction history was found. The next eligible alert will appear here."
+            if (automaticProcessingEnabled) {
+                "No eligible transaction history was found. The next eligible alert will appear here."
+            } else {
+                "No eligible transaction history was found. Pocket Financer will not process new alerts automatically; scan manually or turn updates on."
+            }
         SetupImportStatus.READY ->
             "No saved spending transactions in this period."
     }

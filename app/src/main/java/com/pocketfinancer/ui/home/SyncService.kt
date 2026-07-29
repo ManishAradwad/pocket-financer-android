@@ -11,6 +11,9 @@ import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import com.pocketfinancer.SlmAppFlowCoordinator
+import com.pocketfinancer.SlmAppFlowLease
+import com.pocketfinancer.inference.SlmRuntimeOwner
 import com.pocketfinancer.pipeline.SmsNotificationHelper
 import com.pocketfinancer.ui.onboarding.OnboardingRunGenerationStore
 import dagger.hilt.android.AndroidEntryPoint
@@ -25,6 +28,9 @@ class SyncService : Service() {
 
     @Inject
     lateinit var runGenerationStore: OnboardingRunGenerationStore
+
+    @Inject
+    lateinit var appFlowCoordinator: SlmAppFlowCoordinator
 
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var job: Job? = null
@@ -103,9 +109,36 @@ class SyncService : Service() {
         }
 
         job = serviceScope.launch {
+            var progressObserver: Job? = null
+            var serviceFlowLease: SlmAppFlowLease? = null
             try {
+                // The service owns an outer admission lease through terminal
+                // notification publication. Reset can therefore cancel and
+                // join this whole job before clearing notifications/data.
+                val admittedFlow = appFlowCoordinator.enterWhenAvailable(
+                    SlmRuntimeOwner.HOME_SYNC
+                )
+                serviceFlowLease = admittedFlow
+                val stillUnlocked = getSharedPreferences(
+                    APP_SETTINGS,
+                    Context.MODE_PRIVATE
+                ).getBoolean(ONBOARDING_COMPLETED, false)
+                if (
+                    !manualSyncStartAllowed(
+                        shellUnlocked = stillUnlocked,
+                        generationIsCurrent =
+                            runGenerationStore.isCurrent(intent)
+                    )
+                ) {
+                    Log.i(
+                        TAG,
+                        "Rejecting sync start made stale while waiting for admission"
+                    )
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    return@launch
+                }
                 // Listen to HomeSyncManager progress to dynamically update the notification text and bar
-                val flowJob = launch {
+                progressObserver = launch {
                     syncManager.syncState.collect { state ->
                         if (state.status == HomeSyncState.Status.SYNCING) {
                             val total = state.queue.size
@@ -132,7 +165,7 @@ class SyncService : Service() {
                 }
 
                 // Check again for unsynced messages and run execution
-                syncManager.checkForUnsyncedSms()
+                syncManager.checkForUnsyncedSms(admittedFlow)
                 val scannedState = syncManager.syncState.value
                 when (scannedState.recentScanOutcome) {
                     HomeSyncState.RecentScanOutcome.FAILED ->
@@ -150,15 +183,20 @@ class SyncService : Service() {
                     HomeSyncState.RecentScanOutcome.SUCCESS -> Unit
                 }
                 if (scannedState.queue.none { it.status == "pending" }) {
-                    flowJob.cancel()
+                    progressObserver?.cancelAndJoin()
+                    progressObserver = null
                     stopForeground(STOP_FOREGROUND_REMOVE)
                     showNoEligibleNotification(
                         scannedState.recentScanWindowDays
                     )
                     return@launch
                 }
-                syncManager.executeSync(this@SyncService)
-                flowJob.cancel()
+                syncManager.executeSync(
+                    this@SyncService,
+                    admittedFlow
+                )
+                progressObserver?.cancelAndJoin()
+                progressObserver = null
 
                 // Gather sync metrics
                 val finalState = syncManager.syncState.value
@@ -171,13 +209,25 @@ class SyncService : Service() {
                 showCompletionNotification(totalSynced, totalSkipped, totalErrors)
 
             } catch (cancelled: CancellationException) {
+                withContext(NonCancellable) {
+                    progressObserver?.cancelAndJoin()
+                    progressObserver = null
+                }
                 Log.i(TAG, "Sync cancelled and drained")
                 stopForeground(STOP_FOREGROUND_REMOVE)
             } catch (e: Exception) {
+                withContext(NonCancellable) {
+                    progressObserver?.cancelAndJoin()
+                    progressObserver = null
+                }
                 Log.e(TAG, "Error during sync execution", e)
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 showErrorNotification(e.message ?: "Unknown sync error")
             } finally {
+                withContext(NonCancellable) {
+                    progressObserver?.cancelAndJoin()
+                    serviceFlowLease?.release()
+                }
                 stopSelf()
             }
         }
@@ -204,27 +254,33 @@ class SyncService : Service() {
     private fun updateNotification(title: String, text: String, progress: Float, ongoing: Boolean) {
         val notification = buildNotification(title, text, progress, ongoing)
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        nm.notify(NOTIFICATION_ID, notification)
+        notifySafely(nm, notification)
     }
 
     private fun showCompletionNotification(synced: Int, skipped: Int, errors: Int) {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        val text = buildString {
-            append("$synced synced successfully")
-            if (skipped > 0) append(", $skipped skipped")
-            if (errors > 0) append(", $errors failed")
-        }
+        val copy = manualSyncTerminalNotificationCopy(
+            saved = synced,
+            rejected = skipped,
+            failed = errors
+        )
 
         val builder = NotificationCompat.Builder(this, SmsNotificationHelper.CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.stat_sys_download_done)
-            .setContentTitle("SMS Sync Completed")
-            .setContentText(text)
+            .setSmallIcon(
+                if (errors > 0) {
+                    android.R.drawable.stat_notify_error
+                } else {
+                    android.R.drawable.stat_sys_download_done
+                }
+            )
+            .setContentTitle(copy.title)
+            .setContentText(copy.text)
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .setOngoing(false)
             .setAutoCancel(true)
             .setContentIntent(getAppPendingIntent())
 
-        nm.notify(NOTIFICATION_ID, builder.build())
+        notifySafely(nm, builder.build())
     }
 
     private fun showNoEligibleNotification(windowDays: Int?) {
@@ -239,7 +295,7 @@ class SyncService : Service() {
             .setAutoCancel(true)
             .setContentIntent(getAppPendingIntent())
 
-        nm.notify(NOTIFICATION_ID, builder.build())
+        notifySafely(nm, builder.build())
     }
 
     private fun showErrorNotification(error: String) {
@@ -253,7 +309,23 @@ class SyncService : Service() {
             .setAutoCancel(true)
             .setContentIntent(getAppPendingIntent())
 
-        nm.notify(NOTIFICATION_ID, builder.build())
+        notifySafely(nm, builder.build())
+    }
+
+    /**
+     * POST_NOTIFICATIONS is contextual and optional. The user may deny it while
+     * still allowing the foreground operation to proceed, so a terminal or
+     * progress post must never turn successful local work into a service error.
+     */
+    private fun notifySafely(
+        notificationManager: NotificationManager,
+        notification: Notification
+    ) {
+        runCatching {
+            notificationManager.notify(NOTIFICATION_ID, notification)
+        }.onFailure { error ->
+            Log.w(TAG, "Notification post was unavailable", error)
+        }
     }
 
     private fun getAppPendingIntent(): PendingIntent {
@@ -283,3 +355,38 @@ internal fun manualSyncStartAllowed(
     shellUnlocked: Boolean,
     generationIsCurrent: Boolean
 ): Boolean = shellUnlocked && generationIsCurrent
+
+internal data class ManualSyncTerminalNotificationCopy(
+    val title: String,
+    val text: String
+)
+
+internal fun manualSyncTerminalNotificationCopy(
+    saved: Int,
+    rejected: Int,
+    failed: Int
+): ManualSyncTerminalNotificationCopy {
+    require(saved >= 0 && rejected >= 0 && failed >= 0)
+    val text = buildString {
+        append("$saved saved locally")
+        if (rejected > 0) append(", $rejected rejected")
+        if (failed > 0) {
+            append(
+                ", $failed " +
+                    if (failed == 1) {
+                        "needs another attempt"
+                    } else {
+                        "need another attempt"
+                    }
+            )
+        }
+    }
+    return ManualSyncTerminalNotificationCopy(
+        title = if (failed > 0) {
+            "SMS Sync Needs Attention"
+        } else {
+            "SMS Sync Complete"
+        },
+        text = text
+    )
+}

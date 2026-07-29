@@ -6,6 +6,7 @@ import android.content.pm.PackageManager
 import androidx.core.content.ContextCompat
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.slot
 import org.junit.Before
 import org.junit.Test
 import app.cash.turbine.test
@@ -19,6 +20,7 @@ import org.robolectric.RobolectricTestRunner
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import java.util.concurrent.TimeUnit
 
 @RunWith(RobolectricTestRunner::class)
 class SmsRepositoryUnitTest {
@@ -84,17 +86,24 @@ class SmsRepositoryUnitTest {
     }
 
     @Test
-    fun `fetchHistory should delegate to SmsReader with correct date range`() {
+    fun `fetchHistory binds provider selection to the supplied max date`() {
         val testMessages = listOf(
             SmsReader.SmsMessage("AX-HDFCBK", "Rs.500 credited", 1000L, 1)
         )
-        every { mockReader.fetchInbox(any()) } returns testMessages
+        val filter = slot<SmsReader.SmsFilter>()
+        every { mockReader.fetchInbox(capture(filter)) } returns testMessages
 
-        val results = repo.fetchHistory(daysBack = 30, limit = 100)
+        val maxDate = TimeUnit.DAYS.toMillis(100)
+        val results = repo.fetchHistory(
+            daysBack = 30,
+            limit = 100,
+            maxDate = maxDate
+        )
+
         assertEquals(1, results.size)
-
-        // Verify the filter was passed with correct date
-        // (implicit: SmsReader was called)
+        assertEquals(TimeUnit.DAYS.toMillis(70), filter.captured.minDate)
+        assertEquals(maxDate, filter.captured.maxDate)
+        assertEquals(100, filter.captured.limit)
     }
 
     @Test
@@ -111,6 +120,13 @@ class SmsRepositoryUnitTest {
 
         val results = repo.fetchHistory(daysBack = 90)
         assertTrue(results.isEmpty())
+    }
+
+    @Test
+    fun `all history existence probe preserves the fixed upper bound`() {
+        every { mockReader.hasAnyInboxMessage(9_000L) } returns true
+
+        assertTrue(repo.hasAnyInboxMessage(maxDate = 9_000L))
     }
 
     @Test

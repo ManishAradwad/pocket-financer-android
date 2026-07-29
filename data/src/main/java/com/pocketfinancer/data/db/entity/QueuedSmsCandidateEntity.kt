@@ -13,8 +13,9 @@ import androidx.room.PrimaryKey
         ),
         Index(
             value = ["sourceConnector", "sourceFingerprint"],
-            unique = true
+            unique = false
         ),
+        Index(value = ["sourceConnector", "sourceAlternateFingerprint"]),
         Index(value = ["origin", "state"])
     ]
 )

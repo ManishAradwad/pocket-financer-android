@@ -327,6 +327,8 @@ class SetupImportStore private constructor(
             coverageWindowDays = preferences.nullableInt(KEY_COVERAGE_WINDOW_DAYS),
             activeScanWindowDays =
                 preferences.nullableInt(KEY_ACTIVE_SCAN_WINDOW_DAYS),
+            activeScanProviderMaxDateMillis =
+                preferences.nullableLong(KEY_ACTIVE_SCAN_PROVIDER_MAX_DATE),
             providerMessageCount = preferences.getInt(KEY_PROVIDER_COUNT, 0),
             eligibleCandidateCount = preferences.getInt(KEY_ELIGIBLE_COUNT, 0),
             processedCount = preferences.getInt(KEY_PROCESSED_COUNT, 0),
@@ -344,6 +346,14 @@ class SetupImportStore private constructor(
                 preferences.getInt(KEY_RECENT_PROVIDER_COUNT, 0),
             recentEligibleCandidateCount =
                 preferences.getInt(KEY_RECENT_ELIGIBLE_COUNT, 0),
+            recentProcessedCount =
+                preferences.getInt(KEY_RECENT_PROCESSED_COUNT, 0),
+            recentSavedCount =
+                preferences.getInt(KEY_RECENT_SAVED_COUNT, 0),
+            recentRejectedCount =
+                preferences.getInt(KEY_RECENT_REJECTED_COUNT, 0),
+            recentFailedCount =
+                preferences.getInt(KEY_RECENT_FAILED_COUNT, 0),
             lastSuccessfulRecentScanMillis =
                 preferences.nullableLong(KEY_LAST_SUCCESSFUL_RECENT_SCAN),
             emptyReason = preferences.getString(KEY_EMPTY_REASON, null)
@@ -390,6 +400,10 @@ class SetupImportStore private constructor(
                 KEY_ACTIVE_SCAN_WINDOW_DAYS,
                 normalized.activeScanWindowDays
             )
+            .putNullableLong(
+                KEY_ACTIVE_SCAN_PROVIDER_MAX_DATE,
+                normalized.activeScanProviderMaxDateMillis
+            )
             .putInt(KEY_PROVIDER_COUNT, normalized.providerMessageCount)
             .putInt(KEY_ELIGIBLE_COUNT, normalized.eligibleCandidateCount)
             .putInt(KEY_PROCESSED_COUNT, normalized.processedCount)
@@ -420,6 +434,16 @@ class SetupImportStore private constructor(
                 KEY_RECENT_ELIGIBLE_COUNT,
                 normalized.recentEligibleCandidateCount
             )
+            .putInt(
+                KEY_RECENT_PROCESSED_COUNT,
+                normalized.recentProcessedCount
+            )
+            .putInt(KEY_RECENT_SAVED_COUNT, normalized.recentSavedCount)
+            .putInt(
+                KEY_RECENT_REJECTED_COUNT,
+                normalized.recentRejectedCount
+            )
+            .putInt(KEY_RECENT_FAILED_COUNT, normalized.recentFailedCount)
             .putNullableLong(
                 KEY_LAST_SUCCESSFUL_RECENT_SCAN,
                 normalized.lastSuccessfulRecentScanMillis
@@ -471,6 +495,8 @@ class SetupImportStore private constructor(
     private fun SetupImportState.normalized(): SetupImportState = copy(
         coverageWindowDays = coverageWindowDays?.coerceAtLeast(1),
         activeScanWindowDays = activeScanWindowDays?.coerceAtLeast(1),
+        activeScanProviderMaxDateMillis =
+            activeScanProviderMaxDateMillis?.coerceAtLeast(0L),
         recentScanWindowDays = recentScanWindowDays?.coerceAtLeast(1),
         providerMessageCount = providerMessageCount.coerceAtLeast(0),
         eligibleCandidateCount = eligibleCandidateCount.coerceAtLeast(0),
@@ -478,6 +504,10 @@ class SetupImportStore private constructor(
             recentProviderMessageCount.coerceAtLeast(0),
         recentEligibleCandidateCount =
             recentEligibleCandidateCount.coerceAtLeast(0),
+        recentProcessedCount = recentProcessedCount.coerceAtLeast(0),
+        recentSavedCount = recentSavedCount.coerceAtLeast(0),
+        recentRejectedCount = recentRejectedCount.coerceAtLeast(0),
+        recentFailedCount = recentFailedCount.coerceAtLeast(0),
         processedCount = processedCount.coerceAtLeast(0),
         savedCount = savedCount.coerceAtLeast(0),
         rejectedCount = rejectedCount.coerceAtLeast(0),
@@ -492,7 +522,7 @@ class SetupImportStore private constructor(
         const val ERROR_INTERRUPTED = "INTERRUPTED"
         const val ERROR_SMS_PERMISSION_REQUIRED = "SMS_PERMISSION_REQUIRED"
 
-        private const val SCHEMA_VERSION = 3
+        private const val SCHEMA_VERSION = 5
         private const val KEY_SCHEMA_VERSION = "setup_import_schema_version"
         private const val KEY_STATUS = "setup_import_status"
         private const val KEY_STATUS_BEFORE_PERMISSION_LOSS =
@@ -503,6 +533,8 @@ class SetupImportStore private constructor(
             "setup_import_coverage_window_days"
         private const val KEY_ACTIVE_SCAN_WINDOW_DAYS =
             "setup_import_active_scan_window_days"
+        private const val KEY_ACTIVE_SCAN_PROVIDER_MAX_DATE =
+            "setup_import_active_scan_provider_max_date"
         private const val KEY_PROVIDER_COUNT = "setup_import_provider_count"
         private const val KEY_ELIGIBLE_COUNT = "setup_import_eligible_count"
         private const val KEY_PROCESSED_COUNT = "setup_import_processed_count"
@@ -521,6 +553,14 @@ class SetupImportStore private constructor(
             "setup_import_recent_provider_count"
         private const val KEY_RECENT_ELIGIBLE_COUNT =
             "setup_import_recent_eligible_count"
+        private const val KEY_RECENT_PROCESSED_COUNT =
+            "setup_import_recent_processed_count"
+        private const val KEY_RECENT_SAVED_COUNT =
+            "setup_import_recent_saved_count"
+        private const val KEY_RECENT_REJECTED_COUNT =
+            "setup_import_recent_rejected_count"
+        private const val KEY_RECENT_FAILED_COUNT =
+            "setup_import_recent_failed_count"
         private const val KEY_LAST_SUCCESSFUL_RECENT_SCAN =
             "setup_import_last_successful_recent_scan"
         private const val KEY_EMPTY_REASON = "setup_import_empty_reason"

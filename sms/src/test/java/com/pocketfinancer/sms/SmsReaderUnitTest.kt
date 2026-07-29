@@ -146,6 +146,39 @@ class SmsReaderUnitTest {
     }
 
     @Test
+    fun `all history existence probe reads only provider identity`() {
+        val cursor = MatrixCursor(arrayOf("_id"))
+        cursor.addRow(arrayOf("older-message"))
+        every {
+            mockContentResolver.query(
+                Uri.parse("content://sms/inbox"),
+                arrayOf("_id"),
+                "date <= ?",
+                arrayOf("5000"),
+                "date DESC"
+            )
+        } returns cursor
+
+        assertTrue(reader.hasAnyInboxMessage(maxDate = 5_000L))
+    }
+
+    @Test
+    fun `all history existence probe distinguishes an empty inbox`() {
+        val cursor = MatrixCursor(arrayOf("_id"))
+        every {
+            mockContentResolver.query(
+                Uri.parse("content://sms/inbox"),
+                arrayOf("_id"),
+                "date <= ?",
+                arrayOf("5000"),
+                "date DESC"
+            )
+        } returns cursor
+
+        assertTrue(!reader.hasAnyInboxMessage(maxDate = 5_000L))
+    }
+
+    @Test
     fun `fetchInbox should surface null cursor as provider failure`() {
         every {
             mockContentResolver.query(

@@ -136,6 +136,7 @@ class TrustworthyHomeStateTest {
 
         val recent = historical.withSuccessfulRecentScan(
             scanWindowDays = 7,
+            providerMaxDate = java.util.concurrent.TimeUnit.DAYS.toMillis(9),
             completedAt = java.util.concurrent.TimeUnit.DAYS.toMillis(10),
             providerMessageCount = 12,
             eligibleCandidateCount = 3
@@ -145,22 +146,58 @@ class TrustworthyHomeStateTest {
         assertEquals(200L, recent.coverageEndMillis)
         assertEquals(90, recent.coverageWindowDays)
         assertEquals(
-            java.util.concurrent.TimeUnit.DAYS.toMillis(3),
+            java.util.concurrent.TimeUnit.DAYS.toMillis(2),
             recent.recentCoverageStartMillis
+        )
+        assertEquals(
+            java.util.concurrent.TimeUnit.DAYS.toMillis(9),
+            recent.recentCoverageEndMillis
         )
         assertEquals(7, recent.recentScanWindowDays)
         assertEquals(12, recent.recentProviderMessageCount)
         assertEquals(3, recent.recentEligibleCandidateCount)
+        assertEquals(0, recent.recentProcessedCount)
+        assertTrue(recent.hasIncompleteRecentProcessing)
         assertEquals(null, recent.actionableError)
+        assertEquals(
+            recent.recentCoverageEndMillis,
+            recentScanProviderMaxDate(
+                state = recent,
+                scanWindowDays = 7,
+                nowMillis = java.util.concurrent.TimeUnit.DAYS.toMillis(12)
+            )
+        )
 
-        val card = setupImportCardModel(
+        val incompleteCard = setupImportCardModel(
             recent.copy(modelPrepared = true),
             nowMillis = recent.recentCoverageEndMillis!!
+        )
+        assertEquals(
+            "Some recent alerts still need attention",
+            incompleteCard.title
+        )
+
+        val card = setupImportCardModel(
+            recent.copy(
+                modelPrepared = true,
+                recentProcessedCount = 3,
+                recentSavedCount = 2,
+                recentRejectedCount = 1
+            ),
+            nowMillis = recent.recentCoverageEndMillis!!
+        )
+        assertEquals(
+            java.util.concurrent.TimeUnit.DAYS.toMillis(12),
+            recentScanProviderMaxDate(
+                state = recent.copy(recentProcessedCount = 3),
+                scanWindowDays = 7,
+                nowMillis = java.util.concurrent.TimeUnit.DAYS.toMillis(12)
+            )
         )
         assertEquals("Pocket Financer is up to date", card.title)
         assertTrue(card.body.contains("recent 7-day scan"))
         assertEquals(
-            "Recent scan: 12 messages checked Â· 3 eligible",
+            "Recent scan: 12 messages checked · 3 eligible · 2 saved · 1 rejected",
             card.evidence
         )
     }
@@ -333,6 +370,29 @@ class TrustworthyHomeStateTest {
     }
 
     @Test
+    fun `ready without history does not promise automatic capture when updates are off`() {
+        val card = setupImportCardModel(
+            state = readyNoHistory(SetupEmptyReason.EMPTY_INBOX),
+            automaticProcessingEnabled = false
+        )
+
+        assertTrue(
+            card.body.contains(
+                "will not process new alerts automatically"
+            )
+        )
+        assertFalse(card.body.contains("will capture"))
+        assertTrue(
+            selectedPeriodEmptyMessage(
+                selectedPeriod = "Day",
+                totalTransactionCount = 0,
+                setupStatus = SetupImportStatus.READY_NO_HISTORY,
+                automaticProcessingEnabled = false
+            ).contains("will not process new alerts automatically")
+        )
+    }
+
+    @Test
     fun `fatal manual processing failure is never presented as success`() {
         val state = HomeSyncState(
             status = HomeSyncState.Status.DONE,
@@ -368,6 +428,91 @@ class TrustworthyHomeStateTest {
             "1 saved · 1 already present",
             homeSyncCompletionSummary(state)
         )
+    }
+
+    @Test
+    fun `distinct provider ids keep identical evidence as separate sources`() {
+        val first = com.pocketfinancer.data.model.SmsSourceIdentity.androidSms(
+            providerMessageId = "provider-1",
+            sender = "AX-BANK",
+            body = "Rs 500 debited",
+            sourceTimestamp = 1_000L,
+            messageType = 1
+        )
+        val second = com.pocketfinancer.data.model.SmsSourceIdentity.androidSms(
+            providerMessageId = "provider-2",
+            sender = "AX-BANK",
+            body = "Rs 500 debited",
+            sourceTimestamp = 1_000L,
+            messageType = 1
+        )
+        val broadcast = com.pocketfinancer.data.model.SmsSourceIdentity.androidSms(
+            providerMessageId = null,
+            sender = "AX-BANK",
+            body = "Rs 500 debited",
+            sourceTimestamp = 1_000L,
+            messageType = 1
+        )
+
+        assertFalse(sameQueuedSmsSource(first, second))
+        assertTrue(sameQueuedSmsSource(first, broadcast))
+        assertTrue(sameQueuedSmsSource(second, broadcast))
+
+        val merged = mergeRecentScanQueue(
+            currentQueue = listOf(
+                SyncSmsItem(
+                    id = broadcast.opaqueCandidateKey,
+                    sender = "AX-BANK",
+                    body = "Rs 500 debited",
+                    date = 1_000L,
+                    sourceIdentity = broadcast,
+                    status = "pending"
+                )
+            ),
+            providerMessages = listOf(
+                com.pocketfinancer.sms.SmsReader.SmsMessage(
+                    address = "AX-BANK",
+                    body = "Rs 500 debited",
+                    date = 1_000L,
+                    type = 1,
+                    providerMessageId = "provider-1"
+                ),
+                com.pocketfinancer.sms.SmsReader.SmsMessage(
+                    address = "AX-BANK",
+                    body = "Rs 500 debited",
+                    date = 1_000L,
+                    type = 1,
+                    providerMessageId = "provider-2"
+                )
+            )
+        )
+        assertEquals(2, merged.size)
+        assertEquals(
+            setOf("provider-1", "provider-2"),
+            merged.mapNotNull {
+                it.sourceIdentity.providerMessageId
+            }.toSet()
+        )
+    }
+
+    @Test
+    fun `terminal notification never calls a failed sync completed`() {
+        val needsAttention = manualSyncTerminalNotificationCopy(
+            saved = 2,
+            rejected = 1,
+            failed = 1
+        )
+        val complete = manualSyncTerminalNotificationCopy(
+            saved = 2,
+            rejected = 1,
+            failed = 0
+        )
+
+        assertEquals("SMS Sync Needs Attention", needsAttention.title)
+        assertFalse(needsAttention.title.contains("Complete"))
+        assertFalse(needsAttention.text.contains("successfully"))
+        assertTrue(needsAttention.text.contains("needs another attempt"))
+        assertEquals("SMS Sync Complete", complete.title)
     }
 
     @Test

@@ -53,22 +53,46 @@ interface TransactionDao {
         WHERE sourceConnector = :connector
           AND (
             sourceMessageId = :messageId
-            OR sourceFingerprint = :fingerprint
-            OR sourceAlternateFingerprint = :fingerprint
             OR (
-                :alternateFingerprint IS NOT NULL
+                :providerMessageId IS NOT NULL
+                AND sourceProviderMessageId = :providerMessageId
+            )
+            OR (
+                (
+                    :providerMessageId IS NULL
+                    OR sourceProviderMessageId IS NULL
+                )
                 AND (
-                    sourceFingerprint = :alternateFingerprint
-                    OR sourceAlternateFingerprint = :alternateFingerprint
+                    sourceFingerprint = :fingerprint
+                    OR sourceAlternateFingerprint = :fingerprint
+                    OR (
+                        :alternateFingerprint IS NOT NULL
+                        AND (
+                            sourceFingerprint = :alternateFingerprint
+                            OR sourceAlternateFingerprint =
+                                :alternateFingerprint
+                        )
+                    )
                 )
             )
           )
+        ORDER BY
+            CASE
+                WHEN sourceMessageId = :messageId THEN 0
+                WHEN :providerMessageId IS NOT NULL
+                    AND sourceProviderMessageId = :providerMessageId THEN 1
+                WHEN sourceProviderMessageId IS NULL THEN 2
+                ELSE 3
+            END,
+            createdAt ASC,
+            id ASC
         LIMIT 1
         """
     )
     suspend fun findBySource(
         connector: String,
         messageId: String,
+        providerMessageId: String?,
         fingerprint: String,
         alternateFingerprint: String?
     ): TransactionEntity?
@@ -80,13 +104,26 @@ interface TransactionDao {
             WHERE sourceConnector = :connector
               AND (
                 sourceMessageId = :messageId
-                OR sourceFingerprint = :fingerprint
-                OR sourceAlternateFingerprint = :fingerprint
                 OR (
-                    :alternateFingerprint IS NOT NULL
+                    :providerMessageId IS NOT NULL
+                    AND sourceProviderMessageId = :providerMessageId
+                )
+                OR (
+                    (
+                        :providerMessageId IS NULL
+                        OR sourceProviderMessageId IS NULL
+                    )
                     AND (
-                        sourceFingerprint = :alternateFingerprint
-                        OR sourceAlternateFingerprint = :alternateFingerprint
+                        sourceFingerprint = :fingerprint
+                        OR sourceAlternateFingerprint = :fingerprint
+                        OR (
+                            :alternateFingerprint IS NOT NULL
+                            AND (
+                                sourceFingerprint = :alternateFingerprint
+                                OR sourceAlternateFingerprint =
+                                    :alternateFingerprint
+                            )
+                        )
                     )
                 )
               )
@@ -96,6 +133,7 @@ interface TransactionDao {
     suspend fun existsBySource(
         connector: String,
         messageId: String,
+        providerMessageId: String?,
         fingerprint: String,
         alternateFingerprint: String?
     ): Boolean
@@ -103,7 +141,17 @@ interface TransactionDao {
     @Query(
         """
         UPDATE transactions
-        SET sourceProviderMessageId =
+        SET sourceMessageId =
+                CASE
+                    WHEN :providerMessageId IS NOT NULL
+                        AND (
+                            sourceProviderMessageId IS NULL
+                            OR sourceProviderMessageId = :providerMessageId
+                        )
+                        THEN :messageId
+                    ELSE sourceMessageId
+                END,
+            sourceProviderMessageId =
                 COALESCE(sourceProviderMessageId, :providerMessageId),
             sourceAlternateFingerprint =
                 COALESCE(
@@ -129,6 +177,7 @@ interface TransactionDao {
     )
     suspend fun preserveSourceMetadata(
         transactionId: String,
+        messageId: String,
         providerMessageId: String?,
         fingerprint: String,
         alternateFingerprint: String?,

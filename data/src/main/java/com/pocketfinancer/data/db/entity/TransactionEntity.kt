@@ -17,8 +17,9 @@ import com.pocketfinancer.data.model.SmsSourceIdentity
         ),
         Index(
             value = ["sourceConnector", "sourceFingerprint"],
-            unique = true
-        )
+            unique = false
+        ),
+        Index(value = ["sourceConnector", "sourceAlternateFingerprint"])
     ]
 )
 data class TransactionEntity(
