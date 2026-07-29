@@ -2,6 +2,14 @@
 
 All notable changes to Pocket Financer are recorded here by Release Please.
 
+## [1.0.1](https://github.com/ManishAradwad/pocket-financer-android/compare/v1.0.0...v1.0.1) (2026-07-29)
+
+
+### Bug Fixes
+
+* **ci:** accept v2 apksigner certificate labels ([#16](https://github.com/ManishAradwad/pocket-financer-android/issues/16)) ([bfa61b9](https://github.com/ManishAradwad/pocket-financer-android/commit/bfa61b904682bc626bc24d16db4cbb57cdbe8137))
+* close trustworthy first-run integrity gaps ([#21](https://github.com/ManishAradwad/pocket-financer-android/issues/21)) ([d569a4d](https://github.com/ManishAradwad/pocket-financer-android/commit/d569a4d23226aedc2066462312a64bb12b255bfb))
+
 ## [1.0.0](https://github.com/ManishAradwad/pocket-financer-android/compare/v0.1.0...v1.0.0) (2026-07-27)
 
 
