@@ -62,7 +62,7 @@ jobs:
             )"
           fi
           test -n "$head_branch"
-          gh workflow run ci.yml --ref "$head_branch"
+          gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$head_branch"
 
   build-and-publish:
     name: Build, verify, and publish signed APK

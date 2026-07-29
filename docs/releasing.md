@@ -53,7 +53,9 @@ ID `com.pocketfinancer.debug` and a `-debug` version suffix; stable builds use
 - Release Please maintains one release pull request, then creates a draft
   `v<version>` GitHub Release when that pull request is explicitly merged.
 - With no optional `RELEASE_PLEASE_TOKEN`, the workflow uses `GITHUB_TOKEN` and
-  explicitly dispatches `ci.yml` on the release pull-request branch.
+  explicitly dispatches `ci.yml` on the release pull-request branch. The
+  checkout-free preparation job supplies `--repo "$GITHUB_REPOSITORY"` so
+  GitHub CLI does not depend on local repository discovery.
 - The Release Please job has `actions`, `contents`, `issues`, and pull-request
   write permissions. The signed publication job has only `contents: write`.
 - Normal and recovery runs share the non-cancelling `stable-release`
@@ -223,7 +225,8 @@ gh secret list
 The active workflow can use the built-in `GITHUB_TOKEN`. When that token creates
 or updates a release pull request, the Release workflow explicitly dispatches
 `ci.yml` on the release branch so the required check starts without a personal
-token.
+token. Because the preparation job has no checkout, the dispatch must retain
+explicit repository context through `--repo "$GITHUB_REPOSITORY"`.
 
 If repository policy later requires a dedicated identity, create a fine-grained
 GitHub personal access token owned by the repository owner, restricted to this
@@ -240,7 +243,8 @@ gh secret set RELEASE_PLEASE_TOKEN
 
 When configured, rotate the dedicated token before expiry and update the secret
 without changing repository files. When it is absent, preserve the Release
-workflow's `actions: write` permission and explicit CI dispatch fallback.
+workflow's `actions: write` permission and repository-scoped explicit CI
+dispatch fallback.
 
 ### 4. Protect `main`
 
@@ -424,9 +428,10 @@ artifacts being immutable.
 - **Release PR CI does not start:** with the built-in `GITHUB_TOKEN`, the
   Release workflow explicitly dispatches `ci.yml` on the updated release
   branch. Confirm the release job still has `actions: write`, `ci.yml` still
-  supports `workflow_dispatch`, and the dispatched run targets the release PR
-  head. If `RELEASE_PLEASE_TOKEN` is configured, its normal pull-request event
-  is expected to start CI instead.
+  supports `workflow_dispatch`, the checkout-free job passes
+  `--repo "$GITHUB_REPOSITORY"` to GitHub CLI, and the dispatched run targets
+  the release PR head. If `RELEASE_PLEASE_TOKEN` is configured, its normal
+  pull-request event is expected to start CI instead.
 - **Signing fails:** verify only the existence and exact names of the four
   secrets, the stored alias, and the keystore backup. Do not echo decoded
   material or weaken the build to accept an unsigned APK.
