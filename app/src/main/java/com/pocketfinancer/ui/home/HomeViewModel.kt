@@ -62,6 +62,7 @@ data class HomeUiState(
     val periodData: Map<String, PeriodData> = emptyMap(),
     val totalTransactionCount: Int = 0,
     val syncState: HomeSyncState = HomeSyncState(),
+    val modelDownloadState: ModelDownloader.DownloadState = ModelDownloader.DownloadState(),
     val upgradeRecommendation: ModelUpgradeRecommendation = ModelUpgradeRecommendation(),
     val setupImportState: SetupImportState = SetupImportState(),
     val automaticProcessingEnabled: Boolean =
@@ -83,21 +84,20 @@ class HomeViewModel @Inject constructor(
     private val onboardingSyncManager: OnboardingSyncManager,
     private val smsRepository: SmsRepository,
     private val setupImportStore: SetupImportStore,
+    private val modelUpgradeSessionDismissalStore: ModelUpgradeSessionDismissalStore,
     private val automaticProcessingPreferences:
         AutomaticProcessingPreferences
 ) : ViewModel() {
 
     private val _selectedPeriod = MutableStateFlow("Day")
     val selectedPeriod: StateFlow<String> = _selectedPeriod.asStateFlow()
-    private val _isDismissed = MutableStateFlow(false)
-
     val uiState: StateFlow<HomeUiState> = combine(
         transactionRepository.getAllByDateDesc(),
         _selectedPeriod,
         syncManager.syncState,
         modelDownloader.state,
         onboardingSyncManager.syncState,
-        _isDismissed,
+        modelUpgradeSessionDismissalStore.dismissedTierIds,
         setupImportStore.state,
         automaticProcessingPreferences.enabled
     ) { flows ->
@@ -107,7 +107,8 @@ class HomeViewModel @Inject constructor(
         val syncState = flows[2] as HomeSyncState
         val downloadState = flows[3] as ModelDownloader.DownloadState
         val onboardingSyncState = flows[4] as OnboardingSyncManager.OnboardingSyncState
-        val isDismissed = flows[5] as Boolean
+        @Suppress("UNCHECKED_CAST")
+        val dismissedTierIds = flows[5] as Set<String>
         val setupImportState = flows[6] as SetupImportState
         val automaticProcessingEnabled = flows[7] as Boolean
 
@@ -171,7 +172,7 @@ class HomeViewModel @Inject constructor(
                                 allowDebugEmulatorOverride = false
                             ).tier == SlmTier.DEFAULT_ONBOARDING_SLM
                     ),
-            isDismissed = isDismissed
+            isDismissed = recommendedSlm?.id in dismissedTierIds
         )
 
         HomeUiState(
@@ -179,6 +180,7 @@ class HomeViewModel @Inject constructor(
             periodData = periodDataMap,
             totalTransactionCount = txs.size,
             syncState = syncState,
+            modelDownloadState = downloadState,
             upgradeRecommendation = upgradeRec,
             setupImportState = setupImportState,
             automaticProcessingEnabled = automaticProcessingEnabled
@@ -338,7 +340,8 @@ class HomeViewModel @Inject constructor(
     }
 
     fun dismissUpgradeBanner() {
-        _isDismissed.value = true
+        uiState.value.upgradeRecommendation.recommendedSlm
+            ?.let { modelUpgradeSessionDismissalStore.dismiss(it.id) }
     }
 
     fun resetSyncState() {

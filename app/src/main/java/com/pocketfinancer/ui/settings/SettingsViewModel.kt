@@ -40,6 +40,11 @@ import com.pocketfinancer.SlmAppFlowPause
 import com.pocketfinancer.toModelSpec
 import com.pocketfinancer.ui.home.HomeSyncManager
 import com.pocketfinancer.ui.home.HomeSyncState
+import com.pocketfinancer.ui.home.ModelUpgradeRecommendation
+import com.pocketfinancer.ui.home.canCancelModelUpgrade
+import com.pocketfinancer.ui.home.isHigherQualityModel
+import com.pocketfinancer.ui.home.unfinishedModelUpgradeTarget
+import com.pocketfinancer.ui.onboarding.OnboardingStep
 import com.pocketfinancer.ui.home.SyncService
 import com.pocketfinancer.ui.onboarding.OnboardingRunGenerationStore
 import com.pocketfinancer.ui.onboarding.OnboardingService
@@ -69,6 +74,8 @@ data class SettingsUiState(
     val allTiers: List<SlmTier> = SlmTier.ALL_TIERS,
     val tierExplanations: Map<String, String> = emptyMap(),
     val downloadState: ModelDownloader.DownloadState = ModelDownloader.DownloadState(),
+    val initialSetupDownloadState: ModelDownloader.DownloadState? = null,
+    val upgradeRecommendation: ModelUpgradeRecommendation = ModelUpgradeRecommendation(),
     val modelLoaded: Boolean = false,
     val modelPath: String? = null,
     val modelPinnedByUser: Boolean = false,
@@ -217,10 +224,34 @@ class SettingsViewModel @Inject constructor(
                     onboarding.isRunning ||
                     appFlows.activeCount > 0 ||
                     appFlows.admissionPaused
-                normalized to busy
-            }.collect { (normalized, busy) ->
-                _state.value = _state.value.copy(
+                Triple(normalized, busy, onboarding)
+            }.collect { (normalized, busy, onboarding) ->
+                val currentState = _state.value
+                val device = currentState.deviceInfo
+                val activeSlm = if (device != null) {
+                    resolveActiveSlmTier(context, modelStorage.modelDirectory, device)
+                } else {
+                    currentState.selectedSlm
+                }
+                val managedTarget = unfinishedModelUpgradeTarget(onboarding)
+                val recommendedSlm = managedTarget ?: currentState.recommendedSlm
+                val upgradeRecommendation = settingsModelUpgradeRecommendation(
+                    currentSlm = activeSlm,
+                    recommendedSlm = recommendedSlm,
+                    onboarding = onboarding,
+                    fallbackDownloadState = normalized
+                )
+                val initialSetupDownloadState = onboarding.downloadState.takeIf {
+                    onboarding.runPurpose ==
+                        OnboardingSyncManager.RunPurpose.INITIAL_SETUP &&
+                        onboarding.isRunning &&
+                        onboarding.isDownloading
+                }
+                _state.value = currentState.copy(
+                    selectedSlm = activeSlm,
                     downloadState = normalized,
+                    initialSetupDownloadState = initialSetupDownloadState,
+                    upgradeRecommendation = upgradeRecommendation,
                     flowBusy = busy
                 )
             }
@@ -311,6 +342,27 @@ class SettingsViewModel @Inject constructor(
                 loadModelFromPath(completedPath)
             }
         }
+    }
+
+    fun startRecommendedModelUpgrade() {
+        val current = _state.value
+        if (!current.initialSetupModelPrepared) {
+            _state.value = current.copy(
+                modelLoadError = "Prepare the first on-device model from Home before upgrading."
+            )
+            return
+        }
+        val recommendation = current.upgradeRecommendation
+        val target = recommendation.recommendedSlm ?: return
+        if (!recommendation.isUpgradeAvailable || recommendation.isRunning) return
+
+        _state.value = current.copy(modelLoadError = null)
+        onboardingSyncManager.startModelUpgrade(context, target)
+    }
+
+    fun cancelRecommendedModelUpgrade() {
+        if (!canCancelModelUpgrade(onboardingSyncManager.syncState.value)) return
+        onboardingSyncManager.requestModelUpgradeCancellation(context)
     }
 
     fun cancelDownload() {
@@ -1012,4 +1064,37 @@ class SettingsViewModel @Inject constructor(
         const val ONBOARDING_COMPLETED = "onboarding_completed"
         const val GRAMMAR_ASSET = "sms_extraction.gbnf"
     }
+}
+
+internal fun settingsModelUpgradeRecommendation(
+    currentSlm: SlmTier?,
+    recommendedSlm: SlmTier?,
+    onboarding: OnboardingSyncManager.OnboardingSyncState,
+    fallbackDownloadState: ModelDownloader.DownloadState
+): ModelUpgradeRecommendation {
+    val hasUpgrade = isHigherQualityModel(currentSlm, recommendedSlm)
+    val isThisUpgradeRun =
+        onboarding.runPurpose == OnboardingSyncManager.RunPurpose.MODEL_UPGRADE &&
+            onboarding.selectedSlm == recommendedSlm
+    val isUpgradeRunning = isThisUpgradeRun && onboarding.isRunning
+    val downloadState = if (isThisUpgradeRun) {
+        onboarding.downloadState
+    } else {
+        fallbackDownloadState
+    }
+    return ModelUpgradeRecommendation(
+        isUpgradeAvailable = hasUpgrade,
+        recommendedSlm = recommendedSlm,
+        currentSlm = currentSlm,
+        downloadState = downloadState,
+        isDownloading = isUpgradeRunning && onboarding.isDownloading,
+        isRunning = isUpgradeRunning,
+        isCancelling = isUpgradeRunning && onboarding.isCancelling,
+        canCancel = canCancelModelUpgrade(onboarding),
+        isApplying = isUpgradeRunning &&
+            !onboarding.isCancelling &&
+            onboarding.step == OnboardingStep.SYNCING,
+        statusMessage = onboarding.syncMessage.takeIf { isThisUpgradeRun && it.isNotBlank() },
+        error = onboarding.modelLoadError.takeIf { isThisUpgradeRun }
+    )
 }
