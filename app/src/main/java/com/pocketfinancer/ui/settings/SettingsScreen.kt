@@ -32,6 +32,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.pocketfinancer.hardware.DeviceCapabilities
 import com.pocketfinancer.hardware.SlmTier
+import com.pocketfinancer.inference.DownloadOwner
 import com.pocketfinancer.ui.theme.*
 
 @Composable
@@ -303,6 +304,9 @@ private fun DataAndPrivacyCard(
 @Composable
 private fun OnDeviceAiCard(state: SettingsUiState, viewModel: SettingsViewModel) {
     val download = state.downloadState
+    val activeDownloadTier = download.artifactFileName?.let { fileName ->
+        SlmTier.ALL_TIERS.find { it.modelFile == fileName }
+    }
     SectionCard(title = "ON-DEVICE AI") {
         val selected = state.selectedSlm
         if (selected == null) {
@@ -347,6 +351,13 @@ private fun OnDeviceAiCard(state: SettingsUiState, viewModel: SettingsViewModel)
                 modifier = Modifier.padding(top = 10.dp)
             )
         } else if (download.isDownloading) {
+            Text(
+                text = "Downloading " +
+                    (activeDownloadTier?.name ?: download.artifactFileName ?: "model"),
+                color = M3_OnSurface,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(top = 8.dp)
+            )
             LinearProgressIndicator(
                 progress = { download.progress },
                 modifier = Modifier
@@ -365,11 +376,12 @@ private fun OnDeviceAiCard(state: SettingsUiState, viewModel: SettingsViewModel)
             )
             OutlinedButton(
                 onClick = viewModel::cancelDownload,
+                enabled = download.owner == DownloadOwner.SETTINGS,
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(top = 8.dp)
             ) {
-                Text("Cancel download")
+                Text(if (download.owner == DownloadOwner.SETTINGS) "Cancel download" else "Managed from Home")
             }
         } else if (!download.isComplete) {
             Button(
@@ -642,6 +654,9 @@ private fun ActiveModelCard(
 @Composable
 private fun EngineCard(state: SettingsUiState, viewModel: SettingsViewModel) {
     val ds = state.downloadState
+    val activeDownloadTier = ds.artifactFileName?.let { fileName ->
+        SlmTier.ALL_TIERS.find { it.modelFile == fileName }
+    }
 
     SectionCard(title = "LLAMA ENGINE") {
         // Status
@@ -710,6 +725,11 @@ private fun EngineCard(state: SettingsUiState, viewModel: SettingsViewModel) {
         // ── Download Section ──
 
         if (ds.isDownloading) {
+            LabelValue(
+                "Downloading",
+                activeDownloadTier?.let { it.name + " · " + it.sizeMb + " MB" }
+                    ?: ds.artifactFileName ?: "Model"
+            )
             // Progress bar during download
             LinearProgressIndicator(
                 progress = { ds.progress },
@@ -748,10 +768,11 @@ private fun EngineCard(state: SettingsUiState, viewModel: SettingsViewModel) {
 
             OutlinedButton(
                 onClick = { viewModel.cancelDownload() },
+                enabled = ds.owner == DownloadOwner.SETTINGS,
                 colors = ButtonDefaults.outlinedButtonColors(contentColor = M3_Error),
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Text("CANCEL DOWNLOAD", style = MaterialTheme.typography.labelMedium)
+                Text(if (ds.owner == DownloadOwner.SETTINGS) "CANCEL DOWNLOAD" else "MANAGED FROM HOME", style = MaterialTheme.typography.labelMedium)
             }
         } else {
             // Buttons row when not downloading

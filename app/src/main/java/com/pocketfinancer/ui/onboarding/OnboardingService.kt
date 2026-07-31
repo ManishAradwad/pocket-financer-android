@@ -15,6 +15,7 @@ import com.pocketfinancer.data.repository.TransactionRepository
 import com.pocketfinancer.hardware.DeviceCapabilities
 import com.pocketfinancer.hardware.SlmTier
 import com.pocketfinancer.hardware.isPublishedModelArtifact
+import com.pocketfinancer.inference.DownloadOwner
 import com.pocketfinancer.inference.ModelDownloader
 import com.pocketfinancer.inference.SlmLease
 import com.pocketfinancer.inference.SlmModelSpec
@@ -505,7 +506,15 @@ class OnboardingService : Service() {
         }
 
         val result = try {
-            modelDownloader.prepareForNativeValidation(slm.downloadUrl, destFile)
+            modelDownloader.prepareForNativeValidation(
+                slm.downloadUrl,
+                destFile,
+                if (runPurpose == OnboardingSyncManager.RunPurpose.MODEL_UPGRADE) {
+                    DownloadOwner.UPGRADE
+                } else {
+                    DownloadOwner.ONBOARDING
+                }
+            )
         } finally {
             downloadObserverJob?.cancel()
             downloadObserverJob = null
