@@ -48,15 +48,26 @@ internal class ParallelRangeDownloader(
 ) {
     private data class RemoteIdentity(
         val totalBytes: Long,
-        val validator: String?
+        val validator: RemoteValidator?
     )
 
     private data class Manifest(
         val totalBytes: Long,
         val chunkSize: Int,
-        val validator: String?,
+        val validator: RemoteValidator?,
         val completed: BooleanArray
     )
+
+    private data class RemoteValidator(
+        val header: ValidatorHeader,
+        val value: String
+    )
+
+    private enum class ValidatorHeader(val httpName: String) {
+        ETAG("ETag"),
+        X_LINKED_ETAG("X-Linked-Etag"),
+        LAST_MODIFIED("Last-Modified")
+    }
 
     suspend fun download(
         url: String,
@@ -219,7 +230,7 @@ internal class ParallelRangeDownloader(
             method = "GET",
             rangeStart = start,
             rangeEnd = end,
-            validator = remote.validator
+            validator = remote.validator?.value
         )
         var attemptBytes = 0L
         try {
@@ -243,13 +254,17 @@ internal class ParallelRangeDownloader(
             ) {
                 throw PermanentRangeException("Server returned an inconsistent model byte range.")
             }
-            val responseValidator = connection.getHeaderField("ETag")
-                ?: connection.getHeaderField("X-Linked-Etag")
-            if (remote.validator != null &&
-                responseValidator != null &&
-                remote.validator != responseValidator
-            ) {
-                throw PermanentRangeException("Remote model identity changed during download.")
+            remote.validator?.let { expectedValidator ->
+                val responseValidator = connection.getHeaderField(
+                    expectedValidator.header.httpName
+                )
+                if (responseValidator == null ||
+                    responseValidator != expectedValidator.value
+                ) {
+                    throw PermanentRangeException(
+                        "Remote model identity changed during download."
+                    )
+                }
             }
 
             connection.inputStream.buffered(BUFFER_SIZE).use { input ->
@@ -336,9 +351,11 @@ internal class ParallelRangeDownloader(
             if (total > 0L && total != expectedTotalBytes) {
                 throw PermanentRangeException("Remote model size changed before download.")
             }
-            val validator = connection.getHeaderField("ETag")
-                ?: connection.getHeaderField("X-Linked-Etag")
-                ?: connection.getHeaderField("Last-Modified")
+            val validator = VALIDATOR_HEADERS.firstNotNullOfOrNull { header ->
+                connection.getHeaderField(header.httpName)?.let { value ->
+                    RemoteValidator(header, value)
+                }
+            }
             return RemoteIdentity(expectedTotalBytes, validator)
         } finally {
             connection.disconnect()
@@ -426,7 +443,17 @@ internal class ParallelRangeDownloader(
                 .forEach { completed[it] = true }
             val validator = properties.getProperty("validator")
                 ?.takeIf { it.isNotEmpty() }
-                ?.let { String(Base64.getDecoder().decode(it), StandardCharsets.UTF_8) }
+                ?.let { encodedValue ->
+                    RemoteValidator(
+                        header = ValidatorHeader.valueOf(
+                            properties.getProperty("validatorHeader")
+                        ),
+                        value = String(
+                            Base64.getDecoder().decode(encodedValue),
+                            StandardCharsets.UTF_8
+                        )
+                    )
+                }
             Manifest(total, storedChunkSize, validator, completed)
         }.getOrNull()
     }
@@ -440,10 +467,11 @@ internal class ParallelRangeDownloader(
                 "validator",
                 manifest.validator?.let {
                     Base64.getEncoder().encodeToString(
-                        it.toByteArray(StandardCharsets.UTF_8)
+                        it.value.toByteArray(StandardCharsets.UTF_8)
                     )
                 }.orEmpty()
             )
+            setProperty("validatorHeader", manifest.validator?.header?.name.orEmpty())
             setProperty(
                 "completed",
                 manifest.completed.indices
@@ -514,6 +542,11 @@ internal class ParallelRangeDownloader(
         const val CONNECT_TIMEOUT_MS = 15_000
         const val READ_TIMEOUT_MS = 60_000
         const val USER_AGENT = "PocketFinancer/1.0"
+        val VALIDATOR_HEADERS = listOf(
+            ValidatorHeader.ETAG,
+            ValidatorHeader.X_LINKED_ETAG,
+            ValidatorHeader.LAST_MODIFIED
+        )
         val CONTENT_RANGE = Regex("""bytes\s+(\d+)-(\d+)/(\d+|\*)""")
     }
 }
