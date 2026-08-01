@@ -43,6 +43,8 @@ class ModelDownloaderTest {
         assertEquals(0, server.getRequests)
         assertFalse(File(testDirectory, "model.gguf.part").exists())
         assertTrue(downloader.state.value.isComplete)
+        assertEquals("model.gguf", downloader.state.value.artifactFileName)
+        assertEquals(DownloadOwner.SETTINGS, downloader.state.value.owner)
     }
 
     @Test

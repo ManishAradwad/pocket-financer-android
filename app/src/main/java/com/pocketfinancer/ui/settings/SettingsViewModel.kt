@@ -12,6 +12,7 @@ import com.pocketfinancer.hardware.explainTierSelection
 import com.pocketfinancer.hardware.isPublishedModelArtifact
 import com.pocketfinancer.hardware.resolveActiveSlmTier
 import com.pocketfinancer.hardware.selectSlmForDevice
+import com.pocketfinancer.inference.DownloadOwner
 import com.pocketfinancer.inference.ModelDownloader
 import com.pocketfinancer.inference.SlmChatMessage
 import com.pocketfinancer.inference.SlmExtractionRequest
@@ -283,7 +284,7 @@ class SettingsViewModel @Inject constructor(
             _state.value = _state.value.copy(modelLoadError = null)
             var downloadedPath: String? = null
             try {
-                val result = modelDownloader.download(tier.downloadUrl, destination)
+                val result = modelDownloader.download(tier.downloadUrl, destination, DownloadOwner.SETTINGS)
                 result.fold(
                     onSuccess = { downloadedPath = it },
                     onFailure = { error ->

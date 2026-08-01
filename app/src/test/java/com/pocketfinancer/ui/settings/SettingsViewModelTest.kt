@@ -9,6 +9,8 @@ import com.pocketfinancer.SlmAppFlowCoordinator
 import com.pocketfinancer.data.model.TransactionType
 import com.pocketfinancer.data.repository.TransactionRepository
 import com.pocketfinancer.hardware.DeviceCapabilities
+import com.pocketfinancer.hardware.SlmTier
+import com.pocketfinancer.inference.DownloadOwner
 import com.pocketfinancer.inference.ModelDownloader
 import com.pocketfinancer.inference.SlmActiveOperation
 import com.pocketfinancer.inference.SlmExtractionRequest
@@ -513,6 +515,31 @@ class SettingsViewModelTest {
             coVerify(exactly = 0) {
                 fixture.modelDownloader.download(any(), any())
             }
+        }
+
+    @Test
+    fun `active downloader artifact and owner remain truthful in settings state`() =
+        runTest(dispatcher) {
+            val fixture = fixture()
+            val viewModel = fixture.createViewModel()
+            runCurrent()
+
+            fixture.downloaderState.value = ModelDownloader.DownloadState(
+                isDownloading = true,
+                progress = 0.4f,
+                artifactFileName = SlmTier.DEFAULT_ONBOARDING_SLM.modelFile,
+                owner = DownloadOwner.UPGRADE
+            )
+            runCurrent()
+
+            assertEquals(
+                SlmTier.DEFAULT_ONBOARDING_SLM.modelFile,
+                viewModel.state.value.downloadState.artifactFileName
+            )
+            assertEquals(
+                DownloadOwner.UPGRADE,
+                viewModel.state.value.downloadState.owner
+            )
         }
 
     @Test

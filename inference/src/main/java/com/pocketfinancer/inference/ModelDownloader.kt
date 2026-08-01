@@ -23,6 +23,12 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
+enum class DownloadOwner {
+    ONBOARDING,
+    SETTINGS,
+    UPGRADE
+}
+
 internal fun interface HttpConnectionFactory {
     fun open(url: URL): HttpURLConnection
 }
@@ -46,7 +52,9 @@ class ModelDownloader {
         val etaSeconds: Long = 0,
         val error: String? = null,
         val isComplete: Boolean = false,
-        val outputPath: String? = null
+        val outputPath: String? = null,
+        val artifactFileName: String? = null,
+        val owner: DownloadOwner? = null
     )
 
     private val connectionFactory: HttpConnectionFactory
@@ -84,11 +92,20 @@ class ModelDownloader {
      * untouched and reported as an unsupported replacement. Interrupted work
      * remains in `<filename>.part` for a later resume.
      */
-    suspend fun download(url: String, destFile: File): Result<String> =
+    suspend fun download(
+        url: String,
+        destFile: File,
+        owner: DownloadOwner = DownloadOwner.SETTINGS
+    ): Result<String> =
         withDownloadRequest {
             downloadMutex.withLock {
                 withContext(Dispatchers.IO) {
-                    _state.value = DownloadState(isDownloading = true, progress = 0f)
+                    _state.value = DownloadState(
+                        isDownloading = true,
+                        progress = 0f,
+                        artifactFileName = destFile.name,
+                        owner = owner
+                    )
 
                     try {
                         val finalFile = destFile.absoluteFile
@@ -107,7 +124,7 @@ class ModelDownloader {
                         val remoteSize = fetchContentLength(url)
 
                         existingFinalResult(finalFile, remoteSize)?.let { existing ->
-                            _state.value = completedState(finalFile, finalFile.length())
+                            _state.value = completedState(finalFile, finalFile.length(), owner)
                             return@withContext Result.success(existing)
                         }
 
@@ -126,35 +143,80 @@ class ModelDownloader {
                             else -> 0L
                         }
 
-                        if (remoteSize > 0L && startByte == remoteSize) {
+                        val rangeMetadata = File(parent, "${finalFile.name}.part.meta")
+                        if (remoteSize > 0L &&
+                            startByte == remoteSize &&
+                            !rangeMetadata.exists()
+                        ) {
                             promoteCompletedPart(partFile, finalFile)
-                            _state.value = completedState(finalFile, remoteSize)
+                            _state.value = completedState(finalFile, remoteSize, owner)
                             return@withContext Result.success(finalFile.absolutePath)
                         }
 
-                        val totalBytes = performDownload(
-                            urlStr = url,
-                            partFile = partFile,
-                            expectedTotalBytes = remoteSize,
-                            requestedStartByte = startByte
-                        )
+                        val legacyPrefix = if (rangeMetadata.exists()) 0L else startByte
+                        val parallelCompleted = if (remoteSize > 0L) {
+                            ParallelRangeDownloader(connectionFactory).download(
+                                url = url,
+                                partFile = partFile,
+                                expectedTotalBytes = remoteSize,
+                                legacyPrefixBytes = legacyPrefix
+                            ) { progress ->
+                                _state.value = DownloadState(
+                                    isDownloading = true,
+                                    progress = (
+                                        progress.downloadedBytes.toFloat() /
+                                            progress.totalBytes
+                                        ).coerceIn(0f, 1f),
+                                    downloadedMb =
+                                        progress.downloadedBytes / BYTES_PER_MEBIBYTE,
+                                    totalMb = progress.totalBytes / BYTES_PER_MEBIBYTE,
+                                    speedMbps =
+                                        progress.speedBytesPerSecond / BYTES_PER_MEBIBYTE,
+                                    etaSeconds = progress.etaSeconds,
+                                    artifactFileName = finalFile.name,
+                                    owner = owner
+                                )
+                            }
+                        } else {
+                            false
+                        }
+                        val totalBytes = if (parallelCompleted) {
+                            remoteSize
+                        } else {
+                            performDownload(
+                                urlStr = url,
+                                partFile = partFile,
+                                expectedTotalBytes = remoteSize,
+                                requestedStartByte = legacyPrefix,
+                                owner = owner,
+                                artifactFileName = finalFile.name
+                            )
+                        }
                         currentCoroutineContext().ensureActive()
                         promoteCompletedPart(partFile, finalFile)
-                        _state.value = completedState(finalFile, totalBytes)
+                        _state.value = completedState(finalFile, totalBytes, owner)
                         Result.success(finalFile.absolutePath)
                     } catch (cancelled: CancellationException) {
                         // Deliberately retain the `.part` artifact for resumption.
-                        _state.value = DownloadState(error = "Download cancelled")
+                        _state.value = DownloadState(
+                            error = "Download cancelled",
+                            artifactFileName = destFile.name,
+                            owner = owner
+                        )
                         throw cancelled
                     } catch (error: IOException) {
                         _state.value = DownloadState(
                             error = error.message?.let { "Download failed: $it" }
-                                ?: "Download failed"
+                                ?: "Download failed",
+                            artifactFileName = destFile.name,
+                            owner = owner
                         )
                         Result.failure(error)
                     } catch (error: Exception) {
                         _state.value = DownloadState(
-                            error = "Download failed: ${error.message}"
+                            error = "Download failed: ${error.message}",
+                            artifactFileName = destFile.name,
+                            owner = owner
                         )
                         Result.failure(error)
                     }
@@ -174,21 +236,22 @@ class ModelDownloader {
      */
     suspend fun prepareForNativeValidation(
         url: String,
-        destFile: File
+        destFile: File,
+        owner: DownloadOwner = DownloadOwner.ONBOARDING
     ): Result<String> =
         withDownloadRequest {
             val cached = downloadMutex.withLock {
                 withContext(Dispatchers.IO) {
                     val finalFile = destFile.absoluteFile
                     if (finalFile.isFile && finalFile.length() > 0L) {
-                        _state.value = completedState(finalFile, finalFile.length())
+                        _state.value = completedState(finalFile, finalFile.length(), owner)
                         Result.success(finalFile.absolutePath)
                     } else {
                         null
                     }
                 }
             }
-            cached ?: download(url, destFile)
+            cached ?: download(url, destFile, owner)
         }
 
     /**
@@ -256,14 +319,20 @@ class ModelDownloader {
         )
     }
 
-    private fun completedState(finalFile: File, totalBytes: Long): DownloadState {
+    private fun completedState(
+        finalFile: File,
+        totalBytes: Long,
+        owner: DownloadOwner
+    ): DownloadState {
         val totalMb = totalBytes / BYTES_PER_MEBIBYTE
         return DownloadState(
             isComplete = true,
             progress = 1f,
             downloadedMb = finalFile.length() / BYTES_PER_MEBIBYTE,
             totalMb = totalMb,
-            outputPath = finalFile.absolutePath
+            outputPath = finalFile.absolutePath,
+            artifactFileName = finalFile.name,
+            owner = owner
         )
     }
 
@@ -388,7 +457,9 @@ class ModelDownloader {
         urlStr: String,
         partFile: File,
         expectedTotalBytes: Long,
-        requestedStartByte: Long
+        requestedStartByte: Long,
+        owner: DownloadOwner,
+        artifactFileName: String
     ): Long {
         val connection = openConnectionWithRedirects(urlStr, requestedStartByte)
         try {
@@ -489,7 +560,9 @@ class ModelDownloader {
                                     ((totalBytes - totalRead).coerceAtLeast(0L) / speedBps)
                                 } else {
                                     0L
-                                }
+                                },
+                                artifactFileName = artifactFileName,
+                                owner = owner
                             )
                             lastUpdateTime = now
                         }
