@@ -35,6 +35,7 @@ import com.pocketfinancer.hardware.SlmTier
 import com.pocketfinancer.inference.DownloadOwner
 import com.pocketfinancer.ui.theme.*
 import com.pocketfinancer.ui.model.ModelDownloadProgressPanel
+import com.pocketfinancer.ui.model.formatDownloadEta
 
 @Composable
 fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
@@ -370,7 +371,7 @@ private fun OnDeviceAiCard(state: SettingsUiState, viewModel: SettingsViewModel)
                 modifier = Modifier.padding(top = 8.dp)
             )
             LinearProgressIndicator(
-                progress = { download.progress },
+                progress = { download.progress.coerceIn(0f, 1f) },
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(top = 8.dp),
@@ -398,7 +399,7 @@ private fun OnDeviceAiCard(state: SettingsUiState, viewModel: SettingsViewModel)
                 }
                 if (download.etaSeconds > 0L) {
                     Text(
-                        "ETA: ${formatEta(download.etaSeconds)}",
+                        "ETA: ${formatDownloadEta(download.etaSeconds)}",
                         color = M3_OnSurfaceVariant,
                         style = MaterialTheme.typography.bodySmall
                     )
@@ -869,7 +870,7 @@ private fun EngineCard(state: SettingsUiState, viewModel: SettingsViewModel) {
             )
             // Progress bar during download
             LinearProgressIndicator(
-                progress = { ds.progress },
+                progress = { ds.progress.coerceIn(0f, 1f) },
                 modifier = Modifier.fillMaxWidth(),
                 color = M3_Primary,
                 trackColor = M3_SurfaceContainerLow,
@@ -895,7 +896,7 @@ private fun EngineCard(state: SettingsUiState, viewModel: SettingsViewModel) {
 
             if (ds.etaSeconds > 0) {
                 Text(
-                    text = "ETA: ${formatEta(ds.etaSeconds)}",
+                    text = "ETA: ${formatDownloadEta(ds.etaSeconds)}",
                     color = M3_OnSurfaceVariant,
                     style = MaterialTheme.typography.bodySmall
                 )
@@ -1018,12 +1019,6 @@ private fun EngineCard(state: SettingsUiState, viewModel: SettingsViewModel) {
     }
 }
 
-private fun formatEta(seconds: Long): String {
-    if (seconds < 60) return "${seconds}s"
-    val m = seconds / 60
-    val s = seconds % 60
-    return "${m}m ${s}s"
-}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Reusable Components

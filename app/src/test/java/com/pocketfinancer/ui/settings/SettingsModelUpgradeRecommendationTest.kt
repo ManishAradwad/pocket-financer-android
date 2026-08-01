@@ -72,4 +72,30 @@ class SettingsModelUpgradeRecommendationTest {
         assertFalse(recommendation.isUpgradeAvailable)
         assertFalse(recommendation.isRunning)
     }
+
+    @Test
+    fun `in flight activation keeps the cached active model`() {
+        val onboarding = OnboardingSyncManager.OnboardingSyncState(
+            isRunning = true,
+            runPurpose = OnboardingSyncManager.RunPurpose.MODEL_UPGRADE,
+            step = OnboardingStep.SYNCING,
+            selectedSlm = target,
+            isModelLoaded = true
+        )
+
+        assertEquals(current, settingsActiveSlm(current, onboarding))
+    }
+
+    @Test
+    fun `durably completed activation adopts the selected model`() {
+        val onboarding = OnboardingSyncManager.OnboardingSyncState(
+            isRunning = false,
+            runPurpose = OnboardingSyncManager.RunPurpose.MODEL_UPGRADE,
+            step = OnboardingStep.COMPLETED,
+            selectedSlm = target,
+            isModelLoaded = true
+        )
+
+        assertEquals(target, settingsActiveSlm(current, onboarding))
+    }
 }

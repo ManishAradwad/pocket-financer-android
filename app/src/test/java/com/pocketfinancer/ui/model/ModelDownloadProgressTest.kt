@@ -39,4 +39,13 @@ class ModelDownloadProgressTest {
         assertEquals("42s", formatDownloadEta(42L))
         assertEquals("2m 5s", formatDownloadEta(125L))
     }
+
+    @Test
+    fun `progress percentage is clamped to indicator bounds`() {
+        val overComplete = ModelDownloader.DownloadState(progress = 1.2f).toProgressText()
+        val belowEmpty = ModelDownloader.DownloadState(progress = -0.2f).toProgressText()
+
+        assertEquals("100%", overComplete.percentage)
+        assertEquals("0%", belowEmpty.percentage)
+    }
 }

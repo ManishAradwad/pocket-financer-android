@@ -63,6 +63,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -149,6 +153,14 @@ data class SettingsUiState(
             !resetRunning
 }
 
+private data class ActiveModelRefreshKey(
+    val runPurpose: OnboardingSyncManager.RunPurpose,
+    val step: OnboardingStep,
+    val selectedSlmId: String?,
+    val isRunning: Boolean,
+    val isModelLoaded: Boolean
+)
+
 @HiltViewModel
 class SettingsViewModel @Inject constructor(
     @ApplicationContext private val context: Context,
@@ -227,12 +239,7 @@ class SettingsViewModel @Inject constructor(
                 Triple(normalized, busy, onboarding)
             }.collect { (normalized, busy, onboarding) ->
                 val currentState = _state.value
-                val device = currentState.deviceInfo
-                val activeSlm = if (device != null) {
-                    resolveActiveSlmTier(context, modelStorage.modelDirectory, device)
-                } else {
-                    currentState.selectedSlm
-                }
+                val activeSlm = settingsActiveSlm(currentState.selectedSlm, onboarding)
                 val managedTarget = unfinishedModelUpgradeTarget(onboarding)
                 val recommendedSlm = managedTarget ?: currentState.recommendedSlm
                 val upgradeRecommendation = settingsModelUpgradeRecommendation(
@@ -256,6 +263,53 @@ class SettingsViewModel @Inject constructor(
                 )
             }
         }
+        viewModelScope.launch {
+            onboardingSyncManager.syncState
+                .map { onboarding ->
+                    ActiveModelRefreshKey(
+                        runPurpose = onboarding.runPurpose,
+                        step = onboarding.step,
+                        selectedSlmId = onboarding.selectedSlm?.id,
+                        isRunning = onboarding.isRunning,
+                        isModelLoaded = onboarding.isModelLoaded
+                    )
+                }
+                .distinctUntilChanged()
+                .drop(1)
+                .collectLatest {
+                    refreshActiveSlmFromStorage()
+                }
+        }
+    }
+
+    private suspend fun refreshActiveSlmFromStorage() {
+        val device = _state.value.deviceInfo ?: return
+        val activeSlm = try {
+            withContext(Dispatchers.IO) {
+                resolveActiveSlmTier(context, modelStorage.modelDirectory, device)
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            Log.w(TAG, "Could not refresh the active model tier", error)
+            return
+        }
+        // Resolution suspends on IO. Re-read state and apply the durable
+        // completion rule before copying the result.
+        val currentState = _state.value
+        val onboarding = onboardingSyncManager.syncState.value
+        val recommendedSlm = unfinishedModelUpgradeTarget(onboarding)
+            ?: currentState.recommendedSlm
+        val currentSlm = settingsActiveSlm(activeSlm, onboarding)
+        _state.value = currentState.copy(
+            selectedSlm = currentSlm,
+            upgradeRecommendation = settingsModelUpgradeRecommendation(
+                currentSlm = currentSlm,
+                recommendedSlm = recommendedSlm,
+                onboarding = onboarding,
+                fallbackDownloadState = currentState.downloadState
+            )
+        )
     }
 
     private fun assessDevice() {
@@ -969,7 +1023,12 @@ class SettingsViewModel @Inject constructor(
                     _state.value = _state.value.copy(resetRunning = false)
                 }
             }
-            if (invokeSuccess) onSuccess()
+            if (invokeSuccess) {
+                viewModelScope.launch {
+                    refreshActiveSlmFromStorage()
+                }
+                onSuccess()
+            }
         }
     }
 
@@ -1065,6 +1124,16 @@ class SettingsViewModel @Inject constructor(
         const val GRAMMAR_ASSET = "sms_extraction.gbnf"
     }
 }
+
+internal fun settingsActiveSlm(
+    currentSlm: SlmTier?,
+    onboarding: OnboardingSyncManager.OnboardingSyncState
+): SlmTier? =
+    onboarding.selectedSlm.takeIf {
+        onboarding.step == OnboardingStep.COMPLETED &&
+            !onboarding.isRunning &&
+            onboarding.isModelLoaded
+    } ?: currentSlm
 
 internal fun settingsModelUpgradeRecommendation(
     currentSlm: SlmTier?,
