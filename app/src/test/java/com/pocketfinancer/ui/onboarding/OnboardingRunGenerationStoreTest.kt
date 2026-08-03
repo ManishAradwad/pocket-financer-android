@@ -6,6 +6,7 @@ import com.pocketfinancer.SlmAppFlowCoordinator
 import com.pocketfinancer.hardware.SlmTier
 import com.pocketfinancer.inference.ModelDownloader
 import com.pocketfinancer.inference.SlmRuntimeOwner
+import com.pocketfinancer.setup.SetupImportStatus
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
@@ -18,6 +19,7 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -256,6 +258,302 @@ class OnboardingRunGenerationStoreTest {
             manager.syncState.value.syncMessage
         )
         assertFalse(manager.tryBeginModelUpgradeCommit())
+    }
+
+    @Test
+    fun `historical stop is enabled only after model preparation boundary`() {
+        val manager = managerBackedBy(5L)
+        manager.updateState {
+            it.copy(
+                runId = "history-run",
+                isRunning = true,
+                isPreparingHistoricalModel = true,
+                runPurpose = OnboardingSyncManager.RunPurpose.INITIAL_SETUP
+            )
+        }
+
+        assertFalse(
+            manager.allowHistoricalImportCancellation(
+                runId = "history-run",
+                durableStatus = SetupImportStatus.DOWNLOADING
+            )
+        )
+        assertTrue(manager.syncState.value.isPreparingHistoricalModel)
+
+        assertTrue(
+            manager.allowHistoricalImportCancellation(
+                runId = "history-run",
+                durableStatus = SetupImportStatus.SCANNING
+            )
+        )
+        assertTrue(manager.syncState.value.isCancellationAllowed)
+        assertFalse(manager.syncState.value.isPreparingHistoricalModel)
+    }
+
+    @Test
+    fun `onboarding run IDs are nonempty and unique`() {
+        val first = newOnboardingRunId()
+        val second = newOnboardingRunId()
+
+        assertTrue(first.isNotBlank())
+        assertTrue(second.isNotBlank())
+        assertNotEquals(first, second)
+    }
+
+    @Test
+    fun `cancelled service work remains unfinished until cleanup completes`() {
+        assertTrue(
+            onboardingServiceWorkIsUnfinished(
+                workJobIsPresent = true,
+                workJobIsCompleted = false,
+                cleanupJobIsPresent = false,
+                cleanupJobIsCompleted = false
+            )
+        )
+        assertTrue(
+            onboardingServiceWorkIsUnfinished(
+                workJobIsPresent = true,
+                workJobIsCompleted = true,
+                cleanupJobIsPresent = true,
+                cleanupJobIsCompleted = false
+            )
+        )
+        assertFalse(
+            onboardingServiceWorkIsUnfinished(
+                workJobIsPresent = true,
+                workJobIsCompleted = true,
+                cleanupJobIsPresent = true,
+                cleanupJobIsCompleted = true
+            )
+        )
+    }
+
+    @Test
+    fun `cleanup-only stale commands retire after the drain`() {
+        assertEquals(
+            12,
+            nextCleanupOnlyRetirementStartId(
+                currentRetirementStartId = 10,
+                deliveredStartId = 12,
+                workJobIsPresent = true,
+                workJobIsCompleted = true,
+                cleanupJobIsPresent = true,
+                cleanupJobIsCompleted = false
+            )
+        )
+        assertEquals(
+            null,
+            nextCleanupOnlyRetirementStartId(
+                currentRetirementStartId = null,
+                deliveredStartId = 12,
+                workJobIsPresent = true,
+                workJobIsCompleted = false,
+                cleanupJobIsPresent = true,
+                cleanupJobIsCompleted = false
+            )
+        )
+        assertEquals(
+            13,
+            nextCleanupOnlyRetirementStartId(
+                currentRetirementStartId = 12,
+                deliveredStartId = 13,
+                workJobIsPresent = true,
+                workJobIsCompleted = true,
+                cleanupJobIsPresent = false,
+                cleanupJobIsCompleted = false,
+                cancellationSettlementPending = true
+            )
+        )
+        assertTrue(
+            onboardingServiceWorkIsUnfinished(
+                workJobIsPresent = true,
+                workJobIsCompleted = true,
+                cleanupJobIsPresent = false,
+                cleanupJobIsCompleted = false,
+                cancellationSettlementPending = true
+            )
+        )
+    }
+
+    @Test
+    fun `historical stop matcher rejects stale tokens and download phase`() {
+        val active = OnboardingSyncManager.OnboardingSyncState(
+            runId = "current-run",
+            isRunning = true,
+            isCancellationAllowed = true,
+            runPurpose = OnboardingSyncManager.RunPurpose.INITIAL_SETUP
+        )
+
+        assertTrue(
+            historicalCancellationMatches(
+                state = active,
+                requestedRunId = "current-run",
+                durableStatus = SetupImportStatus.SCANNING
+            )
+        )
+        assertFalse(
+            historicalCancellationMatches(
+                state = active,
+                requestedRunId = "stale-run",
+                durableStatus = SetupImportStatus.SCANNING
+            )
+        )
+        assertFalse(
+            historicalCancellationMatches(
+                state = active,
+                requestedRunId = "current-run",
+                durableStatus = SetupImportStatus.DOWNLOADING
+            )
+        )
+        assertTrue(
+            historicalCancellationMatches(
+                state = active,
+                requestedRunId = "current-run",
+                durableStatus = SetupImportStatus.PERMISSION_NEEDED
+            )
+        )
+        assertTrue(
+            historicalCancellationMatches(
+                state = active,
+                requestedRunId = "current-run",
+                durableStatus = SetupImportStatus.PAUSED
+            )
+        )
+        assertFalse(
+            historicalCancellationMatches(
+                state = active.copy(isCancellationAllowed = false),
+                requestedRunId = "current-run",
+                durableStatus = SetupImportStatus.PERMISSION_NEEDED
+            )
+        )
+        assertFalse(
+            historicalCancellationMatches(
+                state = active.copy(isCancellationAllowed = false),
+                requestedRunId = "current-run",
+                durableStatus = SetupImportStatus.PAUSED
+            )
+        )
+        assertFalse(
+            historicalCancellationMatches(
+                state = active.copy(
+                    runPurpose = OnboardingSyncManager.RunPurpose.MODEL_UPGRADE
+                ),
+                requestedRunId = "current-run",
+                durableStatus = SetupImportStatus.PROCESSING
+            )
+        )
+        assertTrue(
+            onboardingStartMatches(
+                state = active,
+                requestedRunId = "current-run",
+                requestedPurpose =
+                    OnboardingSyncManager.RunPurpose.INITIAL_SETUP
+            )
+        )
+        assertFalse(
+            onboardingStartMatches(
+                state = active,
+                requestedRunId = "stale-run",
+                requestedPurpose =
+                    OnboardingSyncManager.RunPurpose.INITIAL_SETUP
+            )
+        )
+    }
+
+    @Test
+    fun `historical cancellation CAS disables repeat action until cleanup`() {
+        val manager = managerBackedBy(5L)
+        manager.updateState {
+            it.copy(
+                runId = "history-run",
+                isRunning = true,
+                isCancellationAllowed = true,
+                runPurpose = OnboardingSyncManager.RunPurpose.INITIAL_SETUP
+            )
+        }
+
+        assertTrue(
+            manager.tryRequestHistoricalImportCancellation(
+                runId = "history-run",
+                durableStatus = SetupImportStatus.PROCESSING
+            )
+        )
+        assertTrue(manager.syncState.value.isRunning)
+        assertTrue(manager.syncState.value.isCancelling)
+        assertFalse(manager.syncState.value.isCancellationAllowed)
+        assertEquals(
+            "Stopping SMS processing...",
+            manager.syncState.value.syncMessage
+        )
+        assertFalse(
+            manager.tryRequestHistoricalImportCancellation(
+                runId = "history-run",
+                durableStatus = SetupImportStatus.PROCESSING
+            )
+        )
+        assertFalse(manager.tryBeginHistoricalImportCommit("history-run"))
+
+        assertTrue(manager.completeHistoricalImportCancellation("history-run"))
+        assertFalse(manager.syncState.value.isRunning)
+        assertFalse(manager.syncState.value.isCancelling)
+        assertEquals(null, manager.syncState.value.runId)
+    }
+
+    @Test
+    fun `historical terminal commit CAS prevents a later stop`() {
+        val manager = managerBackedBy(5L)
+        manager.updateState {
+            it.copy(
+                runId = "history-run",
+                isRunning = true,
+                isCancellationAllowed = true,
+                runPurpose = OnboardingSyncManager.RunPurpose.INITIAL_SETUP
+            )
+        }
+
+        assertTrue(manager.tryBeginHistoricalImportCommit("history-run"))
+        assertFalse(manager.syncState.value.isCancellationAllowed)
+        assertFalse(
+            manager.tryRequestHistoricalImportCancellation(
+                runId = "history-run",
+                durableStatus = SetupImportStatus.SCANNING
+            )
+        )
+    }
+
+    @Test
+    fun `permission loss can settle an accepted stop without claiming user pause`() {
+        val manager = managerBackedBy(5L)
+        manager.updateState {
+            it.copy(
+                runId = "history-run",
+                isRunning = true,
+                isCancelling = true,
+                isCancellationAllowed = false,
+                runPurpose = OnboardingSyncManager.RunPurpose.INITIAL_SETUP,
+                syncMessage = "Stopping SMS processing..."
+            )
+        }
+
+        assertTrue(
+            manager.acceptHistoricalImportCancellation(
+                runId = "history-run",
+                durableStatus = SetupImportStatus.PERMISSION_NEEDED
+            )
+        )
+        assertTrue(
+            manager.completeHistoricalCancellationWithoutUserPause(
+                runId = "history-run",
+                syncMessage = "SMS access must be restored to continue setup."
+            )
+        )
+        assertFalse(manager.syncState.value.isRunning)
+        assertFalse(manager.syncState.value.isCancelling)
+        assertEquals(null, manager.syncState.value.runId)
+        assertEquals(
+            "SMS access must be restored to continue setup.",
+            manager.syncState.value.syncMessage
+        )
     }
 
     private fun managerBackedBy(generation: Long): OnboardingSyncManager =

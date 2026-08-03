@@ -69,8 +69,10 @@ internal data class ActiveSyncCardUiModel(
  * items take priority so the card never hides a result that needs attention.
  */
 internal fun HomeSyncState.syncCardItem(): SyncSmsItem? = when (status) {
-    HomeSyncState.Status.IDLE -> null
-    HomeSyncState.Status.SYNCING -> {
+    HomeSyncState.Status.IDLE,
+    HomeSyncState.Status.SCANNING -> null
+    HomeSyncState.Status.SYNCING,
+    HomeSyncState.Status.CANCELLING -> {
         currentIndex?.let { queue.getOrNull(it) }
             ?: queue.firstOrNull { it.status == "syncing" }
     }
@@ -88,9 +90,18 @@ internal fun HomeSyncState.syncCardItem(): SyncSmsItem? = when (status) {
 internal fun HomeSyncState.toActiveSyncCardUiModel(
     activeSms: SyncSmsItem
 ): ActiveSyncCardUiModel? {
-    if (status == HomeSyncState.Status.IDLE) return null
+    if (
+        status == HomeSyncState.Status.IDLE ||
+        status == HomeSyncState.Status.SCANNING
+    ) {
+        return null
+    }
 
-    if (status == HomeSyncState.Status.SYNCING) {
+    if (
+        status == HomeSyncState.Status.SYNCING ||
+        status == HomeSyncState.Status.CANCELLING
+    ) {
+        val isStopping = status == HomeSyncState.Status.CANCELLING
         val total = queue.size.coerceAtLeast(1)
         val position = queue
             .indexOfFirst { it.id == activeSms.id }
@@ -100,14 +111,28 @@ internal fun HomeSyncState.toActiveSyncCardUiModel(
                 ?.plus(1)
                 ?.coerceIn(1, total)
             ?: 1
-        val step = when (currentStageIndex) {
-            0, null -> "Checking message"
-            1 -> if (hasThinkingMode) "Reasoning on device" else "Extracting transaction"
-            2 -> "Extracting transaction"
-            3 -> "Saving transaction"
-            else -> "Finishing"
+        val step = if (isStopping) {
+            if (currentStageIndex == 3) {
+                "Finishing current save"
+            } else {
+                "Stopping safely"
+            }
+        } else {
+            when (currentStageIndex) {
+                0, null -> "Checking message"
+                1 -> if (hasThinkingMode) {
+                    "Reasoning on device"
+                } else {
+                    "Extracting transaction"
+                }
+                2 -> "Extracting transaction"
+                3 -> "Saving transaction"
+                else -> "Finishing"
+            }
         }
-        val title = if (total == 1) {
+        val title = if (isStopping) {
+            "Stopping SMS processing"
+        } else if (total == 1) {
             "Processing message"
         } else {
             "Processing message $position of $total"
@@ -118,10 +143,14 @@ internal fun HomeSyncState.toActiveSyncCardUiModel(
             tone = ActiveSyncCardTone.PROCESSING,
             title = title,
             detail = detail,
-            badge = "LIVE",
+            badge = if (isStopping) "STOPPING" else "LIVE",
             stepLabel = "CURRENT STEP",
             stepValue = step,
-            actionLabel = "View live log",
+            actionLabel = if (isStopping) {
+                "View stopping details"
+            } else {
+                "View live log"
+            },
             stateDescription = "$title. $detail. Current step: $step."
         )
     }

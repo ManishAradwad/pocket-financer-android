@@ -5,7 +5,9 @@ import com.pocketfinancer.setup.SetupActionableError
 import com.pocketfinancer.setup.SetupEmptyReason
 import com.pocketfinancer.setup.SetupImportState
 import com.pocketfinancer.setup.SetupImportStatus
+import com.pocketfinancer.setup.SetupPauseReason
 import com.pocketfinancer.setup.reconcileSetupModelAvailability
+import com.pocketfinancer.ui.onboarding.OnboardingSyncManager
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -235,6 +237,429 @@ class TrustworthyHomeStateTest {
     }
 
     @Test
+    fun `historical scanning and processing expose an explicit stop target`() {
+        val scanning = setupImportCardModel(
+            state = SetupImportState(
+                status = SetupImportStatus.SCANNING,
+                activeScanWindowDays = 90,
+                modelPrepared = true
+            ),
+            canStopSmsProcessing = true
+        )
+        val processing = setupImportCardModel(
+            state = SetupImportState(
+                status = SetupImportStatus.PROCESSING,
+                eligibleCandidateCount = 4,
+                processedCount = 2,
+                savedCount = 1,
+                rejectedCount = 1,
+                modelPrepared = true
+            ),
+            canStopSmsProcessing = true
+        )
+
+        assertEquals(SetupCardAction.STOP_SMS_PROCESSING, scanning.primaryAction)
+        assertEquals("Stop SMS processing", scanning.primaryLabel)
+        assertEquals(
+            SetupCardActionTarget.STOP_SMS_PROCESSING,
+            scanning.primaryAction!!.target()
+        )
+        assertEquals(SetupCardAction.STOP_SMS_PROCESSING, processing.primaryAction)
+        assertEquals("Stop SMS processing", processing.primaryLabel)
+    }
+
+    @Test
+    fun `stopping historical import disables repeat action and keeps progress visible`() {
+        val card = setupImportCardModel(
+            state = SetupImportState(
+                status = SetupImportStatus.PROCESSING,
+                eligibleCandidateCount = 4,
+                processedCount = 2,
+                savedCount = 1,
+                rejectedCount = 1,
+                modelPrepared = true
+            ),
+            isCancelling = true,
+            canStopSmsProcessing = true
+        )
+
+        assertEquals("Stopping SMS processing", card.title)
+        assertEquals(null, card.primaryAction)
+        assertEquals(null, card.primaryLabel)
+        assertTrue(card.showProgress)
+        assertTrue(card.body.contains("Completed saves remain"))
+    }
+
+    @Test
+    fun `historical completion boundary removes inert stop action`() {
+        val card = setupImportCardModel(
+            state = SetupImportState(
+                status = SetupImportStatus.PROCESSING,
+                eligibleCandidateCount = 4,
+                processedCount = 4,
+                savedCount = 3,
+                rejectedCount = 1,
+                modelPrepared = true
+            ),
+            canStopSmsProcessing = false,
+            isFinishing = true
+        )
+
+        assertEquals("Finishing SMS processing", card.title)
+        assertEquals(null, card.primaryAction)
+        assertEquals(null, card.primaryLabel)
+        assertTrue(card.showProgress)
+        assertTrue(card.body.contains("completion boundary"))
+    }
+
+    @Test
+    fun `terminal setup result stays in finishing card until run settles`() {
+        listOf(
+            SetupImportState(
+                status = SetupImportStatus.READY,
+                modelPrepared = true
+            ),
+            SetupImportState(
+                status = SetupImportStatus.READY_NO_HISTORY,
+                modelPrepared = true
+            ),
+            SetupImportState(
+                status = SetupImportStatus.FAILED,
+                modelPrepared = true,
+                actionableError = SetupActionableError(
+                    code = "SMS_PROCESSING_FAILED",
+                    message = "One alert needs another attempt.",
+                    actionLabel = "Retry import"
+                )
+            )
+        ).forEach { state ->
+            val card = setupImportCardModel(
+                state = state,
+                isFinishing = true
+            )
+
+            assertEquals("Finishing SMS processing", card.title)
+            assertEquals(null, card.primaryAction)
+            assertEquals(null, card.primaryLabel)
+            assertTrue(card.showProgress)
+        }
+    }
+
+    @Test
+    fun `historical phase flags identify only the final commit as finishing`() {
+        val active = OnboardingSyncManager.OnboardingSyncState(
+            runId = "history-run",
+            isRunning = true,
+            runPurpose = OnboardingSyncManager.RunPurpose.INITIAL_SETUP
+        )
+
+        assertFalse(
+            historicalImportIsFinishing(
+                active.copy(isPreparingHistoricalModel = true)
+            )
+        )
+        assertTrue(historicalImportIsRunning(active))
+        assertFalse(
+            historicalImportIsFinishing(
+                active.copy(isCancellationAllowed = true)
+            )
+        )
+        assertFalse(
+            historicalImportIsFinishing(
+                active.copy(isCancelling = true)
+            )
+        )
+        assertTrue(historicalImportIsFinishing(active))
+        assertFalse(historicalImportIsFinishing(active.copy(isRunning = false)))
+        assertFalse(historicalImportIsRunning(active.copy(isRunning = false)))
+        assertFalse(
+            historicalImportIsFinishing(
+                active.copy(
+                    runPurpose =
+                        OnboardingSyncManager.RunPurpose.MODEL_UPGRADE
+                )
+            )
+        )
+    }
+
+    @Test
+    fun `manual start handoff and service ownership block competing setup work`() {
+        val idle = HomeSyncState()
+
+        assertFalse(manualSmsOperationIsRunning(idle))
+        assertTrue(
+            manualSmsOperationIsRunning(
+                state = idle,
+                startPending = true
+            )
+        )
+        assertTrue(
+            manualSmsOperationIsRunning(
+                idle.copy(status = HomeSyncState.Status.SCANNING)
+            )
+        )
+        assertTrue(
+            manualSmsOperationIsRunning(
+                idle.copy(
+                    status = HomeSyncState.Status.DONE,
+                    activeRunId = "final-handoff"
+                )
+            )
+        )
+        assertFalse(
+            manualSmsOperationIsRunning(
+                idle.copy(status = HomeSyncState.Status.DONE)
+            )
+        )
+    }
+
+    @Test
+    fun `setup card removes competing actions during manual work or model upgrade`() {
+        val ready = SetupImportState(
+            status = SetupImportStatus.READY,
+            modelPrepared = true
+        )
+        val duringManual = setupImportCardModel(
+            state = ready,
+            manualSmsOperationRunning = true
+        )
+        val duringUpgrade = setupImportCardModel(
+            state = ready,
+            modelUpgradeRunning = true
+        )
+
+        assertEquals("Recent SMS processing is active", duringManual.title)
+        assertEquals(null, duringManual.primaryAction)
+        assertTrue(duringManual.showProgress)
+        assertEquals("Model upgrade is in progress", duringUpgrade.title)
+        assertEquals(null, duringUpgrade.primaryAction)
+        assertTrue(duringUpgrade.showProgress)
+
+        listOf(
+            SetupImportStatus.NOT_STARTED,
+            SetupImportStatus.PAUSED,
+            SetupImportStatus.FAILED
+        ).forEach { status ->
+            val blocked = setupImportCardModel(
+                state = ready.copy(status = status),
+                modelUpgradeRunning = true
+            )
+            assertEquals("Model upgrade is in progress", blocked.title)
+            assertEquals(null, blocked.primaryAction)
+        }
+
+        val pausedDuringManual = setupImportCardModel(
+            state = ready.copy(status = SetupImportStatus.PAUSED),
+            manualSmsOperationRunning = true
+        )
+        assertEquals(
+            "Recent SMS processing is active",
+            pausedDuringManual.title
+        )
+        assertEquals(null, pausedDuringManual.primaryAction)
+    }
+
+    @Test
+    fun `visible historical stop wins if legacy state contains both runs`() {
+        val historical = OnboardingSyncManager.OnboardingSyncState(
+            runId = "historical-run",
+            isRunning = true,
+            isCancellationAllowed = true,
+            runPurpose = OnboardingSyncManager.RunPurpose.INITIAL_SETUP
+        )
+        val manual = HomeSyncState(
+            status = HomeSyncState.Status.SYNCING,
+            activeRunId = "manual-run"
+        )
+
+        assertEquals(
+            SmsProcessingStopTarget.HISTORICAL,
+            smsProcessingStopTarget(historical, manual)
+        )
+        assertEquals(
+            SmsProcessingStopTarget.MANUAL,
+            smsProcessingStopTarget(
+                historical.copy(isRunning = false),
+                manual
+            )
+        )
+    }
+
+    @Test
+    fun `user requested pause offers truthful resume copy`() {
+        val card = setupImportCardModel(
+            SetupImportState(
+                status = SetupImportStatus.PAUSED,
+                pauseReason = SetupPauseReason.USER_REQUESTED,
+                savedCount = 2,
+                actionableError = SetupActionableError(
+                    code = "HISTORICAL_IMPORT_STOPPED_BY_USER",
+                    message =
+                        "Completed saves remain on this device. Resume to rediscover unfinished messages.",
+                    actionLabel = "Resume SMS import"
+                ),
+                modelPrepared = true
+            )
+        )
+
+        assertEquals("SMS processing stopped", card.title)
+        assertEquals(SetupCardAction.RESUME, card.primaryAction)
+        assertEquals("Resume SMS import", card.primaryLabel)
+        assertTrue(card.body.contains("Completed saves remain"))
+    }
+
+    @Test
+    fun `durable pause does not expose resume until stop cleanup finishes`() {
+        val card = setupImportCardModel(
+            state = SetupImportState(
+                status = SetupImportStatus.PAUSED,
+                pauseReason = SetupPauseReason.USER_REQUESTED,
+                savedCount = 2,
+                modelPrepared = true
+            ),
+            isCancelling = true
+        )
+
+        assertEquals("Finishing SMS stop", card.title)
+        assertEquals(null, card.primaryAction)
+        assertEquals(null, card.primaryLabel)
+        assertTrue(card.showProgress)
+    }
+
+    @Test
+    fun `restored permission pause keeps finishing feedback until commit drains`() {
+        val card = setupImportCardModel(
+            state = SetupImportState(
+                status = SetupImportStatus.PAUSED,
+                pauseReason = SetupPauseReason.INTERRUPTED,
+                modelPrepared = true
+            ),
+            isFinishing = true
+        )
+
+        assertEquals("Finishing SMS processing", card.title)
+        assertEquals(null, card.primaryAction)
+        assertTrue(card.showProgress)
+    }
+
+    @Test
+    fun `restored permission pause keeps stop retry before resume`() {
+        val card = setupImportCardModel(
+            state = SetupImportState(
+                status = SetupImportStatus.PAUSED,
+                pauseReason = SetupPauseReason.INTERRUPTED,
+                modelPrepared = true
+            ),
+            canStopSmsProcessing = true
+        )
+
+        assertEquals("Stop active SMS processing", card.title)
+        assertEquals(
+            SetupCardAction.STOP_SMS_PROCESSING,
+            card.primaryAction
+        )
+        assertEquals("Stop SMS processing", card.primaryLabel)
+    }
+
+    @Test
+    fun `model download never exposes SMS stop action`() {
+        val card = setupImportCardModel(
+            SetupImportState(
+                status = SetupImportStatus.DOWNLOADING,
+                modelDownloadConfirmed = true
+            )
+        )
+
+        assertEquals(null, card.primaryAction)
+        assertTrue(card.showProgress)
+    }
+
+    @Test
+    fun `permission recovery keeps active model preparation truthful`() {
+        val card = setupImportCardModel(
+            state = SetupImportState(
+                status = SetupImportStatus.PAUSED,
+                pauseReason = SetupPauseReason.INTERRUPTED,
+                modelDownloadConfirmed = true
+            ),
+            isPreparingModel = true
+        )
+
+        assertEquals("Preparing the on-device model", card.title)
+        assertEquals(null, card.primaryAction)
+        assertTrue(card.showProgress)
+        assertTrue(card.body.contains("SMS scanning has not started"))
+    }
+
+    @Test
+    fun `cached artifact preparation does not claim SMS scanning started`() {
+        val card = setupImportCardModel(
+            state = SetupImportState(
+                status = SetupImportStatus.DOWNLOADING,
+                modelDownloadConfirmed = true,
+                modelPrepared = true
+            ),
+            isPreparingModel = true
+        )
+
+        assertEquals("Preparing the on-device model", card.title)
+        assertEquals(null, card.primaryAction)
+        assertTrue(card.showProgress)
+        assertTrue(card.body.contains("SMS scanning has not started"))
+    }
+
+    @Test
+    fun `permission loss keeps stopping feedback until active work drains`() {
+        val card = setupImportCardModel(
+            state = SetupImportState(
+                status = SetupImportStatus.PERMISSION_NEEDED,
+                modelPrepared = true
+            ),
+            isCancelling = true
+        )
+
+        assertEquals("Stopping SMS processing", card.title)
+        assertEquals(null, card.primaryAction)
+        assertTrue(card.showProgress)
+        assertTrue(card.body.contains("completed saves remain"))
+    }
+
+    @Test
+    fun `permission loss keeps finishing feedback after commit gate closes`() {
+        val card = setupImportCardModel(
+            state = SetupImportState(
+                status = SetupImportStatus.PERMISSION_NEEDED,
+                modelPrepared = true
+            ),
+            isFinishing = true
+        )
+
+        assertEquals("Finishing SMS processing", card.title)
+        assertEquals(null, card.primaryAction)
+        assertTrue(card.showProgress)
+        assertTrue(card.body.contains("persistence boundary"))
+    }
+
+    @Test
+    fun `permission card exposes stop retry when dispatch was not accepted`() {
+        val card = setupImportCardModel(
+            state = SetupImportState(
+                status = SetupImportStatus.PERMISSION_NEEDED,
+                modelPrepared = true
+            ),
+            canStopSmsProcessing = true
+        )
+
+        assertEquals("Stop active SMS processing", card.title)
+        assertEquals(
+            SetupCardAction.STOP_SMS_PROCESSING,
+            card.primaryAction
+        )
+        assertEquals("Stop SMS processing", card.primaryLabel)
+        assertFalse(card.showProgress)
+    }
+
+    @Test
     fun `stale verified range is dated and is not called up to date`() {
         val scanEnded = 10_000L
         val card = setupImportCardModel(
@@ -313,6 +738,15 @@ class TrustworthyHomeStateTest {
                 selectedPeriod = "Month",
                 totalTransactionCount = 5,
                 setupStatus = SetupImportStatus.READY
+            )
+        )
+        assertEquals(
+            "No transactions yet. Finishing local setup; the setup card shows current progress.",
+            selectedPeriodEmptyMessage(
+                selectedPeriod = "Day",
+                totalTransactionCount = 0,
+                setupStatus = SetupImportStatus.READY_NO_HISTORY,
+                setupFinishing = true
             )
         )
     }

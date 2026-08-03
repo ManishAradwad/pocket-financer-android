@@ -148,7 +148,8 @@ class SetupImportStoreTest {
         store.update {
             it.copy(
                 status = SetupImportStatus.DOWNLOADING,
-                modelDownloadConfirmed = true
+                modelDownloadConfirmed = true,
+                modelPrepared = true
             )
         }
 
@@ -157,7 +158,91 @@ class SetupImportStoreTest {
 
         assertEquals(SetupImportStatus.PAUSED, recovered.status)
         assertEquals(SetupPauseReason.INTERRUPTED, recovered.pauseReason)
+        assertEquals(
+            SetupImportStore.ERROR_INTERRUPTED,
+            recovered.actionableError?.code
+        )
         assertTrue(recovered.modelDownloadConfirmed)
+        assertTrue(recovered.modelPrepared)
+    }
+
+    @Test
+    fun `permission recovery preserves user requested pause across restart`() {
+        val fake = FakeSharedPreferences()
+        val originalError = SetupActionableError(
+            code = "HISTORICAL_IMPORT_STOPPED_BY_USER",
+            message = "Completed saves remain on this device.",
+            actionLabel = "Resume SMS import"
+        )
+        val firstProcess = SetupImportStore(
+            fake.preferences,
+            hasSmsPermissions = true
+        )
+        firstProcess.update {
+            it.copy(
+                status = SetupImportStatus.PAUSED,
+                pauseReason = SetupPauseReason.USER_REQUESTED,
+                actionableError = originalError
+            )
+        }
+
+        firstProcess.reconcilePermission(granted = false)
+        val restartedWhileRevoked = SetupImportStore(
+            fake.preferences,
+            hasSmsPermissions = false
+        )
+        val recovered = restartedWhileRevoked.reconcilePermission(granted = true)
+
+        assertEquals(SetupImportStatus.PAUSED, recovered.status)
+        assertEquals(SetupPauseReason.USER_REQUESTED, recovered.pauseReason)
+        assertEquals(originalError, recovered.actionableError)
+    }
+
+    @Test
+    fun `user requested historical pause and resume metadata survive restart`() {
+        val fake = FakeSharedPreferences()
+        val store = SetupImportStore(
+            fake.preferences,
+            hasSmsPermissions = true
+        )
+        store.update {
+            it.copy(
+                status = SetupImportStatus.PAUSED,
+                pauseReason = SetupPauseReason.USER_REQUESTED,
+                activeScanWindowDays = 90,
+                activeScanProviderMaxDateMillis = 9_000L,
+                coverageWindowDays = 30,
+                coverageStartMillis = 100L,
+                coverageEndMillis = 200L,
+                lastSuccessfulScanMillis = 200L,
+                eligibleCandidateCount = 5,
+                processedCount = 3,
+                savedCount = 2,
+                rejectedCount = 1,
+                actionableError = SetupActionableError(
+                    code = "HISTORICAL_IMPORT_STOPPED_BY_USER",
+                    message = "Completed saves remain on this device.",
+                    actionLabel = "Resume SMS import"
+                ),
+                modelDownloadConfirmed = true,
+                modelPrepared = true
+            )
+        }
+
+        val restarted = SetupImportStore(
+            fake.preferences,
+            hasSmsPermissions = true
+        ).state.value
+
+        assertEquals(SetupImportStatus.PAUSED, restarted.status)
+        assertEquals(SetupPauseReason.USER_REQUESTED, restarted.pauseReason)
+        assertEquals(90, restarted.activeScanWindowDays)
+        assertEquals(9_000L, restarted.activeScanProviderMaxDateMillis)
+        assertEquals(30, restarted.coverageWindowDays)
+        assertEquals(3, restarted.processedCount)
+        assertEquals(2, restarted.savedCount)
+        assertEquals(1, restarted.rejectedCount)
+        assertTrue(restarted.actionableError!!.message.contains("Completed saves"))
     }
 
     @Test

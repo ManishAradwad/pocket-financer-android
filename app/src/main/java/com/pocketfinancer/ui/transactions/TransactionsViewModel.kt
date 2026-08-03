@@ -1,5 +1,6 @@
 package com.pocketfinancer.ui.transactions
 
+import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.pocketfinancer.data.model.Transaction
@@ -9,6 +10,7 @@ import com.pocketfinancer.data.repository.TransactionRepository
 import com.pocketfinancer.data.repository.AccountRepository
 import com.pocketfinancer.ui.home.HomeSyncManager
 import com.pocketfinancer.ui.home.HomeSyncState
+import com.pocketfinancer.ui.home.SyncService
 import com.pocketfinancer.ui.home.SyncSmsItem
 import com.pocketfinancer.ui.home.hasDiagnosticSourceEvidence
 import com.pocketfinancer.pipeline.SmsFilterPipeline
@@ -18,6 +20,7 @@ import com.pocketfinancer.inference.SlmRuntime
 import com.pocketfinancer.inference.SlmRuntimeOwner
 import com.pocketfinancer.SlmAppFlowCoordinator
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -49,6 +52,7 @@ data class TransactionsUiState(
 
 @HiltViewModel
 class TransactionsViewModel @Inject constructor(
+    @ApplicationContext private val context: Context,
     private val transactionRepository: TransactionRepository,
     private val accountRepository: AccountRepository,
     private val syncManager: HomeSyncManager,
@@ -160,6 +164,24 @@ class TransactionsViewModel @Inject constructor(
 
     fun resetSyncState() {
         syncManager.resetState()
+    }
+
+    fun stopManualSync() {
+        val runId = syncManager.syncState.value.activeRunId ?: return
+        val commandAccepted = try {
+            SyncService.requestStop(context, runId)
+        } catch (_: RuntimeException) {
+            false
+        }
+        if (!commandAccepted) {
+            android.widget.Toast.makeText(
+                context,
+                "Could not request a stop. Please try again.",
+                android.widget.Toast.LENGTH_SHORT
+            ).show()
+            return
+        }
+        syncManager.requestServiceStop(runId)
     }
 
     fun updateTransaction(

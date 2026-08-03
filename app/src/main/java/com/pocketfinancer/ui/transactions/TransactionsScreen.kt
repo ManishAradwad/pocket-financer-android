@@ -37,6 +37,10 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketfinancer.data.model.Transaction
 import com.pocketfinancer.data.model.TransactionType
@@ -358,7 +362,15 @@ fun TransactionsScreen(
             }
 
             val syncCardSms = state.syncState.syncCardItem()
-            val showEmptyState = state.transactions.isEmpty() && syncCardSms == null
+            val manualSyncActive =
+                state.syncState.status == HomeSyncState.Status.SCANNING ||
+                    state.syncState.status == HomeSyncState.Status.SYNCING ||
+                    state.syncState.status == HomeSyncState.Status.CANCELLING
+            val showEmptyState = shouldShowTransactionsEmptyState(
+                hasTransactions = state.transactions.isNotEmpty(),
+                hasSyncCard = syncCardSms != null,
+                syncStatus = state.syncState.status
+            )
 
             if (showEmptyState) {
                 Box(
@@ -380,15 +392,161 @@ fun TransactionsScreen(
                         .weight(1f)
                 ) {
                     // Active / latest local pipeline result
+                    if (manualSyncActive && syncCardSms == null) {
+                        item {
+                            val isStopping =
+                                state.syncState.status ==
+                                    HomeSyncState.Status.CANCELLING
+                            val controlTitle = if (isStopping) {
+                                "Stopping SMS processing"
+                            } else if (
+                                state.syncState.status ==
+                                    HomeSyncState.Status.SCANNING
+                            ) {
+                                "Scanning recent messages"
+                            } else {
+                                "Processing recent messages"
+                            }
+                            val controlBody = if (isStopping) {
+                                "Finishing the active on-device operation safely. Completed saves remain available."
+                            } else if (
+                                state.syncState.status ==
+                                    HomeSyncState.Status.SCANNING
+                            ) {
+                                "Checking the recent SMS window on this device."
+                            } else {
+                                "Preparing the next eligible message on this device."
+                            }
+                            Card(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 4.dp)
+                                    .semantics {
+                                        liveRegion = LiveRegionMode.Polite
+                                        stateDescription =
+                                            "$controlTitle. $controlBody"
+                                    },
+                                colors = CardDefaults.cardColors(
+                                    containerColor = M3_SurfaceContainer
+                                )
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(16.dp),
+                                    verticalArrangement =
+                                        Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Text(
+                                        text = controlTitle,
+                                        style = MaterialTheme.typography.titleMedium,
+                                        color = M3_OnSurface
+                                    )
+                                    Text(
+                                        text = controlBody,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = M3_OnSurfaceVariant
+                                    )
+                                    OutlinedButton(
+                                        onClick = viewModel::stopManualSync,
+                                        enabled = !isStopping,
+                                        modifier = Modifier.fillMaxWidth(),
+                                        colors = ButtonDefaults
+                                            .outlinedButtonColors(
+                                                contentColor = M3_Error,
+                                                disabledContentColor =
+                                                    M3_OnSurfaceVariant
+                                            )
+                                    ) {
+                                        Icon(
+                                            imageVector = if (isStopping) {
+                                                Icons.Rounded.HourglassTop
+                                            } else {
+                                                Icons.Rounded.StopCircle
+                                            },
+                                            contentDescription = null
+                                        )
+                                        Spacer(Modifier.width(8.dp))
+                                        Text(
+                                            if (isStopping) {
+                                                "Stopping safely..."
+                                            } else {
+                                                "Stop SMS processing"
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
                     if (syncCardSms != null) {
                         item {
-                            ActiveSyncCard(
-                                activeSms = syncCardSms,
-                                syncState = state.syncState,
-                                onClick = {
-                                    selectedProcessingSmsId = syncCardSms.id
+                            Column {
+                                ActiveSyncCard(
+                                    activeSms = syncCardSms,
+                                    syncState = state.syncState,
+                                    onClick = {
+                                        selectedProcessingSmsId = syncCardSms.id
+                                    }
+                                )
+                                if (
+                                    state.syncState.status ==
+                                        HomeSyncState.Status.SYNCING ||
+                                    state.syncState.status ==
+                                        HomeSyncState.Status.CANCELLING
+                                ) {
+                                    OutlinedButton(
+                                        onClick = viewModel::stopManualSync,
+                                        enabled =
+                                            state.syncState.status !=
+                                                HomeSyncState.Status.CANCELLING,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(
+                                                horizontal = 16.dp,
+                                                vertical = 4.dp
+                                            ),
+                                        colors = ButtonDefaults
+                                            .outlinedButtonColors(
+                                                contentColor = M3_Error,
+                                                disabledContentColor =
+                                                    M3_OnSurfaceVariant
+                                            ),
+                                        border = BorderStroke(
+                                            1.dp,
+                                            if (
+                                                state.syncState.status ==
+                                                HomeSyncState.Status.CANCELLING
+                                            ) {
+                                                M3_OutlineVariant
+                                            } else {
+                                                M3_Error.copy(alpha = 0.55f)
+                                            }
+                                        )
+                                    ) {
+                                        Icon(
+                                            imageVector = if (
+                                                state.syncState.status ==
+                                                HomeSyncState.Status.CANCELLING
+                                            ) {
+                                                Icons.Rounded.HourglassTop
+                                            } else {
+                                                Icons.Rounded.StopCircle
+                                            },
+                                            contentDescription = null
+                                        )
+                                        Spacer(Modifier.width(8.dp))
+                                        Text(
+                                            if (
+                                                state.syncState.status ==
+                                                HomeSyncState.Status.CANCELLING
+                                            ) {
+                                                "Stopping safely..."
+                                            } else {
+                                                "Stop SMS processing"
+                                            }
+                                        )
+                                    }
                                 }
-                            )
+                            }
                         }
                     }
 
@@ -1022,10 +1180,14 @@ fun TransactionsScreen(
             val sms = selectedProcessingSms
 
             val currentIndex = state.syncState.currentIndex
-            val isActive = state.syncState.status == HomeSyncState.Status.SYNCING &&
+            val isActive = when (state.syncState.status) {
+                HomeSyncState.Status.SYNCING,
+                HomeSyncState.Status.CANCELLING ->
                     currentIndex != null &&
-                    currentIndex < state.syncState.queue.size &&
-                    state.syncState.queue[currentIndex].id == sms.id
+                        currentIndex < state.syncState.queue.size &&
+                        state.syncState.queue[currentIndex].id == sms.id
+                else -> false
+            }
 
             val activeStageIndex = if (isActive) {
                 state.syncState.currentStageIndex ?: 0
@@ -1119,6 +1281,10 @@ fun TransactionsScreen(
                     parsedOutput = finalParsedOutput,
                     performanceText = performanceText,
                     activeModelName = state.syncState.activeModelName,
+                    isStopping =
+                        state.syncState.status ==
+                            HomeSyncState.Status.CANCELLING,
+                    onStop = viewModel::stopManualSync,
                     onClose = { selectedProcessingSmsId = null }
                 )
             }
@@ -1126,6 +1292,17 @@ fun TransactionsScreen(
     }
 }
 }
+
+internal fun shouldShowTransactionsEmptyState(
+    hasTransactions: Boolean,
+    hasSyncCard: Boolean,
+    syncStatus: HomeSyncState.Status
+): Boolean =
+    !hasTransactions &&
+        !hasSyncCard &&
+        syncStatus != HomeSyncState.Status.SCANNING &&
+        syncStatus != HomeSyncState.Status.SYNCING &&
+        syncStatus != HomeSyncState.Status.CANCELLING
 
 
 @Composable

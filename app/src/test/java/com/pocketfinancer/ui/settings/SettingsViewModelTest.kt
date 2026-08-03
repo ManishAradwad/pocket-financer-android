@@ -35,6 +35,9 @@ import com.pocketfinancer.setup.SetupImportState
 import com.pocketfinancer.setup.SetupImportStore
 import com.pocketfinancer.ui.home.HomeSyncManager
 import com.pocketfinancer.ui.home.HomeSyncState
+import com.pocketfinancer.ui.home.ManualOperationReservation
+import com.pocketfinancer.ui.home.ManualOperationReservationKind
+import com.pocketfinancer.ui.home.SyncService
 import com.pocketfinancer.ui.onboarding.OnboardingRunGenerationStore
 import com.pocketfinancer.ui.onboarding.OnboardingSyncManager
 import io.mockk.coEvery
@@ -42,8 +45,11 @@ import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkStatic
+import io.mockk.mockkObject
+import io.mockk.unmockkObject
 import io.mockk.unmockkStatic
 import io.mockk.verify
+import io.mockk.verifyOrder
 import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -168,6 +174,102 @@ class SettingsViewModelTest {
             viewModel.refreshPermissionHealth()
 
             assertTrue(viewModel.state.value.smsPermissionGranted)
+        }
+
+    @Test
+    fun `permission revocation dispatches stop before publishing manual cancellation`() =
+        runTest(dispatcher) {
+            val fixture = fixture()
+            mockkObject(SyncService.Companion)
+            try {
+                every {
+                    SyncService.requestStop(
+                        fixture.context,
+                        "manual-run"
+                    )
+                } returns true
+                val viewModel = fixture.createViewModel()
+                runCurrent()
+                fixture.homeSyncState.value = HomeSyncState(
+                    status = HomeSyncState.Status.SYNCING,
+                    activeRunId = "manual-run"
+                )
+                fixture.permissionHealth.value =
+                    fixture.permissionHealth.value.copy(
+                        readSmsPermissionGranted = false
+                    )
+
+                viewModel.refreshPermissionHealth()
+
+                verifyOrder {
+                    SyncService.requestStop(
+                        fixture.context,
+                        "manual-run"
+                    )
+                    fixture.homeSyncManager
+                        .requestServiceStop("manual-run")
+                }
+                verify {
+                    fixture.setupImportStore.reconcilePermission(false)
+                    fixture.onboardingSyncManager
+                        .requestHistoricalImportCancellation(fixture.context)
+                }
+            } finally {
+                unmockkObject(SyncService.Companion)
+            }
+        }
+
+    @Test
+    fun `manual scanning and stopping keep settings operations busy`() =
+        runTest(dispatcher) {
+            val fixture = fixture()
+            val viewModel = fixture.createViewModel()
+            runCurrent()
+
+            fixture.homeSyncState.value = HomeSyncState(
+                status = HomeSyncState.Status.SCANNING,
+                activeRunId = "manual-run"
+            )
+            runCurrent()
+            assertTrue(viewModel.state.value.flowBusy)
+
+            fixture.homeSyncState.value = HomeSyncState(
+                status = HomeSyncState.Status.CANCELLING,
+                activeRunId = "manual-run",
+                cancellationRequested = true
+            )
+            runCurrent()
+            assertTrue(viewModel.state.value.flowBusy)
+
+            fixture.homeSyncState.value = HomeSyncState()
+            runCurrent()
+            assertFalse(viewModel.state.value.flowBusy)
+        }
+
+    @Test
+    fun `pending manual start blocks model work and upgrade clicks`() =
+        runTest(dispatcher) {
+            val fixture = fixture(initialSetupModelPrepared = true)
+            val viewModel = fixture.createViewModel()
+            runCurrent()
+
+            fixture.manualOperationReservation.value =
+                ManualOperationReservation(
+                    id = "pending-manual-start",
+                    kind = ManualOperationReservationKind.SERVICE_START
+                )
+
+            viewModel.startRecommendedModelUpgrade()
+            runCurrent()
+
+            assertTrue(viewModel.state.value.flowBusy)
+            assertEquals(
+                "Finish the current model task before starting a model upgrade.",
+                viewModel.state.value.upgradeRecommendation.startBlockedMessage
+            )
+            verify(exactly = 0) {
+                fixture.onboardingSyncManager.startModelUpgrade(any(), any())
+            }
         }
 
     @Test
@@ -645,12 +747,6 @@ class SettingsViewModelTest {
         val setupImportState = MutableStateFlow(
             SetupImportState(modelPrepared = initialSetupModelPrepared)
         )
-        val homeSync = mockk<HomeSyncManager>()
-        val homeSyncState = MutableStateFlow(HomeSyncState())
-        val onboardingSync = mockk<OnboardingSyncManager>(relaxed = true)
-        val onboardingState = MutableStateFlow(
-            OnboardingSyncManager.OnboardingSyncState()
-        )
         val permissionHealthReader = mockk<SettingsPermissionHealthReader>()
         val permissionHealth = MutableStateFlow(
             SettingsPermissionHealthSnapshot(
@@ -682,6 +778,15 @@ class SettingsViewModelTest {
         )
         val lease = mockk<SlmLease>()
         val appFlowCoordinator = SlmAppFlowCoordinator()
+        val homeSyncManager = mockk<HomeSyncManager>(relaxed = true)
+        val homeSyncState = MutableStateFlow(HomeSyncState())
+        val manualOperationReservation =
+            MutableStateFlow<ManualOperationReservation?>(null)
+        val onboardingSyncManager =
+            mockk<OnboardingSyncManager>(relaxed = true)
+        val onboardingState = MutableStateFlow(
+            OnboardingSyncManager.OnboardingSyncState()
+        )
 
         every {
             context.getSharedPreferences(".app_settings", Context.MODE_PRIVATE)
@@ -696,8 +801,6 @@ class SettingsViewModelTest {
         } returns onboardingCompleted
         every { automaticProcessingPreferences.enabled } returns automaticProcessing
         every { setupImportStore.state } returns setupImportState
-        every { homeSync.syncState } returns homeSyncState
-        every { onboardingSync.syncState } returns onboardingState
         coEvery {
             automaticProcessingPreferences.disableAndCleanupPending(any())
         } coAnswers {
@@ -720,6 +823,16 @@ class SettingsViewModelTest {
         every { storage.modelFile(any()) } answers { File(models, firstArg<String>()) }
         every { runtime.state } returns runtimeState
         every { modelDownloader.state } returns downloaderState
+        every { homeSyncManager.syncState } returns homeSyncState
+        every {
+            homeSyncManager.withSmsOperationStartBoundary<Unit>(any())
+        } answers {
+            firstArg<() -> Unit>().invoke()
+        }
+        every {
+            homeSyncManager.manualOperationReservation
+        } returns manualOperationReservation
+        every { onboardingSyncManager.syncState } returns onboardingState
         every { lease.owner } returns SlmRuntimeOwner.SETTINGS_TEST
         every { lease.model } returns spec
         every { lease.isReleased } returns false
@@ -750,9 +863,10 @@ class SettingsViewModelTest {
             downloaderState = downloaderState,
             selectedModelResidency = selectedModelResidency,
             setupImportStore = setupImportStore,
-            homeSync = homeSync,
+            homeSyncManager = homeSyncManager,
             homeSyncState = homeSyncState,
-            onboardingSync = onboardingSync,
+            manualOperationReservation = manualOperationReservation,
+            onboardingSyncManager = onboardingSyncManager,
             onboardingState = onboardingState
         )
     }
@@ -780,12 +894,20 @@ class SettingsViewModelTest {
         val downloaderState: MutableStateFlow<ModelDownloader.DownloadState>,
         val selectedModelResidency: SelectedModelResidency,
         val setupImportStore: SetupImportStore,
-        val homeSync: HomeSyncManager,
+        val homeSyncManager: HomeSyncManager,
         val homeSyncState: MutableStateFlow<HomeSyncState>,
-        val onboardingSync: OnboardingSyncManager,
+        val manualOperationReservation:
+            MutableStateFlow<ManualOperationReservation?>,
+        val onboardingSyncManager: OnboardingSyncManager,
         val onboardingState:
             MutableStateFlow<OnboardingSyncManager.OnboardingSyncState>
     ) {
+        val homeSync: HomeSyncManager
+            get() = homeSyncManager
+
+        val onboardingSync: OnboardingSyncManager
+            get() = onboardingSyncManager
+
         fun createViewModel(): SettingsViewModel {
             return SettingsViewModel(
                 context = context,
@@ -802,8 +924,8 @@ class SettingsViewModelTest {
                 smsWorkController = smsWorkController,
                 selectedModelResidency = selectedModelResidency,
                 appFlowCoordinator = appFlowCoordinator,
-                homeSyncManager = homeSync,
-                onboardingSyncManager = onboardingSync,
+                homeSyncManager = homeSyncManager,
+                onboardingSyncManager = onboardingSyncManager,
                 onboardingRunGenerationStore = mockk<OnboardingRunGenerationStore>(
                     relaxed = true
                 ),

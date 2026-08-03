@@ -644,63 +644,6 @@ class SmsParserWorkerPolicyTest {
     )
 
     @Test
-    fun `foreground admission pause maps to retry without starting sync`() {
-        val success = Any()
-        val retry = Any()
-        var started = false
-
-        val result = foldIncomingSmsQueueResult(
-            queueResult = IncomingSmsQueueResult.ADMISSION_PAUSED,
-            onQueuedTransaction = {
-                started = true
-                success
-            },
-            onIgnored = { success },
-            onAdmissionPaused = { retry }
-        )
-
-        assertSame(retry, result)
-        assertFalse(started)
-    }
-
-    @Test
-    fun `direct worker holds and releases admission across processing`() = runTest {
-        val delegate = mockk<HomeSyncDelegate>()
-        val flowLease = mockk<SmsWorkerFlowLease>()
-        coEvery { delegate.tryEnterSmsWorkerFlow() } returns flowLease
-        coEvery { flowLease.release() } returns Unit
-
-        val result = withSmsWorkerFlowAdmission(
-            delegate = delegate,
-            onAdmissionPaused = { error("Admission should be available") }
-        ) {
-            "processed"
-        }
-
-        assertEquals("processed", result)
-        coVerify(exactly = 1) { flowLease.release() }
-    }
-
-    @Test
-    fun `direct worker releases admission when processing fails`() = runTest {
-        val delegate = mockk<HomeSyncDelegate>()
-        val flowLease = mockk<SmsWorkerFlowLease>()
-        coEvery { delegate.tryEnterSmsWorkerFlow() } returns flowLease
-        coEvery { flowLease.release() } returns Unit
-
-        assertFailsWith<IllegalStateException> {
-            withSmsWorkerFlowAdmission(
-                delegate = delegate,
-                onAdmissionPaused = { error("Admission should be available") }
-            ) {
-                throw IllegalStateException("processing failed")
-            }
-        }
-
-        coVerify(exactly = 1) { flowLease.release() }
-    }
-
-    @Test
     fun `persisted parser work is terminal when onboarding was reset`() {
         val preferences = mockk<SharedPreferences>()
         every {

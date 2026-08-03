@@ -810,33 +810,6 @@ internal suspend fun rethrowAfterNonCancellableSettlement(
     throw cancelled
 }
 
-internal inline fun <T> foldIncomingSmsQueueResult(
-    queueResult: IncomingSmsQueueResult,
-    onQueuedTransaction: () -> T,
-    onIgnored: () -> T,
-    onAdmissionPaused: () -> T
-): T = when (queueResult) {
-    IncomingSmsQueueResult.QUEUED_TRANSACTION -> onQueuedTransaction()
-    IncomingSmsQueueResult.IGNORED -> onIgnored()
-    IncomingSmsQueueResult.ADMISSION_PAUSED -> onAdmissionPaused()
-}
-
-internal suspend fun <T> withSmsWorkerFlowAdmission(
-    delegate: HomeSyncDelegate,
-    onAdmissionPaused: () -> T,
-    block: suspend () -> T
-): T {
-    val flowLease = delegate.tryEnterSmsWorkerFlow()
-        ?: return onAdmissionPaused()
-    return try {
-        block()
-    } finally {
-        withContext(NonCancellable) {
-            flowLease.release()
-        }
-    }
-}
-
 internal suspend fun protectSmsParserChain(
     onFailure: (Exception) -> Unit,
     retryOrFinishChain: () -> androidx.work.ListenableWorker.Result,

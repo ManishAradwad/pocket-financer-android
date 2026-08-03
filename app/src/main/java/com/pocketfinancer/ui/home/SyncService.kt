@@ -7,6 +7,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.Uri
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
@@ -17,6 +18,7 @@ import com.pocketfinancer.inference.SlmRuntimeOwner
 import com.pocketfinancer.pipeline.SmsNotificationHelper
 import com.pocketfinancer.ui.onboarding.OnboardingRunGenerationStore
 import dagger.hilt.android.AndroidEntryPoint
+import java.util.UUID
 import kotlinx.coroutines.*
 import javax.inject.Inject
 
@@ -33,15 +35,29 @@ class SyncService : Service() {
     lateinit var appFlowCoordinator: SlmAppFlowCoordinator
 
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val jobStateLock = Any()
     private var job: Job? = null
+    private var activeJobRetireThroughStartId: Int = 0
+    @Volatile
+    private var userStopRequestedRunId: String? = null
 
     companion object {
         private const val TAG = "SyncService"
         private const val NOTIFICATION_ID = 20002
         private const val APP_SETTINGS = ".app_settings"
         private const val ONBOARDING_COMPLETED = "onboarding_completed"
+        internal const val ACTION_START =
+            "com.pocketfinancer.action.START_MANUAL_SMS_SYNC"
+        internal const val ACTION_STOP =
+            "com.pocketfinancer.action.STOP_MANUAL_SMS_SYNC"
+        internal const val EXTRA_RUN_ID =
+            "com.pocketfinancer.extra.MANUAL_SMS_SYNC_RUN_ID"
 
-        fun start(context: Context) {
+        fun start(
+            context: Context,
+            runId: String = UUID.randomUUID().toString()
+        ): String {
+            require(runId.isNotBlank()) { "Manual sync run id cannot be blank" }
             // Capture before Android accepts the start. A reset racing after
             // this read advances the generation atomically with relocking the
             // shell, so delayed delivery cannot repopulate erased data.
@@ -52,13 +68,41 @@ class SyncService : Service() {
                     OnboardingRunGenerationStore.INITIAL_GENERATION
                 )
             val intent = Intent(context, SyncService::class.java).apply {
+                action = ACTION_START
+                putExtra(EXTRA_RUN_ID, runId)
                 putExtra(
                     OnboardingRunGenerationStore.EXTRA_RUN_GENERATION,
                     generation
                 )
             }
             context.startForegroundService(intent)
+            return runId
         }
+
+        fun requestStop(context: Context, runId: String): Boolean {
+            if (runId.isBlank()) return false
+            return context.startService(stopIntent(context, runId)) != null
+        }
+
+        internal fun stopIntent(context: Context, runId: String): Intent =
+            Intent(context, SyncService::class.java).apply {
+                action = ACTION_STOP
+                data = Uri.parse(
+                    "${context.packageName}://manual-sync/stop/" +
+                        Uri.encode(runId)
+                )
+                putExtra(EXTRA_RUN_ID, runId)
+            }
+
+        internal fun requestedRunId(intent: Intent?): String? =
+            intent?.getStringExtra(EXTRA_RUN_ID)
+                ?.takeIf { it.isNotBlank() }
+
+        internal fun stoppedNotificationCopy(): ManualSyncStoppedCopy =
+            ManualSyncStoppedCopy(
+                title = "SMS Processing Stopped",
+                text = "Completed saves remain available."
+            )
 
         fun stop(context: Context) {
             val intent = Intent(context, SyncService::class.java)
@@ -75,12 +119,92 @@ class SyncService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.i(TAG, "SyncService OnStartCommand")
 
-        if (job != null && job!!.isActive) {
-            Log.i(TAG, "SyncService is already active. Appended message will be processed by the current run.")
+        // Stop commands must be matched before the active-job shortcut. An old
+        // notification therefore cannot cancel whichever run happens to be
+        // active when its PendingIntent is eventually delivered.
+        if (intent?.action == ACTION_STOP) {
+            val requestedRunId = requestedRunId(intent)
+            val matchesActiveRun =
+                syncManager.requestServiceStop(requestedRunId)
+            if (matchesActiveRun) {
+                userStopRequestedRunId = requestedRunId
+                val activeJob = jobSnapshotRecordingStart(startId)
+                if (
+                    shouldKeepManualSyncDraining(
+                        jobIsPresent = activeJob != null
+                    )
+                ) {
+                    // A first stop updates immediately. Repeated delivery while
+                    // a cancelled job drains must not race terminal publication
+                    // by reposting an ongoing notification after settlement.
+                    if (activeJob?.isActive == true) {
+                        updateNotification(
+                            title = "Stopping SMS Processing",
+                            text =
+                                "Stopping safely; finishing any save already in progress…",
+                            progress = 0f,
+                            ongoing = true,
+                            runId = requestedRunId,
+                            showStopAction = false
+                        )
+                    }
+                    activeJob?.cancel(
+                        CancellationException(
+                            "User stopped manual SMS run $requestedRunId"
+                        )
+                    )
+                } else {
+                    syncManager.settleServiceCancellation(requestedRunId)
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    showStoppedNotification()
+                    stopSelfResult(startId)
+                }
+            } else {
+                val activeJob = jobSnapshotRecordingStart(startId)
+                if (
+                    !shouldKeepManualSyncDraining(
+                        jobIsPresent = activeJob != null
+                    )
+                ) {
+                    stopSelfResult(startId)
+                }
+            }
             return START_NOT_STICKY
         }
 
-        val initialNotification = buildNotification("Syncing Transactions", "Initializing sync queue...", 0f, true)
+        val drainingJob = jobSnapshotRecordingStart(startId)
+        if (
+            shouldKeepManualSyncDraining(
+                jobIsPresent = drainingJob != null
+            )
+        ) {
+            if (intent?.action == ACTION_START) {
+                requestedRunId(intent)?.let { runId ->
+                    syncManager.acknowledgeServiceStart(
+                        runId = runId,
+                        accepted = false
+                    )
+                }
+            }
+            Log.i(TAG, "SyncService is already active; rejecting duplicate start")
+            return START_NOT_STICKY
+        }
+
+        val runId = requestedRunId(intent)
+        if (intent?.action != ACTION_START || runId == null) {
+            Log.i(TAG, "Rejecting manual sync start without a run identity")
+            stopSelfResult(startId)
+            return START_NOT_STICKY
+        }
+
+        val initialNotification = buildNotification(
+            title = "Syncing Transactions",
+            text = "Initializing recent-message scan…",
+            progress = 0f,
+            ongoing = true,
+            runId = runId,
+            showStopAction = true
+        )
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
                 NOTIFICATION_ID,
@@ -102,15 +226,61 @@ class SyncService : Service() {
             )
         ) {
             Log.i(TAG, "Rejecting stale, unstamped, or pre-shell sync start")
+            syncManager.acknowledgeServiceStart(
+                runId = runId,
+                accepted = false
+            )
             if (stopSelfResult(startId)) {
                 stopForeground(STOP_FOREGROUND_REMOVE)
             }
             return START_NOT_STICKY
         }
 
-        job = serviceScope.launch {
+        if (!syncManager.beginServiceRun(runId)) {
+            Log.i(TAG, "Rejecting manual sync start while another run owns state")
+            syncManager.acknowledgeServiceStart(
+                runId = runId,
+                accepted = false
+            )
+            if (stopSelfResult(startId)) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            }
+            return START_NOT_STICKY
+        }
+        syncManager.acknowledgeServiceStart(
+            runId = runId,
+            accepted = true
+        )
+        userStopRequestedRunId = null
+
+        var retireThroughStartId = startId
+        lateinit var launchedJob: Job
+        launchedJob = serviceScope.launch(start = CoroutineStart.LAZY) {
             var progressObserver: Job? = null
             var serviceFlowLease: SlmAppFlowLease? = null
+            suspend fun publishCompletedRun(
+                publishNotification: (HomeSyncState) -> Unit
+            ): Boolean = syncManager.withCompletedServiceRunHandoff(
+                runId = runId
+            ) { terminalState ->
+                progressObserver?.cancelAndJoin()
+                progressObserver = null
+                publishNotification(terminalState)
+                synchronized(jobStateLock) {
+                    check(job === launchedJob) {
+                        "Manual terminal handoff lost service job ownership"
+                    }
+                    check(syncManager.finishServiceRun(runId)) {
+                        "Manual terminal handoff lost manager ownership"
+                    }
+                    retireThroughStartId = maxOf(
+                        retireThroughStartId,
+                        activeJobRetireThroughStartId
+                    )
+                    job = null
+                    activeJobRetireThroughStartId = 0
+                }
+            }
             try {
                 // The service owns an outer admission lease through terminal
                 // notification publication. Reset can therefore cancel and
@@ -140,33 +310,67 @@ class SyncService : Service() {
                 // Listen to HomeSyncManager progress to dynamically update the notification text and bar
                 progressObserver = launch {
                     syncManager.syncState.collect { state ->
-                        if (state.status == HomeSyncState.Status.SYNCING) {
-                            val total = state.queue.size
-                            val current = state.currentIndex ?: 0
-                            val activeSms = if (state.currentIndex != null && state.currentIndex < state.queue.size) {
-                                state.queue[state.currentIndex]
-                            } else null
-
-                            val progress = if (total > 0) (current.toFloat() / total) else 0f
-                            val text = if (activeSms != null) {
-                                "Analyzing SMS ${current + 1} of $total: ${activeSms.sender}..."
-                            } else {
-                                "Processing SMS ${current + 1} of $total..."
+                        if (state.activeRunId != runId) return@collect
+                        when (state.status) {
+                            HomeSyncState.Status.SCANNING ->
+                                updateNotification(
+                                    title = "Syncing Transactions",
+                                    text = "Scanning recent messages…",
+                                    progress = 0f,
+                                    ongoing = true,
+                                    runId = runId,
+                                    showStopAction = true
+                                )
+                            HomeSyncState.Status.SYNCING -> {
+                                val total = state.queue.size
+                                val current = state.currentIndex ?: 0
+                                val activeSms = state.currentIndex
+                                    ?.takeIf { it in state.queue.indices }
+                                    ?.let(state.queue::get)
+                                val progress = if (total > 0) {
+                                    current.toFloat() / total
+                                } else {
+                                    0f
+                                }
+                                val text = if (activeSms != null) {
+                                    "Analyzing SMS ${current + 1} of $total: " +
+                                        "${activeSms.sender}…"
+                                } else {
+                                    "Processing SMS ${current + 1} of $total…"
+                                }
+                                updateNotification(
+                                    title = "Syncing Transactions",
+                                    text = text,
+                                    progress = progress,
+                                    ongoing = true,
+                                    runId = runId,
+                                    showStopAction = true
+                                )
                             }
-
-                            updateNotification(
-                                title = "Syncing Transactions",
-                                text = text,
-                                progress = progress,
-                                ongoing = true
-                            )
+                            HomeSyncState.Status.CANCELLING ->
+                                updateNotification(
+                                    title = "Stopping SMS Processing",
+                                    text =
+                                        "Stopping safely; finishing any save already in progress…",
+                                    progress = 0f,
+                                    ongoing = true,
+                                    runId = runId,
+                                    showStopAction = false
+                                )
+                            HomeSyncState.Status.IDLE,
+                            HomeSyncState.Status.DONE -> Unit
                         }
                     }
                 }
 
                 // Check again for unsynced messages and run execution
-                syncManager.checkForUnsyncedSms(admittedFlow)
-                val scannedState = syncManager.syncState.value
+                syncManager.checkForUnsyncedSms(admittedFlow, runId)
+                if (syncManager.isServiceStopRequested(runId)) {
+                    throw CancellationException(
+                        "Manual SMS processing was stopped after scanning"
+                    )
+                }
+                var scannedState = syncManager.syncState.value
                 when (scannedState.recentScanOutcome) {
                     HomeSyncState.RecentScanOutcome.FAILED ->
                         error(
@@ -183,59 +387,189 @@ class SyncService : Service() {
                     HomeSyncState.RecentScanOutcome.SUCCESS -> Unit
                 }
                 if (scannedState.queue.none { it.status == "pending" }) {
-                    progressObserver?.cancelAndJoin()
-                    progressObserver = null
-                    stopForeground(STOP_FOREGROUND_REMOVE)
-                    showNoEligibleNotification(
-                        scannedState.recentScanWindowDays
-                    )
-                    return@launch
+                    if (syncManager.tryCompleteNoWorkServiceRun(runId)) {
+                        val completed = publishCompletedRun { terminalState ->
+                            stopForeground(STOP_FOREGROUND_REMOVE)
+                            showNoEligibleNotification(
+                                terminalState.recentScanWindowDays
+                            )
+                        }
+                        if (completed) return@launch
+                    }
+                    if (syncManager.isServiceStopRequested(runId)) {
+                        throw CancellationException(
+                            "Manual SMS processing was stopped after scanning"
+                        )
+                    }
+                    // A concurrently queued incoming alert can make the stale
+                    // no-work snapshot obsolete. Continue with the latest queue.
+                    scannedState = syncManager.syncState.value
+                    if (scannedState.queue.none { it.status == "pending" }) {
+                        error("Recent scan completion lost service ownership")
+                    }
                 }
-                syncManager.executeSync(
-                    this@SyncService,
-                    admittedFlow
-                )
-                progressObserver?.cancelAndJoin()
-                progressObserver = null
+                while (true) {
+                    syncManager.executeSync(
+                        this@SyncService,
+                        admittedFlow,
+                        runId
+                    )
+                    currentCoroutineContext().ensureActive()
 
-                // Gather sync metrics
-                val finalState = syncManager.syncState.value
-                finalState.syncError?.let { error(it) }
-                val totalSynced = finalState.queue.count { it.status == "synced" }
-                val totalSkipped = finalState.queue.count { it.status == "filtered_out" }
-                val totalErrors = finalState.queue.count { it.status == "error" }
-
-                stopForeground(STOP_FOREGROUND_REMOVE)
-                showCompletionNotification(totalSynced, totalSkipped, totalErrors)
+                    val finalState = syncManager.syncState.value
+                    finalState.syncError?.let { error(it) }
+                    val completed = publishCompletedRun { terminalState ->
+                        val totalSynced = terminalState.queue.count {
+                            it.status == "synced"
+                        }
+                        val totalSkipped = terminalState.queue.count {
+                            it.status == "filtered_out"
+                        }
+                        val totalErrors = terminalState.queue.count {
+                            it.status == "error"
+                        }
+                        stopForeground(STOP_FOREGROUND_REMOVE)
+                        showCompletionNotification(
+                            totalSynced,
+                            totalSkipped,
+                            totalErrors
+                        )
+                    }
+                    if (completed) break
+                    if (syncManager.isServiceStopRequested(runId)) {
+                        throw CancellationException(
+                            "Manual SMS processing was stopped during terminal handoff"
+                        )
+                    }
+                }
 
             } catch (cancelled: CancellationException) {
+                val publishStopped =
+                    userStopRequestedRunId == runId ||
+                        syncManager.isServiceStopRequested(runId)
                 withContext(NonCancellable) {
                     progressObserver?.cancelAndJoin()
                     progressObserver = null
+                    try {
+                        stopForeground(STOP_FOREGROUND_REMOVE)
+                        if (publishStopped) {
+                            showStoppedNotification()
+                        }
+                    } finally {
+                        // Admission is released last so reset cannot clear app
+                        // state/notifications between settlement and publication.
+                        synchronized(jobStateLock) {
+                            syncManager.settleServiceCancellation(runId)
+                            if (job === launchedJob) {
+                                retireThroughStartId = maxOf(
+                                    retireThroughStartId,
+                                    activeJobRetireThroughStartId
+                                )
+                                job = null
+                                activeJobRetireThroughStartId = 0
+                            }
+                        }
+                        serviceFlowLease?.release()
+                        serviceFlowLease = null
+                    }
                 }
                 Log.i(TAG, "Sync cancelled and drained")
-                stopForeground(STOP_FOREGROUND_REMOVE)
             } catch (e: Exception) {
                 withContext(NonCancellable) {
                     progressObserver?.cancelAndJoin()
                     progressObserver = null
+                    Log.e(TAG, "Error during sync execution", e)
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    showErrorNotification(e.message ?: "Unknown sync error")
+                    synchronized(jobStateLock) {
+                        syncManager.finishServiceRun(runId)
+                        if (job === launchedJob) {
+                            retireThroughStartId = maxOf(
+                                retireThroughStartId,
+                                activeJobRetireThroughStartId
+                            )
+                            job = null
+                            activeJobRetireThroughStartId = 0
+                        }
+                    }
                 }
-                Log.e(TAG, "Error during sync execution", e)
-                stopForeground(STOP_FOREGROUND_REMOVE)
-                showErrorNotification(e.message ?: "Unknown sync error")
             } finally {
                 withContext(NonCancellable) {
                     progressObserver?.cancelAndJoin()
                     serviceFlowLease?.release()
+                    synchronized(jobStateLock) {
+                        syncManager.finishServiceRun(runId)
+                        if (job === launchedJob) {
+                            retireThroughStartId = maxOf(
+                                retireThroughStartId,
+                                activeJobRetireThroughStartId
+                            )
+                            job = null
+                            activeJobRetireThroughStartId = 0
+                        }
+                    }
                 }
-                stopSelf()
+                if (userStopRequestedRunId == runId) {
+                    userStopRequestedRunId = null
+                }
+                stopSelfResult(retireThroughStartId)
             }
         }
+        synchronized(jobStateLock) {
+            job = launchedJob
+            activeJobRetireThroughStartId = startId
+        }
+        launchedJob.invokeOnCompletion { completionCause ->
+            // A LAZY coroutine can be cancelled after start() schedules it but
+            // before its body enters the try/finally above. In that case the
+            // completion callback is the only owner able to settle state and
+            // retire Android start IDs. Normal body exits clear `job` first.
+            val fallbackRetireStartId = synchronized(jobStateLock) {
+                if (job !== launchedJob) {
+                    null
+                } else {
+                    val publishStopped =
+                        userStopRequestedRunId == runId ||
+                            syncManager.isServiceStopRequested(runId)
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    if (publishStopped) {
+                        showStoppedNotification()
+                        syncManager.settleServiceCancellation(runId)
+                    } else {
+                        syncManager.finishServiceRun(runId)
+                    }
+                    val retirementId = maxOf(
+                        retireThroughStartId,
+                        activeJobRetireThroughStartId
+                    )
+                    job = null
+                    activeJobRetireThroughStartId = 0
+                    if (userStopRequestedRunId == runId) {
+                        userStopRequestedRunId = null
+                    }
+                    Log.w(
+                        TAG,
+                        "Settled service job from completion fallback",
+                        completionCause
+                    )
+                    retirementId
+                }
+            }
+            fallbackRetireStartId?.let(::stopSelfResult)
+        }
+        launchedJob.start()
 
         return START_NOT_STICKY
     }
 
-    private fun buildNotification(title: String, text: String, progress: Float, ongoing: Boolean): Notification {
+    private fun buildNotification(
+        title: String,
+        text: String,
+        progress: Float,
+        ongoing: Boolean,
+        runId: String?,
+        showStopAction: Boolean
+    ): Notification {
         val builder = NotificationCompat.Builder(this, SmsNotificationHelper.CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_notify_sync)
             .setContentTitle(title)
@@ -247,12 +581,33 @@ class SyncService : Service() {
 
         if (ongoing) {
             builder.setProgress(100, (progress * 100).toInt(), false)
+            if (showStopAction && !runId.isNullOrBlank()) {
+                builder.addAction(
+                    android.R.drawable.ic_menu_close_clear_cancel,
+                    "Stop",
+                    getStopPendingIntent(runId)
+                )
+            }
         }
         return builder.build()
     }
 
-    private fun updateNotification(title: String, text: String, progress: Float, ongoing: Boolean) {
-        val notification = buildNotification(title, text, progress, ongoing)
+    private fun updateNotification(
+        title: String,
+        text: String,
+        progress: Float,
+        ongoing: Boolean,
+        runId: String?,
+        showStopAction: Boolean
+    ) {
+        val notification = buildNotification(
+            title = title,
+            text = text,
+            progress = progress,
+            ongoing = ongoing,
+            runId = runId,
+            showStopAction = showStopAction
+        )
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         notifySafely(nm, notification)
     }
@@ -312,6 +667,24 @@ class SyncService : Service() {
         notifySafely(nm, builder.build())
     }
 
+    private fun showStoppedNotification() {
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val copy = stoppedNotificationCopy()
+        val notification = NotificationCompat.Builder(
+            this,
+            SmsNotificationHelper.CHANNEL_ID
+        )
+            .setSmallIcon(android.R.drawable.ic_menu_close_clear_cancel)
+            .setContentTitle(copy.title)
+            .setContentText(copy.text)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setOngoing(false)
+            .setAutoCancel(true)
+            .setContentIntent(getAppPendingIntent())
+            .build()
+        notifySafely(nm, notification)
+    }
+
     /**
      * POST_NOTIFICATIONS is contextual and optional. The user may deny it while
      * still allowing the foreground operation to proceed, so a terminal or
@@ -341,11 +714,35 @@ class SyncService : Service() {
         )
     }
 
+    private fun getStopPendingIntent(runId: String): PendingIntent =
+        PendingIntent.getService(
+            this,
+            2,
+            stopIntent(this, runId),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+    private fun jobSnapshotRecordingStart(startId: Int): Job? =
+        synchronized(jobStateLock) {
+            job.also { current ->
+                if (current != null) {
+                    // Ownership, not coroutine activity, is the consistency
+                    // boundary. A completed LAZY job still owns notification
+                    // and manager settlement until its completion callback
+                    // atomically clears this field.
+                    activeJobRetireThroughStartId = maxOf(
+                        activeJobRetireThroughStartId,
+                        startId
+                    )
+                }
+            }
+        }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
         Log.i(TAG, "SyncService Destroyed")
-        job?.cancel()
+        synchronized(jobStateLock) { job }?.cancel()
         serviceScope.cancel()
         super.onDestroy()
     }
@@ -355,6 +752,15 @@ internal fun manualSyncStartAllowed(
     shellUnlocked: Boolean,
     generationIsCurrent: Boolean
 ): Boolean = shellUnlocked && generationIsCurrent
+
+internal fun shouldKeepManualSyncDraining(
+    jobIsPresent: Boolean
+): Boolean = jobIsPresent
+
+internal data class ManualSyncStoppedCopy(
+    val title: String,
+    val text: String
+)
 
 internal data class ManualSyncTerminalNotificationCopy(
     val title: String,

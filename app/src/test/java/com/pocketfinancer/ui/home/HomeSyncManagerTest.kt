@@ -21,7 +21,6 @@ import com.pocketfinancer.inference.SlmRuntime
 import com.pocketfinancer.inference.SlmRuntimeOwner
 import com.pocketfinancer.inference.SlmRuntimeState
 import com.pocketfinancer.pipeline.ExtractionParser
-import com.pocketfinancer.pipeline.IncomingSmsQueueResult
 import com.pocketfinancer.pipeline.PromptBuilder
 import com.pocketfinancer.pipeline.SlmProcessingPreferences
 import com.pocketfinancer.pipeline.SmsFilterPipeline
@@ -210,7 +209,15 @@ class HomeSyncManagerTest {
                         limit = Int.MAX_VALUE,
                         maxDate = any()
                     )
-                } returns emptyList()
+                } returns listOf(
+                    SmsReader.SmsMessage(
+                        address = "AX-BANK",
+                        body = "Rs 500 debited from a/c XX0000",
+                        date = 1_000L,
+                        type = 1,
+                        providerMessageId = "provider-1"
+                    )
+                )
                 every { runtime.state } returns
                     MutableStateFlow(SlmRuntimeState())
                 every { deviceCapabilities.assessDevice() } returns
@@ -266,11 +273,7 @@ class HomeSyncManagerTest {
                     slmProcessingPreferences = preferences,
                     setupImportStore = readySetupStore()
                 )
-                manager.queueIncomingSms(
-                    address = "AX-BANK",
-                    body = "Rs 500 debited from a/c XX0000",
-                    date = 1_000L
-                )
+                manager.checkForUnsyncedSms()
 
                 val execution = async(Dispatchers.Default) {
                     manager.executeSync(mockk())
@@ -283,7 +286,7 @@ class HomeSyncManagerTest {
                 }
                 delay(100L)
 
-                verify(exactly = 0) {
+                verify(exactly = 1) {
                     smsRepository.fetchHistory(
                         daysBack = any(),
                         limit = any(),
@@ -296,7 +299,7 @@ class HomeSyncManagerTest {
                     execution.await()
                     scan.await()
                 }
-                verify(exactly = 1) {
+                verify(exactly = 2) {
                     smsRepository.fetchHistory(
                         daysBack = 7,
                         limit = Int.MAX_VALUE,
@@ -586,7 +589,26 @@ class HomeSyncManagerTest {
 
                 val manager = HomeSyncManager(
                     context = context,
-                    smsRepository = mockk<SmsRepository>(),
+                    smsRepository = permissionedSmsRepository(
+                        listOf(
+                            SmsReader.SmsMessage(
+                                address = "AX-HDFCBK",
+                                body =
+                                    "Rs.500 debited from a/c XX0000 at Example Merchant",
+                                date = 1_000L,
+                                type = 1,
+                                providerMessageId = "provider-1"
+                            ),
+                            SmsReader.SmsMessage(
+                                address = "AX-HDFCBK",
+                                body =
+                                    "Rs.700 debited from a/c XX0000 at Other Merchant",
+                                date = 2_000L,
+                                type = 1,
+                                providerMessageId = "provider-2"
+                            )
+                        )
+                    ),
                     smsFilterPipeline = SmsFilterPipeline(),
                     transactionRepository = transactionRepository,
                     accountRepository = accountRepository,
@@ -600,24 +622,7 @@ class HomeSyncManagerTest {
                     setupImportStore = readySetupStore()
                 )
 
-                assertEquals(
-                    IncomingSmsQueueResult.QUEUED_TRANSACTION,
-                    manager.queueIncomingSms(
-                    address = "AX-HDFCBK",
-                    body =
-                        "Rs.500 debited from a/c XX0000 at Example Merchant",
-                    date = 1000L
-                    )
-                )
-                assertEquals(
-                    IncomingSmsQueueResult.QUEUED_TRANSACTION,
-                    manager.queueIncomingSms(
-                    address = "AX-HDFCBK",
-                    body =
-                        "Rs.700 debited from a/c XX0000 at Other Merchant",
-                    date = 2000L
-                    )
-                )
+                manager.checkForUnsyncedSms()
                 manager.executeSync(mockk())
 
                 val queue = manager.syncState.value.queue
@@ -685,6 +690,29 @@ class HomeSyncManagerTest {
             } returns sharedPreferences
             every { sharedPreferences.getString("selected_slm_id", null) } returns null
             every { sharedPreferences.getBoolean("onboarding_completed", false) } returns true
+            every { smsRepository.hasPermissions() } returns true
+            every {
+                smsRepository.fetchHistory(
+                    daysBack = any(),
+                    limit = any(),
+                    maxDate = any()
+                )
+            } returns listOf(
+                SmsReader.SmsMessage(
+                    address = "AX-HDFCBK",
+                    body = "Rs.500 credited to a/c XX0000",
+                    date = 1_000L,
+                    type = 1,
+                    providerMessageId = "provider-1"
+                ),
+                SmsReader.SmsMessage(
+                    address = "AX-HDFCBK",
+                    body = "Rs.700 debited from a/c XX0000",
+                    date = 2_000L,
+                    type = 1,
+                    providerMessageId = "provider-2"
+                )
+            )
             every { preferences.gbnfGrammarEnabled } returns gbnfEnabled
             coEvery {
                 transactionRepository.exists(any<SmsSourceIdentity>())
@@ -736,91 +764,44 @@ class HomeSyncManagerTest {
                 setupImportStore = readySetupStore()
             )
 
-            manager.queueIncomingSms(
-                address = "AX-HDFCBK",
-                body = "Rs.500 credited to a/c XX0000",
-                date = 1000L
-            )
-            manager.queueIncomingSms(
-                address = "AX-HDFCBK",
-                body = "Rs.700 debited from a/c XX0000",
-                date = 2000L
-            )
+            manager.checkForUnsyncedSms()
             manager.executeSync(mockk())
 
             assertEquals(listOf("root ::= ...", null), capturedGrammar)
             coVerify(exactly = 1) { lease.release() }
-
             assertEquals(HomeSyncState.Status.DONE, manager.syncState.value.status)
-            val queuedAfterCompletion = manager.queueIncomingSms(
-                address = "AX-HDFCBK",
-                body = "Rs.900 debited from a/c XX0000",
-                date = 3000L
-            )
-            assertEquals(
-                IncomingSmsQueueResult.QUEUED_TRANSACTION,
-                queuedAfterCompletion
-            )
-            assertEquals(HomeSyncState.Status.IDLE, manager.syncState.value.status)
-
-            val duplicateResult = manager.queueIncomingSms(
-                address = "AX-HDFCBK",
-                body = "Rs.900 debited from a/c XX0000",
-                date = 3000L
-            )
-            assertEquals(IncomingSmsQueueResult.IGNORED, duplicateResult)
-
-            val legitimateSameSenderAndTime = manager.queueIncomingSms(
-                address = "AX-HDFCBK",
-                body = "Rs.1,200 credited to a/c XX0000",
-                date = 3000L
-            )
-            assertEquals(
-                IncomingSmsQueueResult.QUEUED_TRANSACTION,
-                legitimateSameSenderAndTime
-            )
-
-            val nonTransactionResult = manager.queueIncomingSms(
-                address = "VK-SHOP",
-                body = "Your OTP is 123456. Do not share it.",
-                date = 3500L
-            )
-            assertEquals(
-                IncomingSmsQueueResult.IGNORED,
-                nonTransactionResult
-            )
-
-            val queueBeforePause = manager.syncState.value.queue
-            val pause = appFlowCoordinator.tryPauseAndDrain(
-                SlmRuntimeOwner.SETTINGS_MANUAL
-            )
-            val admittedDuringReset = manager.queueIncomingSms(
-                address = "AX-HDFCBK",
-                body = "Rs.1,100 debited from a/c XX0000",
-                date = 4000L
-            )
-            assertEquals(
-                IncomingSmsQueueResult.ADMISSION_PAUSED,
-                admittedDuringReset
-            )
-            assertEquals(queueBeforePause, manager.syncState.value.queue)
-            pause!!.release()
         } finally {
             unmockkStatic(Log::class)
             modelDirectory.deleteRecursively()
         }
     }
 
-    private fun readySetupStore(): SetupImportStore {
-        val store = mockk<SetupImportStore>(relaxed = true)
-        every { store.state } returns MutableStateFlow(
+    private fun readySetupStore(
+        state: MutableStateFlow<SetupImportState> = MutableStateFlow(
             SetupImportState(
                 status = SetupImportStatus.READY,
                 modelPrepared = true
             )
         )
+    ): SetupImportStore {
+        val store = mockk<SetupImportStore>(relaxed = true)
+        every { store.state } returns state
         return store
     }
+
+    private fun permissionedSmsRepository(
+        messages: List<SmsReader.SmsMessage> = emptyList()
+    ): SmsRepository =
+        mockk {
+            every { hasPermissions() } returns true
+            every {
+                fetchHistory(
+                    daysBack = any(),
+                    limit = any(),
+                    maxDate = any()
+                )
+            } returns messages
+        }
 
     private fun testDeviceInfo() = DeviceCapabilities.DeviceInfo(
         ramGb = 4f,

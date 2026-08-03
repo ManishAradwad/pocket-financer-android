@@ -11,9 +11,13 @@ import com.pocketfinancer.inference.SlmPerformanceData
 import com.pocketfinancer.sms.SmsReader
 import java.io.File
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -81,6 +85,19 @@ class PipelineService @Inject constructor(
     }
 
     /**
+     * The ledger already owns [committedResult]. This must never be flattened
+     * into [ProcessingResult.Failure], which is reserved for work that did not
+     * produce a committed transaction.
+     */
+    class PostPersistenceCommitException internal constructor(
+        val committedResult: ProcessingResult.Saved,
+        cause: Exception
+    ) : RuntimeException(
+        "Ledger committed, but post-commit settlement failed",
+        cause
+    )
+
+    /**
      * Process exactly one SMS using an already-owned residency lease.
      *
      * GBNF is snapshotted before any suspension. Prompt construction and
@@ -88,10 +105,14 @@ class PipelineService @Inject constructor(
      * rendering, token/session work, and inference are performed atomically by
      * [SlmLease.extract]. The caller must keep [lease] alive until this method
      * returns so maintenance/reset cannot interleave with persistence.
+     * [onPersistenceCommitted] runs inside the same non-cancellable boundary
+     * as a successful ledger insert, allowing batch owners to durably settle
+     * their per-item progress before a racing cancellation can unwind them.
      */
     suspend fun processSingle(
         sms: SmsReader.SmsMessage,
-        lease: SlmLease
+        lease: SlmLease,
+        onPersistenceCommitted: (ProcessingResult.Saved) -> Unit = {}
     ): ProcessingResult {
         val gbnfEnabledForSms = slmProcessingPreferences.gbnfGrammarEnabled.value
 
@@ -139,8 +160,14 @@ class PipelineService @Inject constructor(
                     ProcessingResult.Stopped
                 }
 
-                is SlmExtractionResult.Success -> persistSuccess(sms, result)
+                is SlmExtractionResult.Success -> persistSuccess(
+                    sms = sms,
+                    result = result,
+                    onPersistenceCommitted = onPersistenceCommitted
+                )
             }
+        } catch (postCommit: PostPersistenceCommitException) {
+            throw postCommit
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Exception) {
@@ -152,7 +179,8 @@ class PipelineService @Inject constructor(
 
     private suspend fun persistSuccess(
         sms: SmsReader.SmsMessage,
-        result: SlmExtractionResult.Success
+        result: SlmExtractionResult.Success,
+        onPersistenceCommitted: (ProcessingResult.Saved) -> Unit
     ): ProcessingResult {
         val perfInfo = result.perf?.let { perf ->
             " | prompt=${perf.tPromptEvalMs}ms gen=${perf.tEvalMs}ms " +
@@ -170,47 +198,74 @@ class PipelineService @Inject constructor(
             return ProcessingResult.Skipped(SkipReason.EXTRACTION_REJECTED)
         }
 
-        val inferredBank = inferBankFromSender(sms.address)
-        val account = if (parsed.account != null) {
-            accountRepository.getOrCreate(parsed.account, inferredBank, "auto-extracted")
-        } else {
-            accountRepository.ensureDefault()
-        }
-
-        val merchantName = parsed.counterparty
-            ?.takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
-            ?: if (inferredBank != "Unknown Account") {
-                "Transaction ($inferredBank)"
+        // This is the per-SMS cancellation/commit boundary. Cancellation that
+        // wins before this check leaves the candidate available for a later
+        // run. Once persistence starts, a user stop no longer interrupts the
+        // short account + ledger handoff; repository failures still follow the
+        // normal error path and are not described as an atomic DB transaction.
+        currentCoroutineContext().ensureActive()
+        val savedResult = withContext(NonCancellable) {
+            val inferredBank = inferBankFromSender(sms.address)
+            val account = if (parsed.account != null) {
+                accountRepository.getOrCreate(
+                    parsed.account,
+                    inferredBank,
+                    "auto-extracted"
+                )
             } else {
-                "Unknown Merchant"
+                accountRepository.ensureDefault()
             }
 
-        val insertion = transactionRepository.insertIfAbsent(
-            TransactionRepository.NewTransaction(
-                amount = parsed.amount,
-                merchant = merchantName,
-                date = sms.date,
-                type = parsed.type,
-                accountId = account.id,
-                rawMessage = sms.body,
-                sender = sms.address,
-                slmPromptEvalMs = result.perf?.tPromptEvalMs,
-                slmEvalMs = result.perf?.tEvalMs,
-                slmNumTokens = result.perf?.nTokens,
-                slmModelName = File(result.model.modelPath).name,
-                sourceIdentity = sms.sourceIdentity
-            )
-        )
+            val merchantName = parsed.counterparty
+                ?.takeIf {
+                    it.isNotBlank() && !it.equals("null", ignoreCase = true)
+                }
+                ?: if (inferredBank != "Unknown Account") {
+                    "Transaction ($inferredBank)"
+                } else {
+                    "Unknown Merchant"
+                }
 
-        if (insertion.inserted) {
+            val insertion = transactionRepository.insertIfAbsent(
+                TransactionRepository.NewTransaction(
+                    amount = parsed.amount,
+                    merchant = merchantName,
+                    date = sms.date,
+                    type = parsed.type,
+                    accountId = account.id,
+                    rawMessage = sms.body,
+                    sender = sms.address,
+                    slmPromptEvalMs = result.perf?.tPromptEvalMs,
+                    slmEvalMs = result.perf?.tEvalMs,
+                    slmNumTokens = result.perf?.nTokens,
+                    slmModelName = File(result.model.modelPath).name,
+                    sourceIdentity = sms.sourceIdentity
+                )
+            )
+            val committed = ProcessingResult.Saved(
+                transaction = parsed,
+                newlyInserted = insertion.inserted
+            )
+            try {
+                onPersistenceCommitted(committed)
+            } catch (error: Exception) {
+                // The callback is deliberately non-suspending and runs under
+                // NonCancellable, so a CancellationException thrown here is a
+                // callback failure rather than surrounding job cancellation.
+                // Preserve the committed receipt for every callback failure;
+                // genuine coroutine cancellation is still rethrown by
+                // processSingle outside this boundary.
+                throw PostPersistenceCommitException(committed, error)
+            }
+            committed
+        }
+
+        if (savedResult.newlyInserted) {
             emit(Stage.SAVED, "Transaction saved")
         } else {
             emit(Stage.SAVED, "Transaction already saved")
         }
-        return ProcessingResult.Saved(
-            transaction = parsed,
-            newlyInserted = insertion.inserted
-        )
+        return savedResult
     }
 
     private fun inferBankFromSender(sender: String): String {
