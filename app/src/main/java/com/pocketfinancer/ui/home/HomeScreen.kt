@@ -938,7 +938,8 @@ private fun SetupImportCard(
                 if (state.status == SetupImportStatus.DOWNLOADING) {
                     ModelDownloadProgressPanel(
                         downloadState = downloadState,
-                        label = "Downloading the on-device model..."
+                        label = "Downloading the on-device model...",
+                        preparingLabel = "Preparing the on-device model download..."
                     )
                 } else {
                     LinearProgressIndicator(
@@ -2171,7 +2172,10 @@ fun ModelUpgradeBanner(
                 }
 
             if (recommendation.isDownloading && !recommendation.isCancelling) {
-                ModelDownloadProgressPanel(downloadState = ds)
+                ModelDownloadProgressPanel(
+                    downloadState = ds,
+                    preparingLabel = "Preparing model upgrade download..."
+                )
             } else if (recommendation.isRunning) {
                 Row(
                     modifier = Modifier
@@ -2215,6 +2219,13 @@ fun ModelUpgradeBanner(
                     }
                 }
             } else {
+                recommendation.startBlockedMessage?.let { message ->
+                    Text(
+                        text = message,
+                        color = M3_OnSurfaceVariant,
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.End,
@@ -2226,13 +2237,13 @@ fun ModelUpgradeBanner(
                     Spacer(modifier = Modifier.width(8.dp))
                     Button(
                         onClick = onUpgrade,
+                        enabled = recommendation.startBlockedMessage == null,
                         colors = ButtonDefaults.buttonColors(containerColor = M3_Primary),
                         shape = RoundedCornerShape(100)
                     ) {
                         Icon(
                             imageVector = Icons.Rounded.Download,
                             contentDescription = null,
-                            tint = M3_OnPrimary,
                             modifier = Modifier.size(16.dp)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
@@ -2242,7 +2253,6 @@ fun ModelUpgradeBanner(
                                 recommendation.error != null -> "Retry Upgrade"
                                 else -> "Upgrade Model"
                             },
-                            color = M3_OnPrimary,
                             style = AppTypography.titleSmallBold
                         )
                     }

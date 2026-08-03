@@ -11,7 +11,6 @@ import com.pocketfinancer.hardware.SlmTier
 import com.pocketfinancer.hardware.explainTierSelection
 import com.pocketfinancer.hardware.isPublishedModelArtifact
 import com.pocketfinancer.hardware.resolveActiveSlmTier
-import com.pocketfinancer.hardware.selectSlmForDevice
 import com.pocketfinancer.inference.DownloadOwner
 import com.pocketfinancer.inference.ModelDownloader
 import com.pocketfinancer.inference.SlmChatMessage
@@ -41,8 +40,11 @@ import com.pocketfinancer.toModelSpec
 import com.pocketfinancer.ui.home.HomeSyncManager
 import com.pocketfinancer.ui.home.HomeSyncState
 import com.pocketfinancer.ui.home.ModelUpgradeRecommendation
+import com.pocketfinancer.ui.home.allowDebugEmulatorModelUpgrade
 import com.pocketfinancer.ui.home.canCancelModelUpgrade
 import com.pocketfinancer.ui.home.isHigherQualityModel
+import com.pocketfinancer.ui.home.modelUpgradeStartBlockedMessage
+import com.pocketfinancer.ui.home.selectModelUpgradeTarget
 import com.pocketfinancer.ui.home.unfinishedModelUpgradeTarget
 import com.pocketfinancer.ui.onboarding.OnboardingStep
 import com.pocketfinancer.ui.home.SyncService
@@ -161,6 +163,13 @@ private data class ActiveModelRefreshKey(
     val isModelLoaded: Boolean
 )
 
+private data class SettingsFlowSnapshot(
+    val downloadState: ModelDownloader.DownloadState,
+    val isBusy: Boolean,
+    val onboarding: OnboardingSyncManager.OnboardingSyncState,
+    val upgradeStartBlockedMessage: String?
+)
+
 @HiltViewModel
 class SettingsViewModel @Inject constructor(
     @ApplicationContext private val context: Context,
@@ -232,12 +241,21 @@ class SettingsViewModel @Inject constructor(
                 modelDownloader.state
             ) { home, onboarding, appFlows, downloaderState ->
                 val normalized = normalizedDownloadState(downloaderState)
-                val busy = home.status == HomeSyncState.Status.SYNCING ||
-                    onboarding.isRunning ||
+                val otherFlowBusy = home.status == HomeSyncState.Status.SYNCING ||
                     appFlows.activeCount > 0 ||
                     appFlows.admissionPaused
-                Triple(normalized, busy, onboarding)
-            }.collect { (normalized, busy, onboarding) ->
+                SettingsFlowSnapshot(
+                    downloadState = normalized,
+                    isBusy = onboarding.isRunning || otherFlowBusy,
+                    onboarding = onboarding,
+                    upgradeStartBlockedMessage = modelUpgradeStartBlockedMessage(
+                        onboarding = onboarding,
+                        otherFlowBusy = otherFlowBusy
+                    )
+                )
+            }.collect { snapshot ->
+                val normalized = snapshot.downloadState
+                val onboarding = snapshot.onboarding
                 val currentState = _state.value
                 val activeSlm = settingsActiveSlm(currentState.selectedSlm, onboarding)
                 val managedTarget = unfinishedModelUpgradeTarget(onboarding)
@@ -246,7 +264,8 @@ class SettingsViewModel @Inject constructor(
                     currentSlm = activeSlm,
                     recommendedSlm = recommendedSlm,
                     onboarding = onboarding,
-                    fallbackDownloadState = normalized
+                    fallbackDownloadState = normalized,
+                    startBlockedMessage = snapshot.upgradeStartBlockedMessage
                 )
                 val initialSetupDownloadState = onboarding.downloadState.takeIf {
                     onboarding.runPurpose ==
@@ -259,7 +278,7 @@ class SettingsViewModel @Inject constructor(
                     downloadState = normalized,
                     initialSetupDownloadState = initialSetupDownloadState,
                     upgradeRecommendation = upgradeRecommendation,
-                    flowBusy = busy
+                    flowBusy = snapshot.isBusy
                 )
             }
         }
@@ -307,7 +326,8 @@ class SettingsViewModel @Inject constructor(
                 currentSlm = currentSlm,
                 recommendedSlm = recommendedSlm,
                 onboarding = onboarding,
-                fallbackDownloadState = currentState.downloadState
+                fallbackDownloadState = currentState.downloadState,
+                startBlockedMessage = currentModelUpgradeStartBlockedMessage(onboarding)
             )
         )
     }
@@ -315,7 +335,10 @@ class SettingsViewModel @Inject constructor(
     private fun assessDevice() {
         try {
             val device = deviceCapabilities.assessDevice()
-            val recommended = selectSlmForDevice(device)
+            val recommended = settingsRecommendedSlm(
+                device = device,
+                allowDebugEmulatorOverride = allowDebugEmulatorModelUpgrade(context)
+            )
             val active = resolveActiveSlmTier(context, modelStorage.modelDirectory, device)
             _state.value = _state.value.copy(
                 deviceInfo = device,
@@ -406,12 +429,36 @@ class SettingsViewModel @Inject constructor(
             )
             return
         }
+        val blockedMessage = currentModelUpgradeStartBlockedMessage()
+        if (blockedMessage != null) {
+            _state.value = current.copy(
+                upgradeRecommendation = current.upgradeRecommendation.copy(
+                    startBlockedMessage = blockedMessage
+                )
+            )
+            return
+        }
         val recommendation = current.upgradeRecommendation
         val target = recommendation.recommendedSlm ?: return
         if (!recommendation.isUpgradeAvailable || recommendation.isRunning) return
 
         _state.value = current.copy(modelLoadError = null)
         onboardingSyncManager.startModelUpgrade(context, target)
+    }
+
+    private fun currentModelUpgradeStartBlockedMessage(
+        onboarding: OnboardingSyncManager.OnboardingSyncState =
+            onboardingSyncManager.syncState.value
+    ): String? {
+        val appFlows = appFlowCoordinator.state.value
+        val otherFlowBusy =
+            homeSyncManager.syncState.value.status == HomeSyncState.Status.SYNCING ||
+                appFlows.activeCount > 0 ||
+                appFlows.admissionPaused
+        return modelUpgradeStartBlockedMessage(
+            onboarding = onboarding,
+            otherFlowBusy = otherFlowBusy
+        )
     }
 
     fun cancelRecommendedModelUpgrade() {
@@ -1139,7 +1186,8 @@ internal fun settingsModelUpgradeRecommendation(
     currentSlm: SlmTier?,
     recommendedSlm: SlmTier?,
     onboarding: OnboardingSyncManager.OnboardingSyncState,
-    fallbackDownloadState: ModelDownloader.DownloadState
+    fallbackDownloadState: ModelDownloader.DownloadState,
+    startBlockedMessage: String? = modelUpgradeStartBlockedMessage(onboarding)
 ): ModelUpgradeRecommendation {
     val hasUpgrade = isHigherQualityModel(currentSlm, recommendedSlm)
     val isThisUpgradeRun =
@@ -1164,6 +1212,15 @@ internal fun settingsModelUpgradeRecommendation(
             !onboarding.isCancelling &&
             onboarding.step == OnboardingStep.SYNCING,
         statusMessage = onboarding.syncMessage.takeIf { isThisUpgradeRun && it.isNotBlank() },
-        error = onboarding.modelLoadError.takeIf { isThisUpgradeRun }
+        error = onboarding.modelLoadError.takeIf { isThisUpgradeRun },
+        startBlockedMessage = startBlockedMessage
     )
 }
+
+internal fun settingsRecommendedSlm(
+    device: DeviceCapabilities.DeviceInfo,
+    allowDebugEmulatorOverride: Boolean
+): SlmTier? = selectModelUpgradeTarget(
+    device = device,
+    allowDebugEmulatorOverride = allowDebugEmulatorOverride
+).tier

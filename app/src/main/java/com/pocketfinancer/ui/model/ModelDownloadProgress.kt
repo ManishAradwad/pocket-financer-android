@@ -25,23 +25,35 @@ import com.pocketfinancer.ui.theme.M3_Primary
 import com.pocketfinancer.ui.theme.M3_SurfaceContainer
 
 internal data class ModelDownloadProgressText(
-    val percentage: String,
-    val transferred: String,
+    val isPreparing: Boolean,
+    val percentage: String?,
+    val transferred: String?,
     val speed: String?,
     val eta: String?
 )
 
-internal fun ModelDownloader.DownloadState.toProgressText(): ModelDownloadProgressText =
-    ModelDownloadProgressText(
-        percentage = "${"%.0f".format(progress.coerceIn(0f, 1f) * 100)}%",
-        transferred = "${"%.1f".format(downloadedMb)} / ${"%.1f".format(totalMb)} MB",
+internal fun ModelDownloader.DownloadState.toProgressText(): ModelDownloadProgressText {
+    val hasKnownTotal = totalMb > 0f
+    return ModelDownloadProgressText(
+        isPreparing = !hasKnownTotal,
+        percentage = if (hasKnownTotal) {
+            "${"%.0f".format(progress.coerceIn(0f, 1f) * 100)}%"
+        } else {
+            null
+        },
+        transferred = if (hasKnownTotal) {
+            "${"%.1f".format(downloadedMb)} / ${"%.1f".format(totalMb)} MB"
+        } else {
+            null
+        },
         speed = speedMbps
-            .takeIf { it > 0.01f }
+            .takeIf { hasKnownTotal && it > 0.01f }
             ?.let { "${"%.1f".format(it)} MB/s" },
         eta = etaSeconds
-            .takeIf { it > 0L }
+            .takeIf { hasKnownTotal && it > 0L }
             ?.let { "ETA: ${formatDownloadEta(it)}" }
     )
+}
 
 internal fun formatDownloadEta(seconds: Long): String {
     val safeSeconds = seconds.coerceAtLeast(0L)
@@ -59,7 +71,8 @@ internal fun formatDownloadEta(seconds: Long): String {
 internal fun ModelDownloadProgressPanel(
     downloadState: ModelDownloader.DownloadState,
     modifier: Modifier = Modifier,
-    label: String = "Downloading model in background..."
+    label: String = "Downloading model in background...",
+    preparingLabel: String = "Preparing model download..."
 ) {
     val text = downloadState.toProgressText()
     Column(
@@ -75,40 +88,53 @@ internal fun ModelDownloadProgressPanel(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                text = label,
+                text = if (text.isPreparing) preparingLabel else label,
                 color = M3_OnSurface,
                 style = MaterialTheme.typography.labelSmall
             )
-            Text(
-                text = text.percentage,
+            text.percentage?.let { percentage ->
+                Text(
+                    text = percentage,
+                    color = M3_Primary,
+                    style = AppTypography.bodySmallBold
+                )
+            }
+        }
+        val progressModifier = Modifier
+            .fillMaxWidth()
+            .height(6.dp)
+            .clip(RoundedCornerShape(3.dp))
+        if (text.isPreparing) {
+            LinearProgressIndicator(
+                modifier = progressModifier,
                 color = M3_Primary,
-                style = AppTypography.bodySmallBold
+                trackColor = M3_OutlineVariant.copy(alpha = 0.3f)
+            )
+        } else {
+            LinearProgressIndicator(
+                progress = { downloadState.progress.coerceIn(0f, 1f) },
+                modifier = progressModifier,
+                color = M3_Primary,
+                trackColor = M3_OutlineVariant.copy(alpha = 0.3f)
             )
         }
-        LinearProgressIndicator(
-            progress = { downloadState.progress.coerceIn(0f, 1f) },
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(6.dp)
-                .clip(RoundedCornerShape(3.dp)),
-            color = M3_Primary,
-            trackColor = M3_OutlineVariant.copy(alpha = 0.3f)
-        )
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Text(
-                text = text.transferred,
-                color = M3_OnSurfaceVariant,
-                style = AppTypography.timestamp
-            )
-            text.speed?.let { speed ->
+        text.transferred?.let { transferred ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
                 Text(
-                    text = speed,
+                    text = transferred,
                     color = M3_OnSurfaceVariant,
                     style = AppTypography.timestamp
                 )
+                text.speed?.let { speed ->
+                    Text(
+                        text = speed,
+                        color = M3_OnSurfaceVariant,
+                        style = AppTypography.timestamp
+                    )
+                }
             }
         }
         text.eta?.let { eta ->

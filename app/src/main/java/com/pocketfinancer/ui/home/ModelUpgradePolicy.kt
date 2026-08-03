@@ -1,8 +1,12 @@
 package com.pocketfinancer.ui.home
 
+import android.content.Context
+import android.content.pm.ApplicationInfo
+import android.os.Build
 import com.pocketfinancer.hardware.DeviceCapabilities
 import com.pocketfinancer.hardware.SlmTier
 import com.pocketfinancer.hardware.selectSlmForDevice
+import com.pocketfinancer.ui.onboarding.OnboardingSyncManager
 
 /**
  * The model offered after onboarding, together with whether it came from the
@@ -47,6 +51,36 @@ internal fun selectModelUpgradeTarget(
     } else {
         ModelUpgradeTarget(productionTarget)
     }
+}
+
+/**
+ * Keeps the debug-emulator test seam identical anywhere an upgrade can start.
+ */
+internal fun allowDebugEmulatorModelUpgrade(context: Context): Boolean =
+    (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0 &&
+        (
+            Build.FINGERPRINT.startsWith("generic") ||
+                Build.FINGERPRINT.startsWith("unknown") ||
+                Build.MODEL.contains("Emulator", ignoreCase = true) ||
+                Build.MODEL.contains("Android SDK built for", ignoreCase = true) ||
+                Build.PRODUCT.contains("sdk", ignoreCase = true)
+            )
+
+/**
+ * Explains why a new upgrade cannot start. Running upgrades normally own their
+ * own UI state, but reporting them here also closes click-time races.
+ */
+internal fun modelUpgradeStartBlockedMessage(
+    onboarding: OnboardingSyncManager.OnboardingSyncState,
+    otherFlowBusy: Boolean = false
+): String? = when {
+    onboarding.isRunning &&
+        onboarding.runPurpose == OnboardingSyncManager.RunPurpose.INITIAL_SETUP ->
+        "Finish the current setup or history import before starting a model upgrade."
+    onboarding.isRunning -> "A model upgrade is already running."
+    otherFlowBusy ->
+        "Finish the current model task before starting a model upgrade."
+    else -> null
 }
 
 /**

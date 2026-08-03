@@ -1,10 +1,10 @@
 package com.pocketfinancer.ui.home
 
 import android.content.Context
-import android.content.pm.ApplicationInfo
-import android.os.Build
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.pocketfinancer.SlmAppFlowCoordinator
+import com.pocketfinancer.SlmAppFlowState
 import com.pocketfinancer.data.model.Transaction
 import com.pocketfinancer.data.model.TransactionType
 import com.pocketfinancer.data.repository.TransactionRepository
@@ -54,7 +54,8 @@ data class ModelUpgradeRecommendation(
     val statusMessage: String? = null,
     val error: String? = null,
     val isDebugEmulatorOverride: Boolean = false,
-    val isDismissed: Boolean = false
+    val isDismissed: Boolean = false,
+    val startBlockedMessage: String? = null
 )
 
 data class HomeUiState(
@@ -82,6 +83,7 @@ class HomeViewModel @Inject constructor(
     private val deviceCapabilities: DeviceCapabilities,
     private val modelDownloader: ModelDownloader,
     private val onboardingSyncManager: OnboardingSyncManager,
+    private val appFlowCoordinator: SlmAppFlowCoordinator,
     private val smsRepository: SmsRepository,
     private val setupImportStore: SetupImportStore,
     private val modelUpgradeSessionDismissalStore: ModelUpgradeSessionDismissalStore,
@@ -99,7 +101,8 @@ class HomeViewModel @Inject constructor(
         onboardingSyncManager.syncState,
         modelUpgradeSessionDismissalStore.dismissedTierIds,
         setupImportStore.state,
-        automaticProcessingPreferences.enabled
+        automaticProcessingPreferences.enabled,
+        appFlowCoordinator.state
     ) { flows ->
         @Suppress("UNCHECKED_CAST")
         val txs = flows[0] as List<Transaction>
@@ -111,11 +114,12 @@ class HomeViewModel @Inject constructor(
         val dismissedTierIds = flows[5] as Set<String>
         val setupImportState = flows[6] as SetupImportState
         val automaticProcessingEnabled = flows[7] as Boolean
+        val appFlowState = flows[8] as SlmAppFlowState
 
         val periodDataMap = calculatePeriodData(txs)
         val device = deviceCapabilities.assessDevice()
         val currentSlm = resolveActiveSlmTier(context, modelStorage.modelDirectory, device)
-        val allowDebugOverride = allowDebugEmulatorOverride()
+        val allowDebugOverride = allowDebugEmulatorModelUpgrade(context)
         val upgradeTarget = selectModelUpgradeTarget(
             device = device,
             allowDebugEmulatorOverride = allowDebugOverride
@@ -172,7 +176,14 @@ class HomeViewModel @Inject constructor(
                                 allowDebugEmulatorOverride = false
                             ).tier == SlmTier.DEFAULT_ONBOARDING_SLM
                     ),
-            isDismissed = recommendedSlm?.id in dismissedTierIds
+            isDismissed = recommendedSlm?.id in dismissedTierIds,
+            startBlockedMessage = modelUpgradeStartBlockedMessage(
+                onboarding = onboardingSyncState,
+                otherFlowBusy = syncState.status == HomeSyncState.Status.SYNCING ||
+                    downloadState.isDownloading ||
+                    appFlowState.activeCount > 0 ||
+                    appFlowState.admissionPaused
+            )
         )
 
         HomeUiState(
@@ -319,12 +330,20 @@ class HomeViewModel @Inject constructor(
     }
 
     fun startModelUpgrade() {
+        val onboarding = onboardingSyncManager.syncState.value
+        val appFlows = appFlowCoordinator.state.value
+        val otherFlowBusy = syncManager.syncState.value.status ==
+            HomeSyncState.Status.SYNCING ||
+            modelDownloader.state.value.isDownloading ||
+            appFlows.activeCount > 0 ||
+            appFlows.admissionPaused
+        if (modelUpgradeStartBlockedMessage(onboarding, otherFlowBusy) != null) return
         val device = deviceCapabilities.assessDevice()
         val recommendedSlm =
-            unfinishedModelUpgradeTarget(onboardingSyncManager.syncState.value)
+            unfinishedModelUpgradeTarget(onboarding)
                 ?: selectModelUpgradeTarget(
                     device = device,
-                    allowDebugEmulatorOverride = allowDebugEmulatorOverride()
+                    allowDebugEmulatorOverride = allowDebugEmulatorModelUpgrade(context)
                 ).tier
                 ?: return
         onboardingSyncManager.startModelUpgrade(context, recommendedSlm)
@@ -531,16 +550,6 @@ class HomeViewModel @Inject constructor(
         const val KEY_SELECTED_SLM_ID = "selected_slm_id"
     }
 
-    private fun isProbablyEmulator(): Boolean =
-        Build.FINGERPRINT.startsWith("generic") ||
-            Build.FINGERPRINT.startsWith("unknown") ||
-            Build.MODEL.contains("Emulator", ignoreCase = true) ||
-            Build.MODEL.contains("Android SDK built for", ignoreCase = true) ||
-            Build.PRODUCT.contains("sdk", ignoreCase = true)
-
-    private fun allowDebugEmulatorOverride(): Boolean =
-        (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0 &&
-            isProbablyEmulator()
 }
 
 internal fun setupTierForPreparation(

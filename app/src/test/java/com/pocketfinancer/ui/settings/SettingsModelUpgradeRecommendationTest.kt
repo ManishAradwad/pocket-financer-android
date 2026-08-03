@@ -1,5 +1,6 @@
 package com.pocketfinancer.ui.settings
 
+import com.pocketfinancer.hardware.DeviceCapabilities
 import com.pocketfinancer.hardware.SlmTier
 import com.pocketfinancer.inference.ModelDownloader
 import com.pocketfinancer.ui.onboarding.OnboardingStep
@@ -25,6 +26,56 @@ class SettingsModelUpgradeRecommendationTest {
         assertTrue(recommendation.isUpgradeAvailable)
         assertEquals(target, recommendation.recommendedSlm)
         assertFalse(recommendation.isRunning)
+    }
+
+    @Test
+    fun `initial setup keeps upgrade visible but blocked with a truthful reason`() {
+        val recommendation = settingsModelUpgradeRecommendation(
+            currentSlm = current,
+            recommendedSlm = target,
+            onboarding = OnboardingSyncManager.OnboardingSyncState(
+                isRunning = true,
+                runPurpose = OnboardingSyncManager.RunPurpose.INITIAL_SETUP,
+                step = OnboardingStep.SYNCING,
+                selectedSlm = current
+            ),
+            fallbackDownloadState = ModelDownloader.DownloadState()
+        )
+
+        assertTrue(recommendation.isUpgradeAvailable)
+        assertFalse(recommendation.isRunning)
+        assertEquals(
+            "Finish the current setup or history import before starting a model upgrade.",
+            recommendation.startBlockedMessage
+        )
+    }
+
+    @Test
+    fun `settings uses the same roomy debug emulator upgrade target as home`() {
+        val recommended = settingsRecommendedSlm(
+            device = DeviceCapabilities.DeviceInfo(
+                ramGb = 16f,
+                ramTier = DeviceCapabilities.RamTier.OK,
+                gpu = null,
+                cpu = DeviceCapabilities.CpuInfo(
+                    cores = 4,
+                    features = emptySet(),
+                    hasI8mm = false,
+                    hasDotProd = false,
+                    hasFp16 = false,
+                    socModel = null
+                ),
+                storage = DeviceCapabilities.StorageInfo(
+                    totalBytes = 20L * GIBIBYTE,
+                    availableBytes = 10L * GIBIBYTE,
+                    usedBytes = 10L * GIBIBYTE
+                ),
+                isHighPerformanceDevice = false
+            ),
+            allowDebugEmulatorOverride = true
+        )
+
+        assertEquals(SlmTier.QWEN3_1_7B_Q4_K_M, recommended)
     }
 
     @Test
@@ -97,5 +148,9 @@ class SettingsModelUpgradeRecommendationTest {
         )
 
         assertEquals(target, settingsActiveSlm(current, onboarding))
+    }
+
+    private companion object {
+        const val GIBIBYTE = 1_073_741_824L
     }
 }

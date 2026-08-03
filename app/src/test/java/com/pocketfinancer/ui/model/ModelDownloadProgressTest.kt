@@ -2,7 +2,9 @@ package com.pocketfinancer.ui.model
 
 import com.pocketfinancer.inference.ModelDownloader
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ModelDownloadProgressTest {
@@ -16,10 +18,22 @@ class ModelDownloadProgressTest {
             etaSeconds = 3_661L
         ).toProgressText()
 
+        assertFalse(text.isPreparing)
         assertEquals("43%", text.percentage)
         assertEquals("425.0 / 1000.0 MB", text.transferred)
         assertEquals("12.3 MB/s", text.speed)
         assertEquals("ETA: 1h 1m", text.eta)
+    }
+
+    @Test
+    fun `unknown total prepares before downloader start without false zero progress`() {
+        val text = ModelDownloader.DownloadState().toProgressText()
+
+        assertTrue(text.isPreparing)
+        assertNull(text.percentage)
+        assertNull(text.transferred)
+        assertNull(text.speed)
+        assertNull(text.eta)
     }
 
     @Test
@@ -42,8 +56,14 @@ class ModelDownloadProgressTest {
 
     @Test
     fun `progress percentage is clamped to indicator bounds`() {
-        val overComplete = ModelDownloader.DownloadState(progress = 1.2f).toProgressText()
-        val belowEmpty = ModelDownloader.DownloadState(progress = -0.2f).toProgressText()
+        val overComplete = ModelDownloader.DownloadState(
+            progress = 1.2f,
+            totalMb = 100f
+        ).toProgressText()
+        val belowEmpty = ModelDownloader.DownloadState(
+            progress = -0.2f,
+            totalMb = 100f
+        ).toProgressText()
 
         assertEquals("100%", overComplete.percentage)
         assertEquals("0%", belowEmpty.percentage)

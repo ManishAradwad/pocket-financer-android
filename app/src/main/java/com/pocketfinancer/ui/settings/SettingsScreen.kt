@@ -35,7 +35,6 @@ import com.pocketfinancer.hardware.SlmTier
 import com.pocketfinancer.inference.DownloadOwner
 import com.pocketfinancer.ui.theme.*
 import com.pocketfinancer.ui.model.ModelDownloadProgressPanel
-import com.pocketfinancer.ui.model.formatDownloadEta
 
 @Composable
 fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
@@ -348,7 +347,8 @@ private fun OnDeviceAiCard(state: SettingsUiState, viewModel: SettingsViewModel)
             ModelDownloadProgressPanel(
                 downloadState = initialDownload,
                 modifier = Modifier.padding(top = 10.dp),
-                label = "Downloading the first on-device model..."
+                label = "Downloading the first on-device model...",
+                preparingLabel = "Preparing the first on-device model download..."
             )
         } else if (!state.initialSetupModelPrepared) {
             Text(
@@ -360,51 +360,15 @@ private fun OnDeviceAiCard(state: SettingsUiState, viewModel: SettingsViewModel)
                 style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.padding(top = 10.dp)
             )
-        } else if (upgrade.isUpgradeAvailable) {
-            RecommendedModelUpgrade(state = state, viewModel = viewModel)
         } else if (download.isDownloading) {
-            Text(
-                text = "Downloading " +
-                    (activeDownloadTier?.name ?: download.artifactFileName ?: "model"),
-                color = M3_OnSurface,
-                style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.padding(top = 8.dp)
+            val downloadName =
+                activeDownloadTier?.name ?: download.artifactFileName ?: "model"
+            ModelDownloadProgressPanel(
+                downloadState = download,
+                modifier = Modifier.padding(top = 10.dp),
+                label = "Downloading $downloadName...",
+                preparingLabel = "Preparing $downloadName download..."
             )
-            LinearProgressIndicator(
-                progress = { download.progress.coerceIn(0f, 1f) },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 8.dp),
-                color = M3_Primary,
-                trackColor = M3_SurfaceContainerLow
-            )
-            Text(
-                "${"%.0f".format(download.progress * 100)}% · " +
-                    "${"%.1f".format(download.downloadedMb)} / " +
-                    "${"%.1f".format(download.totalMb)} MB",
-                color = M3_OnSurfaceVariant,
-                style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.padding(top = 4.dp)
-            )
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                if (download.speedMbps > 0.01f) {
-                    Text(
-                        "${"%.1f".format(download.speedMbps)} MB/s",
-                        color = M3_OnSurfaceVariant,
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                }
-                if (download.etaSeconds > 0L) {
-                    Text(
-                        "ETA: ${formatDownloadEta(download.etaSeconds)}",
-                        color = M3_OnSurfaceVariant,
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                }
-            }
             OutlinedButton(
                 onClick = viewModel::cancelDownload,
                 enabled = download.owner == DownloadOwner.SETTINGS,
@@ -414,6 +378,8 @@ private fun OnDeviceAiCard(state: SettingsUiState, viewModel: SettingsViewModel)
             ) {
                 Text(if (download.owner == DownloadOwner.SETTINGS) "Cancel download" else "Managed from Home")
             }
+        } else if (upgrade.isUpgradeAvailable) {
+            RecommendedModelUpgrade(state = state, viewModel = viewModel)
         } else if (!download.isComplete) {
             Button(
                 onClick = viewModel::downloadSelectedModel,
@@ -486,7 +452,8 @@ private fun RecommendedModelUpgrade(
         upgrade.isDownloading && !upgrade.isCancelling -> {
             ModelDownloadProgressPanel(
                 downloadState = upgrade.downloadState,
-                modifier = Modifier.padding(top = 10.dp)
+                modifier = Modifier.padding(top = 10.dp),
+                preparingLabel = "Preparing model upgrade download..."
             )
         }
         upgrade.isRunning -> {
@@ -529,9 +496,21 @@ private fun RecommendedModelUpgrade(
                     modifier = Modifier.padding(top = 8.dp)
                 )
             }
+            upgrade.startBlockedMessage?.let { message ->
+                Text(
+                    text = message,
+                    color = M3_OnSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(top = 8.dp)
+                )
+            }
             Button(
                 onClick = viewModel::startRecommendedModelUpgrade,
-                enabled = !state.resetRunning && !state.testRunning && !state.loadingModel,
+                enabled = upgrade.startBlockedMessage == null &&
+                    !state.flowBusy &&
+                    !state.resetRunning &&
+                    !state.testRunning &&
+                    !state.loadingModel,
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(top = 10.dp)
@@ -863,44 +842,13 @@ private fun EngineCard(state: SettingsUiState, viewModel: SettingsViewModel) {
         // ── Download Section ──
 
         if (ds.isDownloading) {
-            LabelValue(
-                "Downloading",
-                activeDownloadTier?.let { it.name + " · " + it.sizeMb + " MB" }
-                    ?: ds.artifactFileName ?: "Model"
+            val downloadName =
+                activeDownloadTier?.name ?: ds.artifactFileName ?: "model"
+            ModelDownloadProgressPanel(
+                downloadState = ds,
+                label = "Downloading $downloadName...",
+                preparingLabel = "Preparing $downloadName download..."
             )
-            // Progress bar during download
-            LinearProgressIndicator(
-                progress = { ds.progress.coerceIn(0f, 1f) },
-                modifier = Modifier.fillMaxWidth(),
-                color = M3_Primary,
-                trackColor = M3_SurfaceContainerLow,
-            )
-
-            Spacer(modifier = Modifier.height(6.dp))
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Text(
-                    text = "${"%.0f".format(ds.progress * 100)}% · ${"%.1f".format(ds.downloadedMb)} / ${"%.1f".format(ds.totalMb)} MB",
-                    color = M3_OnSurfaceVariant,
-                    style = MaterialTheme.typography.bodySmall
-                )
-                Text(
-                    text = if (ds.speedMbps > 0.01f) "${"%.1f".format(ds.speedMbps)} MB/s" else "",
-                    color = M3_OnSurfaceVariant,
-                    style = MaterialTheme.typography.bodySmall
-                )
-            }
-
-            if (ds.etaSeconds > 0) {
-                Text(
-                    text = "ETA: ${formatDownloadEta(ds.etaSeconds)}",
-                    color = M3_OnSurfaceVariant,
-                    style = MaterialTheme.typography.bodySmall
-                )
-            }
 
             Spacer(modifier = Modifier.height(8.dp))
 
