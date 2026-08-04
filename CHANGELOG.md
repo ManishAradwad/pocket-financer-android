@@ -2,6 +2,19 @@
 
 All notable changes to Pocket Financer are recorded here by Release Please.
 
+## [1.1.0](https://github.com/ManishAradwad/pocket-financer-android/compare/v1.0.1...v1.1.0) (2026-08-04)
+
+
+### Features
+
+* add cancellable SMS processing ([e2df3d9](https://github.com/ManishAradwad/pocket-financer-android/commit/e2df3d9cee0ebe461107ce3adbaa65c8afb14eeb))
+* surface model download progress and upgrades ([#24](https://github.com/ManishAradwad/pocket-financer-android/issues/24)) ([390abf6](https://github.com/ManishAradwad/pocket-financer-android/commit/390abf663b70a87c950739e28e5cff180cb28c4e))
+
+
+### Bug Fixes
+
+* improve model download throughput ([#25](https://github.com/ManishAradwad/pocket-financer-android/issues/25)) ([04e58ea](https://github.com/ManishAradwad/pocket-financer-android/commit/04e58ea00b2a19d52ea6e400fd822e541c24ca5b))
+
 ## [1.0.1](https://github.com/ManishAradwad/pocket-financer-android/compare/v1.0.0...v1.0.1) (2026-07-29)
 
 
