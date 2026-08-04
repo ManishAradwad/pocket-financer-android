@@ -43,6 +43,7 @@ import com.pocketfinancer.ui.home.ModelUpgradeRecommendation
 import com.pocketfinancer.ui.home.allowDebugEmulatorModelUpgrade
 import com.pocketfinancer.ui.home.canCancelModelUpgrade
 import com.pocketfinancer.ui.home.isHigherQualityModel
+import com.pocketfinancer.ui.home.manualSmsOperationIsRunning
 import com.pocketfinancer.ui.home.modelUpgradeStartBlockedMessage
 import com.pocketfinancer.ui.home.selectModelUpgradeTarget
 import com.pocketfinancer.ui.home.unfinishedModelUpgradeTarget
@@ -238,10 +239,14 @@ class SettingsViewModel @Inject constructor(
                 homeSyncManager.syncState,
                 onboardingSyncManager.syncState,
                 appFlowCoordinator.state,
-                modelDownloader.state
-            ) { home, onboarding, appFlows, downloaderState ->
+                modelDownloader.state,
+                homeSyncManager.manualOperationReservation
+            ) { home, onboarding, appFlows, downloaderState, manualReservation ->
                 val normalized = normalizedDownloadState(downloaderState)
-                val otherFlowBusy = home.status == HomeSyncState.Status.SYNCING ||
+                val otherFlowBusy = manualSmsOperationIsRunning(
+                    state = home,
+                    startPending = manualReservation != null
+                ) ||
                     appFlows.activeCount > 0 ||
                     appFlows.admissionPaused
                 SettingsFlowSnapshot(
@@ -422,28 +427,35 @@ class SettingsViewModel @Inject constructor(
     }
 
     fun startRecommendedModelUpgrade() {
-        val current = _state.value
-        if (!current.initialSetupModelPrepared) {
-            _state.value = current.copy(
-                modelLoadError = "Prepare the first on-device model from Home before upgrading."
-            )
-            return
-        }
-        val blockedMessage = currentModelUpgradeStartBlockedMessage()
-        if (blockedMessage != null) {
-            _state.value = current.copy(
-                upgradeRecommendation = current.upgradeRecommendation.copy(
-                    startBlockedMessage = blockedMessage
+        homeSyncManager.withSmsOperationStartBoundary {
+            val current = _state.value
+            if (!current.initialSetupModelPrepared) {
+                _state.value = current.copy(
+                    modelLoadError =
+                        "Prepare the first on-device model from Home before upgrading."
                 )
-            )
-            return
-        }
-        val recommendation = current.upgradeRecommendation
-        val target = recommendation.recommendedSlm ?: return
-        if (!recommendation.isUpgradeAvailable || recommendation.isRunning) return
+                return@withSmsOperationStartBoundary
+            }
+            val blockedMessage = currentModelUpgradeStartBlockedMessage()
+            if (blockedMessage != null) {
+                _state.value = current.copy(
+                    upgradeRecommendation = current.upgradeRecommendation.copy(
+                        startBlockedMessage = blockedMessage
+                    )
+                )
+                return@withSmsOperationStartBoundary
+            }
+            val recommendation = current.upgradeRecommendation
+            val target = recommendation.recommendedSlm
+                ?: return@withSmsOperationStartBoundary
+            if (
+                !recommendation.isUpgradeAvailable ||
+                recommendation.isRunning
+            ) return@withSmsOperationStartBoundary
 
-        _state.value = current.copy(modelLoadError = null)
-        onboardingSyncManager.startModelUpgrade(context, target)
+            _state.value = current.copy(modelLoadError = null)
+            onboardingSyncManager.startModelUpgrade(context, target)
+        }
     }
 
     private fun currentModelUpgradeStartBlockedMessage(
@@ -451,10 +463,13 @@ class SettingsViewModel @Inject constructor(
             onboardingSyncManager.syncState.value
     ): String? {
         val appFlows = appFlowCoordinator.state.value
-        val otherFlowBusy =
-            homeSyncManager.syncState.value.status == HomeSyncState.Status.SYNCING ||
-                appFlows.activeCount > 0 ||
-                appFlows.admissionPaused
+        val otherFlowBusy = manualSmsOperationIsRunning(
+            state = homeSyncManager.syncState.value,
+            startPending =
+                homeSyncManager.manualOperationReservation.value != null
+        ) ||
+            appFlows.activeCount > 0 ||
+            appFlows.admissionPaused
         return modelUpgradeStartBlockedMessage(
             onboarding = onboarding,
             otherFlowBusy = otherFlowBusy
@@ -850,6 +865,9 @@ class SettingsViewModel @Inject constructor(
 
     fun refreshPermissionHealth() {
         val health = permissionHealthReader.read()
+        val smsPermissionGranted =
+            health.readSmsPermissionGranted &&
+                health.receiveSmsPermissionGranted
         _state.value = _state.value.copy(
             readSmsPermissionGranted = health.readSmsPermissionGranted,
             receiveSmsPermissionGranted = health.receiveSmsPermissionGranted,
@@ -861,6 +879,38 @@ class SettingsViewModel @Inject constructor(
                 health.progressNotificationChannelEnabled,
             notificationPermissionGranted = health.progressNotificationsHealthy
         )
+        setupImportStore.reconcilePermission(smsPermissionGranted)
+        if (!smsPermissionGranted) {
+            requestActiveSmsProcessingStopForPermissionLoss()
+        }
+    }
+
+    private fun requestActiveSmsProcessingStopForPermissionLoss() {
+        val manual = homeSyncManager.syncState.value
+        val runId = manual.activeRunId
+        if (
+            runId != null &&
+            manual.status in setOf(
+                HomeSyncState.Status.SCANNING,
+                HomeSyncState.Status.SYNCING
+            )
+        ) {
+            val accepted = try {
+                SyncService.requestStop(context, runId)
+            } catch (error: RuntimeException) {
+                Log.e(TAG, "Could not dispatch manual SMS stop", error)
+                false
+            }
+            if (accepted) {
+                homeSyncManager.requestServiceStop(runId)
+            }
+        }
+        if (!onboardingSyncManager.requestHistoricalImportCancellation(context)) {
+            Log.i(
+                TAG,
+                "No cancellable historical SMS operation accepted a permission stop"
+            )
+        }
     }
 
     private fun changeAutomaticProcessing(
@@ -993,7 +1043,7 @@ class SettingsViewModel @Inject constructor(
                                 NotificationManagerCompat.from(context).cancelAll()
                             },
                             resetInMemoryState = {
-                                homeSyncManager.resetState()
+                                homeSyncManager.resetStateForErase()
                                 onboardingSyncManager.reset()
                             },
                             commitSetupReset = {

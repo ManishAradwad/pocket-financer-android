@@ -21,11 +21,14 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.job
 import kotlinx.coroutines.test.runTest
 import org.junit.Before
 import org.junit.Test
@@ -281,6 +284,100 @@ class PipelineServiceTest {
         }
         coVerify(exactly = 0) { transactionRepository.insertIfAbsent(any()) }
     }
+
+    @Test
+    fun `cancellation that wins before commit does not persist current SMS`() =
+        runTest {
+            every { extractionParser.parse(any()) } returns extractedTransaction()
+            coEvery { lease.extract(any()) } coAnswers {
+                currentCoroutineContext().job.cancel(
+                    CancellationException("user stopped batch")
+                )
+                SlmExtractionResult.Success(
+                    json = """{"amount":500.0,"type":"credit"}""",
+                    model = model
+                )
+            }
+
+            val processing = async {
+                pipeline.processSingle(transactionSms(), lease)
+            }
+
+            assertFailsWith<CancellationException> { processing.await() }
+            coVerify(exactly = 0) {
+                accountRepository.getOrCreate(any(), any(), any())
+            }
+            coVerify(exactly = 0) { accountRepository.ensureDefault() }
+            coVerify(exactly = 0) {
+                transactionRepository.insertIfAbsent(any())
+            }
+        }
+
+    @Test
+    fun `cancellation during commit lets current SMS persistence finish`() =
+        runTest {
+            every { extractionParser.parse(any()) } returns extractedTransaction()
+            coEvery { lease.extract(any()) } returns SlmExtractionResult.Success(
+                json = """{"amount":500.0,"type":"credit"}""",
+                model = model
+            )
+            val insertStarted = CompletableDeferred<Unit>()
+            val allowInsertToFinish = CompletableDeferred<Unit>()
+            val insertFinished = CompletableDeferred<Unit>()
+            val insertResult = mockk<TransactionRepository.InsertResult>()
+            every { insertResult.inserted } returns true
+            coEvery {
+                transactionRepository.insertIfAbsent(any())
+            } coAnswers {
+                insertStarted.complete(Unit)
+                allowInsertToFinish.await()
+                insertFinished.complete(Unit)
+                insertResult
+            }
+
+            val processing = async {
+                pipeline.processSingle(transactionSms(), lease)
+            }
+            insertStarted.await()
+
+            processing.cancel(CancellationException("user stopped batch"))
+            allowInsertToFinish.complete(Unit)
+            processing.join()
+
+            assertTrue(insertFinished.isCompleted)
+            coVerify(exactly = 1) {
+                transactionRepository.insertIfAbsent(any())
+            }
+        }
+
+    @Test
+    fun `callback cancellation after commit preserves committed result`() =
+        runTest {
+            every { extractionParser.parse(any()) } returns extractedTransaction()
+            coEvery { lease.extract(any()) } returns SlmExtractionResult.Success(
+                json = """{"amount":500.0,"type":"credit"}""",
+                model = model
+            )
+
+            val failure = assertFailsWith<
+                PipelineService.PostPersistenceCommitException
+            > {
+                pipeline.processSingle(
+                    sms = transactionSms(),
+                    lease = lease,
+                    onPersistenceCommitted = {
+                        throw CancellationException("callback failed")
+                    }
+                )
+            }
+
+            assertTrue(failure.committedResult.newlyInserted)
+            assertEquals(extractedTransaction(), failure.committedResult.transaction)
+            assertIs<CancellationException>(failure.cause)
+            coVerify(exactly = 1) {
+                transactionRepository.insertIfAbsent(any())
+            }
+        }
 
     @Test
     fun `non-transactional SMS never reaches runtime`() = runTest {

@@ -25,14 +25,16 @@ internal enum class SetupCardAction {
     RESTORE_PERMISSION,
     SCAN_OLDER,
     SCAN_RECENT,
-    RETRY_RECENT_SYNC
+    RETRY_RECENT_SYNC,
+    STOP_SMS_PROCESSING
 }
 
 internal enum class SetupCardActionTarget {
     START_SETUP,
     SCAN_OLDER,
     RETRY_RECENT_SYNC,
-    RESTORE_PERMISSION
+    RESTORE_PERMISSION,
+    STOP_SMS_PROCESSING
 }
 
 internal fun SetupCardAction.target(): SetupCardActionTarget = when (this) {
@@ -44,6 +46,8 @@ internal fun SetupCardAction.target(): SetupCardActionTarget = when (this) {
         SetupCardActionTarget.RETRY_RECENT_SYNC
     SetupCardAction.RESTORE_PERMISSION ->
         SetupCardActionTarget.RESTORE_PERMISSION
+    SetupCardAction.STOP_SMS_PROCESSING ->
+        SetupCardActionTarget.STOP_SMS_PROCESSING
 }
 
 internal fun manualRecentSyncAvailable(
@@ -54,8 +58,81 @@ internal fun manualRecentSyncAvailable(
 internal fun setupImportCardModel(
     state: SetupImportState,
     automaticProcessingEnabled: Boolean = true,
+    isCancelling: Boolean = false,
+    canStopSmsProcessing: Boolean = false,
+    isFinishing: Boolean = false,
+    isPreparingModel: Boolean = false,
+    manualSmsOperationRunning: Boolean = false,
+    modelUpgradeRunning: Boolean = false,
     nowMillis: Long = System.currentTimeMillis()
 ): SetupImportCardModel {
+    if (isPreparingModel) {
+        val permissionNeeded =
+            state.status == SetupImportStatus.PERMISSION_NEEDED
+        return SetupImportCardModel(
+            eyebrow = "MODEL PREPARATION",
+            title = "Preparing the on-device model",
+            body = if (permissionNeeded) {
+                "Model preparation can finish without reading messages. " +
+                    "Restore SMS access before the history scan begins."
+            } else {
+                "Local model preparation is still running in the background. " +
+                    "SMS scanning has not started yet."
+            },
+            primaryAction = SetupCardAction.RESTORE_PERMISSION
+                .takeIf { permissionNeeded },
+            primaryLabel = "Restore access".takeIf { permissionNeeded },
+            showProgress = true
+        )
+    }
+    if (isFinishing) {
+        val permissionNeeded =
+            state.status == SetupImportStatus.PERMISSION_NEEDED
+        return SetupImportCardModel(
+            eyebrow = "FINISHING SAFELY",
+            title = "Finishing SMS processing",
+            body = if (permissionNeeded) {
+                "SMS access is off. The final import commit has crossed its " +
+                    "persistence boundary and is finishing; verified results " +
+                    "remain available."
+            } else {
+                "The final completion boundary has started. Verified " +
+                    "results and coverage are being finalized. Completed " +
+                    "saves remain on this device."
+            },
+            showProgress = true
+        )
+    }
+    if (
+        manualSmsOperationRunning &&
+        !state.isActive &&
+        state.status != SetupImportStatus.PERMISSION_NEEDED &&
+        !isCancelling &&
+        !canStopSmsProcessing
+    ) {
+        return SetupImportCardModel(
+            eyebrow = "RECENT SMS ACTIVITY",
+            title = "Recent SMS processing is active",
+            body =
+                "Wait for the current recent SMS operation to finish before " +
+                    "starting another history scan.",
+            showProgress = true
+        )
+    }
+    if (
+        modelUpgradeRunning &&
+        !state.isActive &&
+        state.status != SetupImportStatus.PERMISSION_NEEDED
+    ) {
+        return SetupImportCardModel(
+            eyebrow = "MODEL UPGRADE",
+            title = "Model upgrade is in progress",
+            body =
+                "Finish or cancel the model upgrade before starting another " +
+                    "SMS history scan.",
+            showProgress = true
+        )
+    }
     val needsExplicitModelPreparation =
         !state.modelPrepared &&
             !state.modelDownloadConfirmed &&
@@ -167,11 +244,38 @@ internal fun setupImportCardModel(
     )
 
     SetupImportStatus.PERMISSION_NEEDED -> SetupImportCardModel(
-        eyebrow = "SMS ACCESS NEEDED",
-        title = "Restore SMS access",
-        body = "Pocket Financer cannot scan or capture alerts while SMS access is off. Existing encrypted transactions stay available.",
-        primaryAction = SetupCardAction.RESTORE_PERMISSION,
-        primaryLabel = "Restore access"
+        eyebrow = when {
+            isCancelling -> "STOPPING SAFELY"
+            isFinishing -> "FINISHING SAFELY"
+            else -> "SMS ACCESS NEEDED"
+        },
+        title = when {
+            isCancelling -> "Stopping SMS processing"
+            isFinishing -> "Finishing SMS processing"
+            canStopSmsProcessing -> "Stop active SMS processing"
+            else -> "Restore SMS access"
+        },
+        body = when {
+            isCancelling ->
+                "SMS access is off. Stopping the active on-device operation safely; completed saves remain available."
+            isFinishing ->
+                "SMS access is off. A save that already crossed the persistence boundary is finishing; completed saves remain available."
+            canStopSmsProcessing ->
+                "SMS access is off, but an already-read batch is still active. Stop it safely; completed saves remain available."
+            else ->
+                "Pocket Financer cannot scan or capture alerts while SMS access is off. Existing encrypted transactions stay available."
+        },
+        primaryAction = when {
+            isCancelling || isFinishing -> null
+            canStopSmsProcessing -> SetupCardAction.STOP_SMS_PROCESSING
+            else -> SetupCardAction.RESTORE_PERMISSION
+        },
+        primaryLabel = when {
+            isCancelling || isFinishing -> null
+            canStopSmsProcessing -> "Stop SMS processing"
+            else -> "Restore access"
+        },
+        showProgress = isCancelling || isFinishing
     )
 
     SetupImportStatus.DOWNLOADING -> SetupImportCardModel(
@@ -182,32 +286,76 @@ internal fun setupImportCardModel(
     )
 
     SetupImportStatus.SCANNING -> SetupImportCardModel(
-        eyebrow = "HISTORY DISCOVERY",
-        title = when (
-            val days =
-                state.activeScanWindowDays ?: state.coverageWindowDays
-        ) {
-            null -> "Checking SMS history"
-            in 36_500..Int.MAX_VALUE ->
-                "Checking all available SMS history"
-            else -> "Checking the last $days days"
+        eyebrow = when {
+            isCancelling -> "STOPPING SAFELY"
+            isFinishing -> "FINISHING SAFELY"
+            else -> "HISTORY DISCOVERY"
         },
-        body = "Messages are filtered locally before any model parsing. This state is saved so an interruption is visible.",
+        title = when {
+            isCancelling -> "Stopping SMS history scan"
+            isFinishing -> "Finishing SMS history scan"
+            else -> {
+                when (
+                    val days =
+                        state.activeScanWindowDays ?: state.coverageWindowDays
+                ) {
+                    null -> "Checking SMS history"
+                    in 36_500..Int.MAX_VALUE ->
+                        "Checking all available SMS history"
+                    else -> "Checking the last $days days"
+                }
+            }
+        },
+        body = when {
+            isCancelling ->
+                "Finishing the current on-device operation safely. Completed saves remain on this device."
+            isFinishing ->
+                "The completion boundary has started. Verified results and coverage are being finalized."
+            else ->
+                "Messages are filtered locally before any model parsing. This state is saved so an interruption is visible."
+        },
         // Persisted counts and coverage continue to describe the last
         // successful provider read until this query commits. Showing them as
         // evidence for the active window would be misleading.
         evidence = null,
+        primaryAction = SetupCardAction.STOP_SMS_PROCESSING.takeIf {
+            canStopSmsProcessing && !isCancelling && !isFinishing
+        },
+        primaryLabel = "Stop SMS processing".takeIf {
+            canStopSmsProcessing && !isCancelling && !isFinishing
+        },
         showProgress = true
     )
 
     SetupImportStatus.PROCESSING -> SetupImportCardModel(
-        eyebrow = "LOCAL PROCESSING",
-        title = "Checking eligible alerts",
-        body = "Each candidate is processed on this device. Saved transactions keep their encrypted source evidence; rejected messages are not retained long-term.",
+        eyebrow = when {
+            isCancelling -> "STOPPING SAFELY"
+            isFinishing -> "FINISHING SAFELY"
+            else -> "LOCAL PROCESSING"
+        },
+        title = when {
+            isCancelling -> "Stopping SMS processing"
+            isFinishing -> "Finishing SMS processing"
+            else -> "Checking eligible alerts"
+        },
+        body = when {
+            isCancelling ->
+                "Finishing the current on-device operation safely. Completed saves remain on this device."
+            isFinishing ->
+                "The final completion boundary has started. Completed saves remain on this device."
+            else ->
+                "Each candidate is processed on this device. Saved transactions keep their encrypted source evidence; rejected messages are not retained long-term."
+        },
         evidence =
             "${state.processedCount} of ${state.eligibleCandidateCount} checked · " +
                 "${state.savedCount} saved · ${state.rejectedCount} rejected" +
                 if (state.failedCount > 0) " · ${state.failedCount} failed" else "",
+        primaryAction = SetupCardAction.STOP_SMS_PROCESSING.takeIf {
+            canStopSmsProcessing && !isCancelling && !isFinishing
+        },
+        primaryLabel = "Stop SMS processing".takeIf {
+            canStopSmsProcessing && !isCancelling && !isFinishing
+        },
         showProgress = true
     )
 
@@ -273,23 +421,55 @@ internal fun setupImportCardModel(
         primaryLabel = "Scan older messages"
     )
 
-    SetupImportStatus.PAUSED -> SetupImportCardModel(
-        eyebrow = "SETUP PAUSED",
-        title = when (state.pauseReason) {
-            SetupPauseReason.INTERRUPTED ->
-                "Setup stopped before it finished"
-            SetupPauseReason.AUTOMATIC_UPDATES_DISABLED ->
-                "Automatic setup work is paused"
-            else -> "Setup is paused"
-        },
-        body = state.actionableError?.message
-            ?: "Completed work is still saved. Resume when this device is ready.",
-        evidence = scanEvidence(state),
-        primaryAction = SetupCardAction.RESUME,
-        primaryLabel = state.actionableError?.actionLabel
-            ?.takeIf { it.isNotBlank() }
-            ?: "Resume setup"
-    )
+    SetupImportStatus.PAUSED -> when {
+        isCancelling -> SetupImportCardModel(
+            eyebrow = "STOPPING SAFELY",
+            title = "Finishing SMS stop",
+            body =
+                "Runtime cleanup and foreground feedback are finishing. " +
+                    "Completed saves remain on this device.",
+            evidence = scanEvidence(state),
+            showProgress = true
+        )
+        isFinishing -> SetupImportCardModel(
+            eyebrow = "FINISHING SAFELY",
+            title = "Finishing SMS processing",
+            body =
+                "A save that already crossed the persistence boundary is " +
+                    "finishing. Completed saves remain on this device.",
+            evidence = scanEvidence(state),
+            showProgress = true
+        )
+        canStopSmsProcessing -> SetupImportCardModel(
+            eyebrow = "SMS PROCESSING ACTIVE",
+            title = "Stop active SMS processing",
+            body =
+                "Permission was restored while an already-read batch was " +
+                    "still active. Stop it safely before resuming setup.",
+            evidence = scanEvidence(state),
+            primaryAction = SetupCardAction.STOP_SMS_PROCESSING,
+            primaryLabel = "Stop SMS processing"
+        )
+        else -> SetupImportCardModel(
+            eyebrow = "SETUP PAUSED",
+            title = when (state.pauseReason) {
+                SetupPauseReason.INTERRUPTED ->
+                    "Setup stopped before it finished"
+                SetupPauseReason.USER_REQUESTED ->
+                    "SMS processing stopped"
+                SetupPauseReason.AUTOMATIC_UPDATES_DISABLED ->
+                    "Automatic setup work is paused"
+                else -> "Setup is paused"
+            },
+            body = state.actionableError?.message
+                ?: "Completed work is still saved. Resume when this device is ready.",
+            evidence = scanEvidence(state),
+            primaryAction = SetupCardAction.RESUME,
+            primaryLabel = state.actionableError?.actionLabel
+                ?.takeIf { it.isNotBlank() }
+                ?: "Resume setup"
+        )
+    }
 
     SetupImportStatus.FAILED -> SetupImportCardModel(
         eyebrow = "SETUP NEEDS ATTENTION",

@@ -17,7 +17,6 @@ import com.pocketfinancer.inference.SlmModelStorage
 import com.pocketfinancer.inference.SlmRuntime
 import com.pocketfinancer.inference.SlmRuntimeOwner
 import com.pocketfinancer.pipeline.ExtractionParser
-import com.pocketfinancer.pipeline.IncomingSmsQueueResult
 import com.pocketfinancer.pipeline.PromptBuilder
 import com.pocketfinancer.pipeline.SlmProcessingPreferences
 import com.pocketfinancer.pipeline.SmsFilterPipeline
@@ -30,15 +29,23 @@ import com.pocketfinancer.sms.SmsReader
 import com.pocketfinancer.toModelSpec
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -204,6 +211,8 @@ internal fun mergeRecentScanQueue(
 
 data class HomeSyncState(
     val status: Status = Status.IDLE,
+    val activeRunId: String? = null,
+    val cancellationRequested: Boolean = false,
     val queue: List<SyncSmsItem> = emptyList(),
     val currentIndex: Int? = null,
     val currentStageIndex: Int? = null,
@@ -219,13 +228,28 @@ data class HomeSyncState(
     val syncError: String? = null
 ) {
     enum class Status {
-        IDLE, SYNCING, DONE
+        IDLE, SCANNING, SYNCING, CANCELLING, DONE
     }
 
     enum class RecentScanOutcome {
         NOT_RUN, SUCCESS, PERMISSION_NEEDED, FAILED
     }
 }
+
+internal data class ManualServiceStartAcknowledgement(
+    val runId: String,
+    val accepted: Boolean
+)
+
+internal enum class ManualOperationReservationKind {
+    RECENT_SCAN,
+    SERVICE_START
+}
+
+internal data class ManualOperationReservation(
+    val id: String,
+    val kind: ManualOperationReservationKind
+)
 
 @Singleton
 class HomeSyncManager @Inject constructor(
@@ -252,22 +276,333 @@ class HomeSyncManager @Inject constructor(
     private val operationMutex = Mutex()
     private var recentScanCandidateKeys: Set<String> = emptySet()
     private var recentScanCompletedAtMillis: Long? = null
+    private val recentScanTrackingLock = Any()
     private val _syncState = MutableStateFlow(HomeSyncState())
     val syncState: StateFlow<HomeSyncState> = _syncState.asStateFlow()
+    private val _serviceStartAcknowledgement =
+        MutableStateFlow<ManualServiceStartAcknowledgement?>(null)
+    internal val serviceStartAcknowledgement:
+        StateFlow<ManualServiceStartAcknowledgement?> =
+        _serviceStartAcknowledgement.asStateFlow()
+    private val serviceStartAdmissionLock = Any()
+    private val revokedServiceStartRunIds = mutableSetOf<String>()
+    private val serviceStartScope =
+        CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val _manualOperationReservation =
+        MutableStateFlow<ManualOperationReservation?>(null)
+    internal val manualOperationReservation:
+        StateFlow<ManualOperationReservation?> =
+        _manualOperationReservation.asStateFlow()
+
+    /** One process-wide boundary orders all Home SMS/setup start decisions. */
+    internal fun <T> withSmsOperationStartBoundary(
+        block: () -> T
+    ): T = synchronized(serviceStartAdmissionLock) { block() }
+
+    internal fun tryReserveRecentScan(): String? =
+        reserveManualOperation(ManualOperationReservationKind.RECENT_SCAN)
+
+    internal fun tryReserveServiceStart(): String? {
+        val runId = reserveManualOperation(
+            ManualOperationReservationKind.SERVICE_START
+        ) ?: return null
+        serviceStartScope.launch {
+            delay(MANUAL_SERVICE_START_ACK_TIMEOUT_MILLIS)
+            revokeUnacknowledgedServiceStart(runId)
+        }
+        return runId
+    }
+
+    private fun reserveManualOperation(
+        kind: ManualOperationReservationKind
+    ): String? = synchronized(serviceStartAdmissionLock) {
+        val state = _syncState.value
+        if (
+            _manualOperationReservation.value != null ||
+            state.activeRunId != null ||
+            state.status in ACTIVE_SERVICE_STATUSES
+        ) {
+            return@synchronized null
+        }
+        val id = UUID.randomUUID().toString()
+        _manualOperationReservation.value = ManualOperationReservation(id, kind)
+        id
+    }
+
+    internal fun releaseManualOperationReservation(id: String) {
+        synchronized(serviceStartAdmissionLock) {
+            if (_manualOperationReservation.value?.id == id) {
+                _manualOperationReservation.value = null
+            }
+        }
+    }
+
+    internal fun acknowledgeServiceStart(
+        runId: String,
+        accepted: Boolean
+    ) {
+        if (runId.isBlank()) return
+        synchronized(serviceStartAdmissionLock) {
+            if (
+                _manualOperationReservation.value?.id == runId &&
+                _manualOperationReservation.value?.kind ==
+                    ManualOperationReservationKind.SERVICE_START
+            ) {
+                _manualOperationReservation.value = null
+            }
+            _serviceStartAcknowledgement.value =
+                ManualServiceStartAcknowledgement(runId, accepted)
+        }
+    }
+
+    /**
+     * Atomically invalidates an Android service start only while its exact
+     * reservation is still awaiting acknowledgement. Completed or already
+     * acknowledged run IDs are ignored instead of accumulating tombstones.
+     * Returns true only when the pending start was revoked.
+     */
+    internal fun revokeUnacknowledgedServiceStart(runId: String): Boolean =
+        synchronized(serviceStartAdmissionLock) {
+            if (runId.isBlank()) return@synchronized false
+            val reservation = _manualOperationReservation.value
+            if (
+                reservation?.id != runId ||
+                reservation.kind !=
+                    ManualOperationReservationKind.SERVICE_START
+            ) {
+                return@synchronized false
+            }
+            val accepted = _syncState.value.activeRunId == runId
+            if (!accepted) {
+                revokedServiceStartRunIds += runId
+            }
+            _manualOperationReservation.value = null
+            _serviceStartAcknowledgement.value =
+                ManualServiceStartAcknowledgement(
+                    runId = runId,
+                    accepted = accepted
+                )
+            !accepted
+        }
+
+    /**
+     * Publishes foreground-service ownership before admission or provider work
+     * can suspend, so the same run can be stopped throughout its lifetime.
+     */
+    internal fun beginServiceRun(runId: String): Boolean =
+        synchronized(serviceStartAdmissionLock) {
+            if (runId.isBlank() || runId in revokedServiceStartRunIds) {
+                return@synchronized false
+            }
+            _manualOperationReservation.value?.let { reservation ->
+                if (
+                    reservation.kind !=
+                        ManualOperationReservationKind.SERVICE_START ||
+                    reservation.id != runId
+                ) {
+                    return@synchronized false
+                }
+            }
+            while (true) {
+                val current = _syncState.value
+                if (
+                    current.activeRunId != null &&
+                    current.activeRunId != runId
+                ) {
+                    return@synchronized false
+                }
+                val next = current.copy(
+                    status = HomeSyncState.Status.SCANNING,
+                    activeRunId = runId,
+                    cancellationRequested = false,
+                    currentIndex = null,
+                    currentStageIndex = null,
+                    thinkingOutput = "",
+                    jsonOutput = "",
+                    activeSmsPerformance = null,
+                    scanError = null,
+                    syncError = null
+                )
+                if (_syncState.compareAndSet(current, next)) {
+                    break
+                }
+            }
+            true
+        }
+
+    /** Returns true only when [runId] owns the currently published run. */
+    internal fun requestServiceStop(runId: String?): Boolean {
+        while (true) {
+            val current = _syncState.value
+            if (!manualSyncStopMatches(current.activeRunId, runId)) {
+                return false
+            }
+            if (current.status !in ACTIVE_SERVICE_STATUSES) {
+                return false
+            }
+            if (
+                current.status == HomeSyncState.Status.CANCELLING &&
+                current.cancellationRequested
+            ) {
+                return true
+            }
+            val next = current.copy(
+                status = HomeSyncState.Status.CANCELLING,
+                cancellationRequested = true,
+                thinkingOutput = "",
+                jsonOutput = "",
+                activeSmsPerformance = null
+            )
+            if (_syncState.compareAndSet(current, next)) return true
+        }
+    }
+
+    /**
+     * Idempotently settles cancellation for one run. A current in-flight item
+     * becomes retryable, while terminal rows from earlier items are retained.
+     */
+    internal fun settleServiceCancellation(runId: String?): Boolean {
+        while (true) {
+            val current = _syncState.value
+            val settled = settledManualSyncCancellation(current, runId)
+                ?: return false
+            if (_syncState.compareAndSet(current, settled)) {
+                recordManualCancellationOutcomeSafely(settled.queue)
+                return true
+            }
+        }
+    }
+
+    /** Clears service-only ownership on normal, no-work, and error exits. */
+    internal fun finishServiceRun(runId: String?): Boolean {
+        while (true) {
+            val current = _syncState.value
+            if (!manualSyncStopMatches(current.activeRunId, runId)) {
+                return false
+            }
+            val terminalStatus = when (current.status) {
+                HomeSyncState.Status.SCANNING,
+                HomeSyncState.Status.CANCELLING -> HomeSyncState.Status.IDLE
+                else -> current.status
+            }
+            val finished = current.copy(
+                status = terminalStatus,
+                activeRunId = null,
+                cancellationRequested = false,
+                currentIndex = current.currentIndex
+                    .takeUnless { terminalStatus == HomeSyncState.Status.IDLE },
+                currentStageIndex = current.currentStageIndex
+                    .takeUnless { terminalStatus == HomeSyncState.Status.IDLE },
+                thinkingOutput = "",
+                jsonOutput = "",
+                activeSmsPerformance = null
+            )
+            if (_syncState.compareAndSet(current, finished)) return true
+        }
+    }
+
+    /**
+     * Linearizes an empty successful scan against Stop. Once this transition
+     * wins, Stop is no longer eligible; if Stop wins first, the service must
+     * publish cancellation instead of a no-work completion.
+     */
+    internal fun tryCompleteNoWorkServiceRun(runId: String?): Boolean {
+        while (true) {
+            val current = _syncState.value
+            if (
+                !manualSyncStopMatches(current.activeRunId, runId) ||
+                current.status != HomeSyncState.Status.SCANNING ||
+                current.cancellationRequested ||
+                current.recentScanOutcome !=
+                    HomeSyncState.RecentScanOutcome.SUCCESS ||
+                current.queue.any { it.status == "pending" }
+            ) {
+                return false
+            }
+            val completed = current.copy(
+                status = HomeSyncState.Status.DONE,
+                currentIndex = null,
+                currentStageIndex = null,
+                thinkingOutput = "",
+                jsonOutput = "",
+                activeSmsPerformance = null,
+                syncError = null
+            )
+            if (_syncState.compareAndSet(current, completed)) return true
+        }
+    }
+
+    /**
+     * Serializes the final service handoff with incoming queue appends. The
+     * caller publishes its terminal notification and releases job ownership
+     * inside [handoff], then clears manager ownership before this mutex opens
+     * to another queued SMS.
+     */
+    internal suspend fun withCompletedServiceRunHandoff(
+        runId: String?,
+        handoff: suspend (HomeSyncState) -> Unit
+    ): Boolean = operationMutex.withLock {
+        val terminal = _syncState.value
+        if (
+            !manualSyncStopMatches(terminal.activeRunId, runId) ||
+            terminal.status != HomeSyncState.Status.DONE ||
+            terminal.cancellationRequested ||
+            terminal.queue.any {
+                it.status == "pending" || it.status == "syncing"
+            }
+        ) {
+            return@withLock false
+        }
+        handoff(terminal)
+        true
+    }
+
+    private fun settleUnscopedCancellation() {
+        _syncState.update { current ->
+            current.copy(
+                status = HomeSyncState.Status.IDLE,
+                activeRunId = null,
+                cancellationRequested = false,
+                queue = current.queue.map { item ->
+                    if (item.status == "syncing") {
+                        item.copy(status = "pending")
+                    } else {
+                        item
+                    }
+                },
+                currentIndex = null,
+                currentStageIndex = null,
+                thinkingOutput = "",
+                jsonOutput = "",
+                activeSmsPerformance = null,
+                syncError = null
+            )
+        }
+        recordManualCancellationOutcomeSafely(_syncState.value.queue)
+    }
 
     suspend fun checkForUnsyncedSms() =
-        checkForUnsyncedSmsWithAdmission(admittedFlow = null)
+        checkForUnsyncedSmsWithAdmission(
+            admittedFlow = null,
+            runId = null
+        )
 
     internal suspend fun checkForUnsyncedSms(
-        admittedFlow: SlmAppFlowLease
-    ) = checkForUnsyncedSmsWithAdmission(admittedFlow)
+        admittedFlow: SlmAppFlowLease,
+        runId: String? = null
+    ) = checkForUnsyncedSmsWithAdmission(admittedFlow, runId)
 
     private suspend fun checkForUnsyncedSmsWithAdmission(
-        admittedFlow: SlmAppFlowLease?
+        admittedFlow: SlmAppFlowLease?,
+        runId: String?
     ) = withContext(Dispatchers.IO) {
         operationMutex.withLock {
             requireHomeSyncAdmission(admittedFlow)
-            if (_syncState.value.status == HomeSyncState.Status.SYNCING) {
+            ensureRunCanContinue(runId)
+            if (
+                runId == null &&
+                _syncState.value.status in ACTIVE_SERVICE_STATUSES
+            ) {
                 return@withLock
             }
             var ownedFlowLease: SlmAppFlowLease? = null
@@ -281,17 +616,20 @@ class HomeSyncManager @Inject constructor(
                             "The recent scan is waiting for another local setup or maintenance operation.",
                         actionLabel = "Try recent scan again"
                     )
-                    _syncState.value = _syncState.value.copy(
-                        recentScanOutcome =
-                            HomeSyncState.RecentScanOutcome.NOT_RUN,
-                        scanError =
-                            "The recent scan is waiting for another local setup or maintenance operation."
-                    )
+                    _syncState.update { state ->
+                        state.copy(
+                            recentScanOutcome =
+                                HomeSyncState.RecentScanOutcome.NOT_RUN,
+                            scanError =
+                                "The recent scan is waiting for another local setup or maintenance operation."
+                        )
+                    }
                     return@withLock
                 }
             }
 
             try {
+                ensureRunCanContinue(runId)
                 val onboardingComplete = context
                     .getSharedPreferences(APP_SETTINGS, Context.MODE_PRIVATE)
                     .getBoolean(ONBOARDING_COMPLETED, false)
@@ -301,12 +639,21 @@ class HomeSyncManager @Inject constructor(
                         setupImportStore.state.value.status
                     )
                 ) {
-                    _syncState.value = _syncState.value.copy(
-                        recentScanOutcome =
-                            HomeSyncState.RecentScanOutcome.FAILED,
-                        scanError =
-                            "Resume the first-run import before scanning recent alerts."
-                    )
+                    _syncState.update { state ->
+                        state.copy(
+                            // Keep service ownership until its error handoff,
+                            // but close append admission immediately.
+                            status = if (state.cancellationRequested) {
+                                HomeSyncState.Status.CANCELLING
+                            } else {
+                                HomeSyncState.Status.IDLE
+                            },
+                            recentScanOutcome =
+                                HomeSyncState.RecentScanOutcome.FAILED,
+                            scanError =
+                                "Resume the first-run import before scanning recent alerts."
+                        )
+                    }
                     return@withLock
                 }
                 if (!smsRepository.hasPermissions()) {
@@ -330,49 +677,84 @@ class HomeSyncManager @Inject constructor(
                     limit = Int.MAX_VALUE,
                     maxDate = providerMaxDate
                 )
+                ensureRunCanContinue(runId)
                 val transactional = rawMessages.filter { message ->
                     smsFilterPipeline.isTransactional(
                         message.address,
                         message.body
                     )
                 }
-                val currentQueue = _syncState.value.queue.filter {
-                    it.status == "pending" || it.status == "syncing"
-                }
-                val unsyncedMessages = transactional
-                    .filter { message ->
+                val unsyncedMessages = mutableListOf<SmsReader.SmsMessage>()
+                for (message in transactional) {
+                    ensureRunCanContinue(runId)
+                    if (
                         !transactionRepository.preserveSourceMetadataIfExists(
                             sourceIdentity = message.sourceIdentity,
                             receivedDate = message.date
                         )
+                    ) {
+                        unsyncedMessages += message
                     }
+                }
+                ensureRunCanContinue(runId)
                 if (!smsRepository.hasPermissions()) {
                     publishRecentPermissionNeeded()
                     return@withLock
                 }
-                val mergedQueue = mergeRecentScanQueue(
-                    currentQueue = currentQueue,
-                    providerMessages = unsyncedMessages
-                )
                 val scannedCandidateKeys = unsyncedMessages
                     .mapTo(mutableSetOf()) {
                         it.sourceIdentity.opaqueCandidateKey
                     }
                 val loadedModel = slmRuntime.state.value.loadedModel
                 val completedAt = System.currentTimeMillis()
-                recentScanCandidateKeys = scannedCandidateKeys
-                recentScanCompletedAtMillis = completedAt
-                _syncState.value = HomeSyncState(
-                    status = HomeSyncState.Status.IDLE,
-                    queue = mergedQueue,
-                    hasThinkingMode = loadedModel?.hasThinkingMode ?: false,
-                    activeModelName =
-                        loadedModel?.modelPath?.let { File(it).name },
-                    recentScanOutcome =
-                        HomeSyncState.RecentScanOutcome.SUCCESS,
-                    recentScanWindowDays = scanWindowDays,
-                    lastSuccessfulScanMillis = completedAt
-                )
+                synchronized(recentScanTrackingLock) {
+                    recentScanCandidateKeys = scannedCandidateKeys
+                    recentScanCompletedAtMillis = completedAt
+                    _syncState.update { current ->
+                        if (
+                            runId != null &&
+                            (
+                                !manualSyncStopMatches(
+                                    current.activeRunId,
+                                    runId
+                                ) || current.cancellationRequested
+                            )
+                        ) {
+                            current
+                        } else {
+                            // Build from the queue owned by this exact CAS
+                            // retry. Incoming candidates may be appended while
+                            // repository identity checks are in flight.
+                            val latestQueue = mergeRecentScanQueue(
+                                currentQueue = current.queue.filter {
+                                    it.status == "pending" ||
+                                        it.status == "syncing"
+                                },
+                                providerMessages = unsyncedMessages
+                            )
+                            HomeSyncState(
+                                status = if (runId == null) {
+                                    HomeSyncState.Status.IDLE
+                                } else {
+                                    HomeSyncState.Status.SCANNING
+                                },
+                                activeRunId = current.activeRunId,
+                                cancellationRequested =
+                                    current.cancellationRequested,
+                                queue = latestQueue,
+                                hasThinkingMode =
+                                    loadedModel?.hasThinkingMode ?: false,
+                                activeModelName = loadedModel?.modelPath
+                                    ?.let { File(it).name },
+                                recentScanOutcome =
+                                    HomeSyncState.RecentScanOutcome.SUCCESS,
+                                recentScanWindowDays = scanWindowDays,
+                                lastSuccessfulScanMillis = completedAt
+                            )
+                        }
+                    }
+                }
+                ensureRunCanContinue(runId)
                 recordManualScanSuccess(
                     scanWindowDays = scanWindowDays,
                     providerMaxDate = providerMaxDate,
@@ -392,12 +774,18 @@ class HomeSyncManager @Inject constructor(
                     message = e.message ?: "The recent SMS scan failed.",
                     actionLabel = "Try recent scan again"
                 )
-                _syncState.value = _syncState.value.copy(
-                    status = HomeSyncState.Status.IDLE,
-                    recentScanOutcome =
-                        HomeSyncState.RecentScanOutcome.FAILED,
-                    scanError = e.message ?: "The recent SMS scan failed."
-                )
+                _syncState.update { state ->
+                    state.copy(
+                        status = if (state.cancellationRequested) {
+                            HomeSyncState.Status.CANCELLING
+                        } else {
+                            HomeSyncState.Status.IDLE
+                        },
+                        recentScanOutcome =
+                            HomeSyncState.RecentScanOutcome.FAILED,
+                        scanError = e.message ?: "The recent SMS scan failed."
+                    )
+                }
             } finally {
                 withContext(NonCancellable) {
                     ownedFlowLease?.release()
@@ -414,21 +802,25 @@ class HomeSyncManager @Inject constructor(
     suspend fun executeSync(serviceContext: Context) =
         executeSyncWithAdmission(
             serviceContext = serviceContext,
-            admittedFlow = null
+            admittedFlow = null,
+            runId = null
         )
 
     internal suspend fun executeSync(
         serviceContext: Context,
-        admittedFlow: SlmAppFlowLease
-    ) = executeSyncWithAdmission(serviceContext, admittedFlow)
+        admittedFlow: SlmAppFlowLease,
+        runId: String? = null
+    ) = executeSyncWithAdmission(serviceContext, admittedFlow, runId)
 
     @Suppress("UNUSED_PARAMETER")
     private suspend fun executeSyncWithAdmission(
         serviceContext: Context,
-        admittedFlow: SlmAppFlowLease?
+        admittedFlow: SlmAppFlowLease?,
+        runId: String?
     ) = withContext(Dispatchers.IO) {
         operationMutex.withLock {
             requireHomeSyncAdmission(admittedFlow)
+            ensureRunCanContinue(runId)
             // Standalone callers wait through the selected-model handoff.
             // SyncService supplies the one outer lease that owns scan,
             // processing, persistence, and terminal notification publication.
@@ -449,14 +841,21 @@ class HomeSyncManager @Inject constructor(
                         setupImportStore.state.value.status
                     )
                 ) {
-                    _syncState.value = _syncState.value.copy(
-                        status = HomeSyncState.Status.IDLE,
-                        syncError =
-                            "Resume the first-run import before processing recent alerts."
-                    )
+                    _syncState.update { state ->
+                        state.copy(
+                            status = if (state.cancellationRequested) {
+                                HomeSyncState.Status.CANCELLING
+                            } else {
+                                HomeSyncState.Status.IDLE
+                            },
+                            syncError =
+                                "Resume the first-run import before processing recent alerts."
+                        )
+                    }
                     return@withLock
                 }
-                executeSyncLocked()
+                ensureRunCanContinue(runId)
+                executeSyncLocked(runId)
             } finally {
                 withContext(NonCancellable) {
                     ownedFlowLease?.release()
@@ -476,20 +875,102 @@ class HomeSyncManager @Inject constructor(
         }
     }
 
-    private suspend fun executeSyncLocked() {
-        if (_syncState.value.queue.isEmpty()) {
-            _syncState.value = _syncState.value.copy(
-                status = HomeSyncState.Status.IDLE
+    private suspend fun ensureRunCanContinue(runId: String?) {
+        currentCoroutineContext().ensureActive()
+        if (runId == null) return
+        val state = _syncState.value
+        if (
+            !manualSyncStopMatches(state.activeRunId, runId) ||
+            state.cancellationRequested
+        ) {
+            throw CancellationException(
+                "Manual SMS processing run is no longer active"
             )
+        }
+    }
+
+    internal fun isServiceStopRequested(runId: String?): Boolean {
+        val state = _syncState.value
+        return manualSyncStopMatches(state.activeRunId, runId) &&
+            state.cancellationRequested
+    }
+
+    /**
+     * A compare-and-set update prevents progress callbacks from overwriting a
+     * stop published concurrently by the service main thread.
+     */
+    private fun updateRunState(
+        runId: String?,
+        allowCancellationRequested: Boolean = false,
+        transform: (HomeSyncState) -> HomeSyncState
+    ): Boolean {
+        while (true) {
+            val current = _syncState.value
+            if (
+                runId != null &&
+                (
+                    !manualSyncStopMatches(current.activeRunId, runId) ||
+                        (
+                            current.cancellationRequested &&
+                                !allowCancellationRequested
+                            )
+                    )
+            ) {
+                return false
+            }
+            if (_syncState.compareAndSet(current, transform(current))) {
+                return true
+            }
+        }
+    }
+
+    private fun tryPublishServiceDone(runId: String?): Boolean {
+        while (true) {
+            val current = _syncState.value
+            if (
+                runId != null &&
+                (
+                    !manualSyncStopMatches(current.activeRunId, runId) ||
+                        current.cancellationRequested
+                    )
+            ) {
+                return false
+            }
+            if (
+                current.queue.any {
+                    it.status == "pending" || it.status == "syncing"
+                }
+            ) {
+                return false
+            }
+            val done = current.copy(
+                status = HomeSyncState.Status.DONE,
+                currentIndex = null,
+                currentStageIndex = null,
+                syncError = null
+            )
+            if (_syncState.compareAndSet(current, done)) return true
+        }
+    }
+
+    private suspend fun executeSyncLocked(runId: String?) {
+        ensureRunCanContinue(runId)
+        if (_syncState.value.queue.isEmpty()) {
+            updateRunState(runId) { state ->
+                state.copy(status = HomeSyncState.Status.IDLE)
+            }
             return
         }
 
-        _syncState.value = _syncState.value.copy(
-            status = HomeSyncState.Status.SYNCING,
-            currentIndex = 0,
-            currentStageIndex = 0,
-            syncError = null
-        )
+        updateRunState(runId) { state ->
+            state.copy(
+                status = HomeSyncState.Status.SYNCING,
+                currentIndex = 0,
+                currentStageIndex = 0,
+                syncError = null
+            )
+        }
+        ensureRunCanContinue(runId)
         var lease: SlmLease? = null
         try {
             val device = deviceCapabilities.assessDevice()
@@ -501,35 +982,76 @@ class HomeSyncManager @Inject constructor(
             }
             val spec = tier.toModelSpec(modelStorage, device)
 
-            _syncState.value = _syncState.value.copy(
-                status = HomeSyncState.Status.SYNCING,
-                currentIndex = 0,
-                currentStageIndex = 0,
-                thinkingOutput = "",
-                jsonOutput = "",
-                activeSmsPerformance = null,
-                hasThinkingMode = spec.hasThinkingMode,
-                activeModelName = modelFile.name
-            )
+            val syncingPublished = updateRunState(runId) { state ->
+                state.copy(
+                    status = HomeSyncState.Status.SYNCING,
+                    currentIndex = 0,
+                    currentStageIndex = 0,
+                    thinkingOutput = "",
+                    jsonOutput = "",
+                    activeSmsPerformance = null,
+                    hasThinkingMode = spec.hasThinkingMode,
+                    activeModelName = modelFile.name
+                )
+            }
+            if (!syncingPublished) ensureRunCanContinue(runId)
+            ensureRunCanContinue(runId)
 
             val batchLease = slmRuntime.acquire(SlmRuntimeOwner.HOME_SYNC, spec)
             lease = batchLease
+            ensureRunCanContinue(runId)
             val grammar: String by lazy {
                 modelStorage.readTextAsset("sms_extraction.gbnf")
             }
 
-            var index = 0
-            while (index < _syncState.value.queue.size) {
-                val queue = _syncState.value.queue.toMutableList()
-                queue[index].status = "syncing"
-                _syncState.value = _syncState.value.copy(
-                    queue = queue,
-                    currentIndex = index,
-                    currentStageIndex = 0,
-                    thinkingOutput = "",
-                    jsonOutput = "",
-                    activeSmsPerformance = null
-                )
+            while (true) {
+                ensureRunCanContinue(runId)
+                val index = _syncState.value.queue.indexOfFirst {
+                    it.status == "pending"
+                }
+                if (index < 0) {
+                    val failedCount = _syncState.value.queue.count {
+                        it.status == "error"
+                    }
+                    if (failedCount > 0) {
+                        manualProcessingFailureError(failedCount)?.let { error ->
+                            recordManualOperationError(
+                                code = error.code,
+                                message = error.message,
+                                actionLabel = error.actionLabel
+                            )
+                        }
+                    } else {
+                        clearManualOperationError()
+                    }
+                    ensureRunCanContinue(runId)
+                    if (tryPublishServiceDone(runId)) break
+                    // A queue append that wins the terminal CAS belongs to this
+                    // run and is processed before service ownership is released.
+                    ensureRunCanContinue(runId)
+                    continue
+                }
+                if (!smsRepository.hasPermissions()) {
+                    publishRecentPermissionNeeded()
+                    throw CancellationException(
+                        "SMS permission was revoked during manual processing"
+                    )
+                }
+                updateRunState(runId) { state ->
+                    val queue = state.queue.toMutableList()
+                    if (index in queue.indices) {
+                        queue[index] = queue[index].copy(status = "syncing")
+                    }
+                    state.copy(
+                        queue = queue,
+                        currentIndex = index,
+                        currentStageIndex = 0,
+                        thinkingOutput = "",
+                        jsonOutput = "",
+                        activeSmsPerformance = null
+                    )
+                }
+                ensureRunCanContinue(runId)
 
                 val item = _syncState.value.queue[index]
 
@@ -543,21 +1065,24 @@ class HomeSyncManager @Inject constructor(
                         receivedDate = item.date
                     )
                 ) {
-                    updateItemStatus(index, "already_saved")
-                    index++
+                    ensureRunCanContinue(runId)
+                    updateItemStatus(index, "already_saved", runId)
                     continue
                 }
                 if (!smsFilterPipeline.isTransactional(item.sender, item.body)) {
-                    updateItemStatus(index, "filtered_out")
-                    index++
+                    ensureRunCanContinue(runId)
+                    updateItemStatus(index, "filtered_out", runId)
                     continue
                 }
 
                 try {
                     val hasThinking = batchLease.model.hasThinkingMode
-                    _syncState.value = _syncState.value.copy(
-                        currentStageIndex = if (hasThinking) 1 else 2
-                    )
+                    updateRunState(runId) { state ->
+                        state.copy(
+                            currentStageIndex = if (hasThinking) 1 else 2
+                        )
+                    }
+                    ensureRunCanContinue(runId)
                     val rawPrompt = promptBuilder.buildExtractionPrompt(item.sender, item.body)
                     val fallbackPrompt =
                         promptBuilder.buildChatPrompt(rawPrompt, enableThinking = hasThinking)
@@ -577,81 +1102,56 @@ class HomeSyncManager @Inject constructor(
                             thinkingTokens = 1024,
                             answerTokens = 256,
                             thinkingCallback = { token ->
-                                _syncState.value = _syncState.value.copy(
-                                    thinkingOutput = _syncState.value.thinkingOutput + token
-                                )
+                                updateRunState(runId) { state ->
+                                    state.copy(
+                                        thinkingOutput =
+                                            state.thinkingOutput + token
+                                    )
+                                }
                             },
                             jsonCallback = { token ->
-                                _syncState.value = _syncState.value.copy(
-                                    currentStageIndex = 2,
-                                    jsonOutput = _syncState.value.jsonOutput + token
-                                )
+                                updateRunState(runId) { state ->
+                                    state.copy(
+                                        currentStageIndex = 2,
+                                        jsonOutput = state.jsonOutput + token
+                                    )
+                                }
                             }
                         )
                     )
+                    ensureRunCanContinue(runId)
 
                     when (result) {
                         is SlmExtractionResult.Success ->
-                            persistSuccessfulExtraction(index, result)
+                            persistSuccessfulExtraction(index, result, runId)
                         is SlmExtractionResult.Null ->
-                            updateItemStatus(index, "filtered_out")
+                            updateItemStatus(index, "filtered_out", runId)
                         is SlmExtractionResult.Error -> {
                             Log.e(TAG, "SLM extraction failed: ${result.message}")
-                            updateItemStatus(index, "error")
+                            updateItemStatus(index, "error", runId)
                         }
                         is SlmExtractionResult.Stopped ->
-                            updateItemStatus(index, "error")
+                            updateItemStatus(index, "error", runId)
                     }
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
+                    ensureRunCanContinue(runId)
                     Log.e(TAG, "Failed syncing an SMS candidate", e)
-                    updateItemStatus(index, "error")
+                    updateItemStatus(index, "error", runId)
                 }
-                index++
-            }
-
-            _syncState.value = _syncState.value.copy(
-                status = HomeSyncState.Status.DONE,
-                currentIndex = null,
-                currentStageIndex = null,
-                syncError = null
-            )
-            val failedCount = _syncState.value.queue.count {
-                it.status == "error"
-            }
-            if (failedCount > 0) {
-                manualProcessingFailureError(failedCount)?.let { error ->
-                    recordManualOperationError(
-                        code = error.code,
-                        message = error.message,
-                        actionLabel = error.actionLabel
-                    )
-                }
-            } else {
-                clearManualOperationError()
             }
         } catch (e: CancellationException) {
-            val queue = _syncState.value.queue.toMutableList()
-            _syncState.value.currentIndex?.let { index ->
-                if (index in queue.indices && queue[index].status == "syncing") {
-                    queue[index].status = "pending"
-                }
+            if (runId == null) {
+                settleUnscopedCancellation()
             }
-            _syncState.value = _syncState.value.copy(
-                status = HomeSyncState.Status.IDLE,
-                queue = queue,
-                currentIndex = null,
-                currentStageIndex = null
-            )
-            recordManualOperationError(
-                code = "MANUAL_PROCESSING_INTERRUPTED",
-                message =
-                    "Manual processing stopped. Completed saves remain available.",
-                actionLabel = "Scan recent messages"
-            )
             throw e
         } catch (e: Exception) {
+            if (isServiceStopRequested(runId)) {
+                throw CancellationException(
+                    "Manual SMS processing was stopped"
+                ).apply { initCause(e) }
+            }
             Log.e(TAG, "Error in manual sync process", e)
             recordManualOperationError(
                 code = "MANUAL_SMS_PROCESSING_FAILED",
@@ -659,13 +1159,16 @@ class HomeSyncManager @Inject constructor(
                     e.message ?: "Manual SMS processing could not finish.",
                 actionLabel = "Scan recent messages"
             )
-            _syncState.value = _syncState.value.copy(
-                status = HomeSyncState.Status.DONE,
-                currentIndex = null,
-                currentStageIndex = null,
-                syncError =
-                    e.message ?: "Manual SMS processing could not finish."
-            )
+            val errorPublished = updateRunState(runId) { state ->
+                state.copy(
+                    status = HomeSyncState.Status.DONE,
+                    currentIndex = null,
+                    currentStageIndex = null,
+                    syncError =
+                        e.message ?: "Manual SMS processing could not finish."
+                )
+            }
+            if (!errorPublished) ensureRunCanContinue(runId)
         } finally {
             withContext(NonCancellable) {
                 lease?.release()
@@ -673,44 +1176,73 @@ class HomeSyncManager @Inject constructor(
         }
     }
 
-    private fun updateItemStatus(index: Int, status: String) {
-        val queue = _syncState.value.queue.toMutableList()
-        queue[index] = queue[index].withPrivacySafeStatus(status)
+    private fun updateItemStatus(
+        index: Int,
+        status: String,
+        runId: String?
+    ) {
         val shouldDiscardTransientOutput =
             status in SOURCE_EVIDENCE_DISCARDED_STATUSES
-        _syncState.value = _syncState.value.copy(
-            queue = queue,
-            thinkingOutput = if (shouldDiscardTransientOutput) {
-                ""
-            } else {
-                _syncState.value.thinkingOutput
-            },
-            jsonOutput = if (shouldDiscardTransientOutput) {
-                ""
-            } else {
-                _syncState.value.jsonOutput
-            }
-        )
-        recordManualProcessingProgress(queue)
+        val updated = updateRunState(runId) { state ->
+            val queue = state.queue.toMutableList()
+            if (index !in queue.indices) return@updateRunState state
+            queue[index] = queue[index].withPrivacySafeStatus(status)
+            state.copy(
+                queue = queue,
+                thinkingOutput = if (shouldDiscardTransientOutput) {
+                    ""
+                } else {
+                    state.thinkingOutput
+                },
+                jsonOutput = if (shouldDiscardTransientOutput) {
+                    ""
+                } else {
+                    state.jsonOutput
+                }
+            )
+        }
+        if (updated) {
+            recordManualProcessingProgressSafely(_syncState.value.queue)
+        }
     }
 
     private suspend fun persistSuccessfulExtraction(
         index: Int,
-        result: SlmExtractionResult.Success
+        result: SlmExtractionResult.Success,
+        runId: String?
     ) {
         // Parsing and database work happen after the native request completes.
-        _syncState.value = _syncState.value.copy(currentStageIndex = 3)
         val parsed = extractionParser.parse(result.json)
-        val queue = _syncState.value.queue.toMutableList()
-        val item = queue[index]
+        val item = _syncState.value.queue[index]
 
         if (parsed == null) {
-            queue[index] = item.withPrivacySafeStatus("filtered_out")
-        } else {
-            val bank = inferBankFromSender(item.sender)
-            val merchant = parsed.counterparty
-                ?.takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
-                ?: if (bank != "Unknown Account") "Transaction ($bank)" else "Unknown Merchant"
+            ensureRunCanContinue(runId)
+            updateItemStatus(index, "filtered_out", runId)
+            return
+        }
+
+        val bank = inferBankFromSender(item.sender)
+        val merchant = parsed.counterparty
+            ?.takeIf {
+                it.isNotBlank() && !it.equals("null", ignoreCase = true)
+            }
+            ?: if (bank != "Unknown Account") {
+                "Transaction ($bank)"
+            } else {
+                "Unknown Merchant"
+            }
+
+        // This is the commit boundary for one SMS. A stop immediately before
+        // it leaves the item pending. Once entered, account resolution and the
+        // transaction insert finish together with their in-memory settlement.
+        ensureRunCanContinue(runId)
+        val boundaryPublished = updateRunState(runId) { state ->
+            state.copy(currentStageIndex = 3)
+        }
+        if (!boundaryPublished) {
+            ensureRunCanContinue(runId)
+        }
+        withContext(NonCancellable) {
             val account = parsed.account?.let {
                 accountRepository.getOrCreate(it, bank, "auto-extracted")
             } ?: accountRepository.ensureDefault()
@@ -736,95 +1268,35 @@ class HomeSyncManager @Inject constructor(
             } else {
                 "already_saved"
             }
-            queue[index] = item.copy(
-                parsedAmount = parsed.amount.takeIf { insertion.inserted },
-                parsedMerchant = merchant.takeIf { insertion.inserted }
-            ).withPrivacySafeStatus(terminalStatus)
-        }
-
         val perf = result.perf?.let {
             "${"%.1f".format(it.tokensPerSecond)} tok/s • ${it.tEvalMs}ms"
         } ?: "Done"
-        _syncState.value = _syncState.value.copy(
-            queue = queue,
-            activeSmsPerformance = perf,
-            // Model output can echo source evidence. The parsed display
-            // summary above is all Home needs once processing is terminal.
-            thinkingOutput = "",
-            jsonOutput = ""
-        )
-        recordManualProcessingProgress(queue)
-    }
-
-    suspend fun queueIncomingSms(
-        address: String,
-        body: String,
-        date: Long
-    ): IncomingSmsQueueResult = withContext(Dispatchers.IO) {
-        val flowLease = appFlowCoordinator.tryEnter(SlmRuntimeOwner.HOME_SYNC)
-            ?: return@withContext IncomingSmsQueueResult.ADMISSION_PAUSED
-        try {
-            val onboardingComplete = context
-                .getSharedPreferences(APP_SETTINGS, Context.MODE_PRIVATE)
-                .getBoolean(ONBOARDING_COMPLETED, false)
-            if (!onboardingComplete) {
-                return@withContext IncomingSmsQueueResult.IGNORED
+        val stateUpdated = updateRunState(
+            runId = runId,
+            allowCancellationRequested = true
+        ) { state ->
+            val latestQueue = state.queue.toMutableList()
+            if (index !in latestQueue.indices) {
+                return@updateRunState state
             }
-            val isTransaction = smsFilterPipeline.isTransactional(address, body)
-            if (!isTransaction) {
-                return@withContext IncomingSmsQueueResult.IGNORED
-            }
-            val sourceIdentity = SmsSourceIdentity.androidSms(
-                providerMessageId = null,
-                sender = address,
-                body = body,
-                sourceTimestamp = date,
-                messageType = 1
+            latestQueue[index] = item.copy(
+                parsedAmount = parsed.amount.takeIf { insertion.inserted },
+                parsedMerchant = merchant.takeIf { insertion.inserted }
+            ).withPrivacySafeStatus(terminalStatus)
+            state.copy(
+                queue = latestQueue,
+                activeSmsPerformance = perf,
+                // Model output can echo source evidence. The parsed display
+                // summary above is all Home needs once processing is terminal.
+                thinkingOutput = "",
+                jsonOutput = ""
             )
-            if (transactionRepository.exists(sourceIdentity)) {
-                Log.i(
-                    TAG,
-                    "Transaction for incoming SMS source already exists. Skipping."
-                )
-                return@withContext IncomingSmsQueueResult.IGNORED
-            }
-
-            val queue = _syncState.value.queue.toMutableList()
-            if (
-                queue.any {
-                    sameQueuedSmsSource(it.sourceIdentity, sourceIdentity)
-                }
-            ) {
-                Log.i(TAG, "Incoming SMS source is already queued. Skipping.")
-                return@withContext IncomingSmsQueueResult.IGNORED
-            }
-            queue += SyncSmsItem(
-                id = sourceIdentity.opaqueCandidateKey,
-                sender = address,
-                body = body,
-                date = date,
-                sourceIdentity = sourceIdentity,
-                status = "pending"
-            )
-            val currentState = _syncState.value
-            _syncState.value = if (currentState.status == HomeSyncState.Status.DONE) {
-                currentState.copy(
-                    status = HomeSyncState.Status.IDLE,
-                    queue = queue,
-                    currentIndex = null,
-                    currentStageIndex = null,
-                    thinkingOutput = "",
-                    jsonOutput = "",
-                    activeSmsPerformance = null
-                )
-            } else {
-                currentState.copy(queue = queue)
-            }
-            IncomingSmsQueueResult.QUEUED_TRANSACTION
-        } finally {
-            withContext(NonCancellable) {
-                flowLease.release()
-            }
+        }
+        if (stateUpdated) {
+            // The ledger handoff is irreversible. A best-effort progress
+            // snapshot must never relabel a successfully saved row as failed.
+            recordManualProcessingProgressSafely(_syncState.value.queue)
+        }
         }
     }
 
@@ -833,21 +1305,74 @@ class HomeSyncManager @Inject constructor(
         message: String,
         actionLabel: String
     ) {
-        if (
-            !manualRecentSyncAvailable(
-                setupImportStore.state.value.status
-            )
-        ) {
+        try {
+            if (
+                !manualRecentSyncAvailable(
+                    setupImportStore.state.value.status
+                )
+            ) {
+                return
+            }
+            setupImportStore.update {
+                it.copy(
+                    actionableError = SetupActionableError(
+                        code = code,
+                        message = message,
+                        actionLabel = actionLabel
+                    )
+                )
+            }
+        } catch (error: Exception) {
+            runCatching {
+                Log.e(TAG, "Could not persist manual operation error", error)
+            }
+        }
+    }
+
+    private fun recordManualProcessingInterrupted() {
+        recordManualOperationError(
+            code = "MANUAL_PROCESSING_INTERRUPTED",
+            message =
+                "Manual processing stopped. Completed saves remain available.",
+            actionLabel = "Scan recent messages"
+        )
+    }
+
+    /**
+     * A Stop that arrives during the final commit may leave no work to retry.
+     * Do not manufacture an attention card after every candidate is terminal.
+     */
+    private fun recordManualCancellationOutcome(queue: List<SyncSmsItem>) {
+        if (queue.any { it.status == "pending" || it.status == "syncing" }) {
+            recordManualProcessingInterrupted()
             return
         }
-        setupImportStore.update {
-            it.copy(
-                actionableError = SetupActionableError(
-                    code = code,
-                    message = message,
-                    actionLabel = actionLabel
-                )
+        val failedCount = queue.count { it.status == "error" }
+        val failure = manualProcessingFailureError(failedCount)
+        if (failure != null) {
+            recordManualOperationError(
+                code = failure.code,
+                message = failure.message,
+                actionLabel = failure.actionLabel
             )
+        } else {
+            clearManualOperationError()
+        }
+    }
+
+    private fun recordManualCancellationOutcomeSafely(
+        queue: List<SyncSmsItem>
+    ) {
+        try {
+            recordManualCancellationOutcome(queue)
+        } catch (error: Exception) {
+            runCatching {
+                Log.e(
+                    TAG,
+                    "Could not persist manual cancellation outcome",
+                    error
+                )
+            }
         }
     }
 
@@ -874,9 +1399,16 @@ class HomeSyncManager @Inject constructor(
     }
 
     private fun recordManualProcessingProgress(queue: List<SyncSmsItem>) {
-        val expectedScanCompletedAt = recentScanCompletedAtMillis ?: return
-        if (recentScanCandidateKeys.isEmpty()) return
-        val tracked = queue.filter { it.id in recentScanCandidateKeys }
+        val tracking = synchronized(recentScanTrackingLock) {
+            val completedAt = recentScanCompletedAtMillis
+                ?: return@synchronized null
+            if (recentScanCandidateKeys.isEmpty()) {
+                return@synchronized null
+            }
+            completedAt to recentScanCandidateKeys
+        } ?: return
+        val expectedScanCompletedAt = tracking.first
+        val tracked = queue.filter { it.id in tracking.second }
         val processed = tracked.count { it.status in TERMINAL_ITEM_STATUSES }
         val saved = tracked.count {
             it.status == "synced" || it.status == "already_saved"
@@ -902,24 +1434,54 @@ class HomeSyncManager @Inject constructor(
 
     private fun publishRecentPermissionNeeded() {
         setupImportStore.reconcilePermission(granted = false)
-        _syncState.value = _syncState.value.copy(
-            status = HomeSyncState.Status.IDLE,
-            recentScanOutcome =
-                HomeSyncState.RecentScanOutcome.PERMISSION_NEEDED,
-            scanError = "SMS access is required to scan recent alerts."
-        )
+        _syncState.update { state ->
+            state.copy(
+                status = if (state.cancellationRequested) {
+                    HomeSyncState.Status.CANCELLING
+                } else {
+                    HomeSyncState.Status.IDLE
+                },
+                recentScanOutcome =
+                    HomeSyncState.RecentScanOutcome.PERMISSION_NEEDED,
+                scanError = "SMS access is required to scan recent alerts."
+            )
+        }
+    }
+
+    private fun recordManualProcessingProgressSafely(
+        queue: List<SyncSmsItem>
+    ) {
+        try {
+            recordManualProcessingProgress(queue)
+        } catch (error: Exception) {
+            // A stale durable counter causes a safe deduplicated rediscovery
+            // after restart; it must not reverse a terminal in-memory result.
+            runCatching {
+                Log.e(
+                    TAG,
+                    "Could not persist recent SMS processing counters",
+                    error
+                )
+            }
+        }
     }
 
     private fun clearManualOperationError() {
-        val code = setupImportStore.state.value.actionableError?.code
-        if (
-            code?.startsWith("RECENT_") != true &&
-            code?.startsWith("MANUAL_") != true
-        ) {
-            return
-        }
-        setupImportStore.update {
-            it.copy(actionableError = null)
+        try {
+            val code = setupImportStore.state.value.actionableError?.code
+            if (
+                code?.startsWith("RECENT_") != true &&
+                code?.startsWith("MANUAL_") != true
+            ) {
+                return
+            }
+            setupImportStore.update {
+                it.copy(actionableError = null)
+            }
+        } catch (error: Exception) {
+            runCatching {
+                Log.e(TAG, "Could not clear manual operation error", error)
+            }
         }
     }
 
@@ -936,15 +1498,43 @@ class HomeSyncManager @Inject constructor(
     }
 
     fun resetState() {
-        recentScanCandidateKeys = emptySet()
-        recentScanCompletedAtMillis = null
-        _syncState.value = HomeSyncState()
+        synchronized(recentScanTrackingLock) {
+            while (true) {
+                val current = _syncState.value
+                if (
+                    current.status != HomeSyncState.Status.DONE ||
+                    current.activeRunId != null
+                ) {
+                    return
+                }
+                if (_syncState.compareAndSet(current, HomeSyncState())) {
+                    recentScanCandidateKeys = emptySet()
+                    recentScanCompletedAtMillis = null
+                    return
+                }
+            }
+        }
+    }
+
+    /** Unconditional reset used only inside the admitted financial erase. */
+    fun resetStateForErase() {
+        synchronized(recentScanTrackingLock) {
+            recentScanCandidateKeys = emptySet()
+            recentScanCompletedAtMillis = null
+            _syncState.value = HomeSyncState()
+        }
     }
 
     private companion object {
         const val TAG = "HomeSyncManager"
         const val APP_SETTINGS = ".app_settings"
         const val ONBOARDING_COMPLETED = "onboarding_completed"
+        const val MANUAL_SERVICE_START_ACK_TIMEOUT_MILLIS = 15_000L
+        val ACTIVE_SERVICE_STATUSES = setOf(
+            HomeSyncState.Status.SCANNING,
+            HomeSyncState.Status.SYNCING,
+            HomeSyncState.Status.CANCELLING
+        )
         val TERMINAL_ITEM_STATUSES = setOf(
             "synced",
             "already_saved",
@@ -952,6 +1542,39 @@ class HomeSyncManager @Inject constructor(
             "error"
         )
     }
+}
+
+internal fun manualSyncStopMatches(
+    activeRunId: String?,
+    requestedRunId: String?
+): Boolean =
+    !activeRunId.isNullOrBlank() &&
+        !requestedRunId.isNullOrBlank() &&
+        activeRunId == requestedRunId
+
+internal fun settledManualSyncCancellation(
+    state: HomeSyncState,
+    requestedRunId: String?
+): HomeSyncState? {
+    if (!manualSyncStopMatches(state.activeRunId, requestedRunId)) return null
+    return state.copy(
+        status = HomeSyncState.Status.IDLE,
+        activeRunId = null,
+        cancellationRequested = false,
+        queue = state.queue.map { item ->
+            if (item.status == "syncing") {
+                item.copy(status = "pending")
+            } else {
+                item
+            }
+        },
+        currentIndex = null,
+        currentStageIndex = null,
+        thinkingOutput = "",
+        jsonOutput = "",
+        activeSmsPerformance = null,
+        syncError = null
+    )
 }
 
 internal fun SetupImportState.withSuccessfulRecentScan(

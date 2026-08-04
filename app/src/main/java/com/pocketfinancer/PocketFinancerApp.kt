@@ -1,9 +1,7 @@
 package com.pocketfinancer
 
-import android.app.Activity
 import android.app.Application
 import android.content.Context
-import android.os.Bundle
 import android.util.Log
 import com.pocketfinancer.hardware.DeviceCapabilities
 import com.pocketfinancer.hardware.SlmTier
@@ -43,11 +41,6 @@ class PocketFinancerApp : Application() {
     private val applicationScope =
         CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    private var activeActivities = 0
-
-    val isAppInForeground: Boolean
-        get() = activeActivities > 0
-
     override fun onCreate() {
         super.onCreate()
         recoverInterruptedLocalFinancialErase()
@@ -61,19 +54,6 @@ class PocketFinancerApp : Application() {
                 "Local financial erase recovery is still pending; startup work remains locked"
             )
         }
-        registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
-            override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {}
-            override fun onActivityStarted(activity: Activity) {
-                activeActivities++
-            }
-            override fun onActivityResumed(activity: Activity) {}
-            override fun onActivityPaused(activity: Activity) {}
-            override fun onActivityStopped(activity: Activity) {
-                activeActivities--
-            }
-            override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
-            override fun onActivityDestroyed(activity: Activity) {}
-        })
     }
 
     /**

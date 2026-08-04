@@ -3,7 +3,10 @@ package com.pocketfinancer.ui.onboarding
 import com.pocketfinancer.setup.AdaptiveHistoryScanPolicy
 import com.pocketfinancer.setup.SetupImportState
 import com.pocketfinancer.setup.SetupImportStatus
+import com.pocketfinancer.setup.SetupPauseReason
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertSame
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class OnboardingImportOutcomeTest {
@@ -148,7 +151,11 @@ class OnboardingImportOutcomeTest {
     fun `terminal initial import drops transient candidate diagnostics`() {
         val terminal = scrubCompletedOnboardingState(
             OnboardingSyncManager.OnboardingSyncState(
+                runId = "finished-run",
                 isRunning = true,
+                isCancelling = true,
+                isCancellationAllowed = true,
+                isPreparingHistoricalModel = true,
                 syncMessage = "Analyzing a sender",
                 syncLogs = listOf("candidate detail")
             )
@@ -157,5 +164,84 @@ class OnboardingImportOutcomeTest {
         assertEquals(OnboardingStep.COMPLETED, terminal.step)
         assertEquals("Setup finished", terminal.syncMessage)
         assertEquals(emptyList<String>(), terminal.syncLogs)
+        assertEquals(null, terminal.runId)
+        assertEquals(false, terminal.isCancelling)
+        assertEquals(false, terminal.isCancellationAllowed)
+        assertEquals(false, terminal.isPreparingHistoricalModel)
+    }
+
+    @Test
+    fun `user pause preserves committed counts coverage and active resume bound`() {
+        val active = SetupImportState(
+            status = SetupImportStatus.PROCESSING,
+            coverageStartMillis = 1_000L,
+            coverageEndMillis = 2_000L,
+            coverageWindowDays = 30,
+            activeScanWindowDays = 90,
+            activeScanProviderMaxDateMillis = 2_500L,
+            providerMessageCount = 48,
+            eligibleCandidateCount = 6,
+            processedCount = 3,
+            savedCount = 2,
+            rejectedCount = 1,
+            failedCount = 0,
+            lastSuccessfulScanMillis = 2_100L,
+            modelDownloadConfirmed = true,
+            modelPrepared = true
+        )
+
+        val paused = pauseHistoricalImportForUser(active)
+        val repeated = pauseHistoricalImportForUser(paused)
+
+        assertEquals(SetupImportStatus.PAUSED, paused.status)
+        assertEquals(SetupPauseReason.USER_REQUESTED, paused.pauseReason)
+        assertEquals(1_000L, paused.coverageStartMillis)
+        assertEquals(2_000L, paused.coverageEndMillis)
+        assertEquals(30, paused.coverageWindowDays)
+        assertEquals(90, paused.activeScanWindowDays)
+        assertEquals(2_500L, paused.activeScanProviderMaxDateMillis)
+        assertEquals(48, paused.providerMessageCount)
+        assertEquals(6, paused.eligibleCandidateCount)
+        assertEquals(3, paused.processedCount)
+        assertEquals(2, paused.savedCount)
+        assertEquals(1, paused.rejectedCount)
+        assertTrue(paused.actionableError!!.message.contains("Completed saves"))
+        assertTrue(paused.actionableError!!.message.contains("rediscover"))
+        assertSame(paused, repeated)
+    }
+
+    @Test
+    fun `user pause never overwrites permission loss`() {
+        val permissionNeeded = SetupImportState(
+            status = SetupImportStatus.PERMISSION_NEEDED,
+            pauseReason = SetupPauseReason.PERMISSION_REVOKED,
+            activeScanWindowDays = 90,
+            savedCount = 2
+        )
+
+        assertSame(
+            permissionNeeded,
+            pauseHistoricalImportForUser(permissionNeeded)
+        )
+    }
+
+    @Test
+    fun `persistence failure fallback is paused and truthfully actionable`() {
+        val fallback = historicalStopPersistenceFallback(
+            SetupImportState(
+                status = SetupImportStatus.PROCESSING,
+                processedCount = 3,
+                savedCount = 2
+            )
+        )
+
+        assertEquals(SetupImportStatus.PAUSED, fallback.status)
+        assertEquals(SetupPauseReason.USER_REQUESTED, fallback.pauseReason)
+        assertEquals(3, fallback.processedCount)
+        assertEquals(2, fallback.savedCount)
+        assertEquals(
+            "SMS_STOP_STATE_NOT_SAVED",
+            fallback.actionableError?.code
+        )
     }
 }

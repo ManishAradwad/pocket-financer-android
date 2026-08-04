@@ -43,6 +43,8 @@ fun TelemetryLogsViewer(
     parsedOutput: String,
     performanceText: String?,
     activeModelName: String? = null,
+    isStopping: Boolean = false,
+    onStop: (() -> Unit)? = null,
     onClose: () -> Unit
 ) {
     var expandedStage by remember { mutableStateOf<Int?>(null) }
@@ -101,8 +103,50 @@ fun TelemetryLogsViewer(
                     .background(M3_SurfaceContainerHigh, RoundedCornerShape(100))
                     .border(BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.3f)), RoundedCornerShape(100))
                     .clickable { onClose() }
-                    .padding(horizontal = 10.dp, vertical = 4.dp)
+                    .defaultMinSize(minHeight = 48.dp)
+                    .padding(horizontal = 12.dp)
+                    .wrapContentHeight(Alignment.CenterVertically)
             )
+        }
+
+
+        if (isActive && onStop != null) {
+            OutlinedButton(
+                onClick = onStop,
+                enabled = !isStopping,
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp),
+                colors = ButtonDefaults.outlinedButtonColors(
+                    contentColor = M3_Error,
+                    disabledContentColor = M3_OnSurfaceVariant
+                ),
+                border = BorderStroke(
+                    1.dp,
+                    if (isStopping) {
+                        M3_OutlineVariant
+                    } else {
+                        M3_Error.copy(alpha = 0.55f)
+                    }
+                )
+            ) {
+                Icon(
+                    imageVector = if (isStopping) {
+                        Icons.Rounded.HourglassTop
+                    } else {
+                        Icons.Rounded.StopCircle
+                    },
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    if (isStopping) {
+                        "Stopping safely..."
+                    } else {
+                        "Stop SMS processing"
+                    }
+                )
+            }
         }
 
         // Hardware Runtime Banner

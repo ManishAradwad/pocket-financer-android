@@ -3,8 +3,10 @@ package com.pocketfinancer.ui.transactions
 import com.pocketfinancer.ui.home.HomeSyncState
 import com.pocketfinancer.ui.home.SyncSmsItem
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ActiveSyncCardUiModelTest {
@@ -121,6 +123,50 @@ class ActiveSyncCardUiModelTest {
         assertEquals(
             "Processing message 2 of 2",
             state.toActiveSyncCardUiModel(active)?.title
+        )
+    }
+
+    @Test
+    fun `cancelling state remains visible and explains commit drain`() {
+        val active = sms(status = "syncing")
+        val state = HomeSyncState(
+            status = HomeSyncState.Status.CANCELLING,
+            cancellationRequested = true,
+            queue = listOf(active),
+            currentIndex = 0,
+            currentStageIndex = 3
+        )
+
+        assertSame(active, state.syncCardItem())
+        val model = state.toActiveSyncCardUiModel(active)
+        assertEquals("Stopping SMS processing", model?.title)
+        assertEquals("STOPPING", model?.badge)
+        assertEquals("Finishing current save", model?.stepValue)
+        assertEquals("View stopping details", model?.actionLabel)
+    }
+
+    @Test
+    fun `empty ledger still shows active scan and stopping controls`() {
+        assertFalse(
+            shouldShowTransactionsEmptyState(
+                hasTransactions = false,
+                hasSyncCard = false,
+                syncStatus = HomeSyncState.Status.SCANNING
+            )
+        )
+        assertFalse(
+            shouldShowTransactionsEmptyState(
+                hasTransactions = false,
+                hasSyncCard = false,
+                syncStatus = HomeSyncState.Status.CANCELLING
+            )
+        )
+        assertTrue(
+            shouldShowTransactionsEmptyState(
+                hasTransactions = false,
+                hasSyncCard = false,
+                syncStatus = HomeSyncState.Status.IDLE
+            )
         )
     }
 

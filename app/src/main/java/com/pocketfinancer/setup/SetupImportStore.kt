@@ -93,6 +93,22 @@ class SetupImportStore private constructor(
             if (current.status != SetupImportStatus.PERMISSION_NEEDED) {
                 preferences.edit()
                     .putString(KEY_STATUS_BEFORE_PERMISSION_LOSS, current.status.name)
+                    .putNullableString(
+                        KEY_PAUSE_REASON_BEFORE_PERMISSION_LOSS,
+                        current.pauseReason?.name
+                    )
+                    .putNullableString(
+                        KEY_ERROR_CODE_BEFORE_PERMISSION_LOSS,
+                        current.actionableError?.code
+                    )
+                    .putNullableString(
+                        KEY_ERROR_MESSAGE_BEFORE_PERMISSION_LOSS,
+                        current.actionableError?.message
+                    )
+                    .putNullableString(
+                        KEY_ERROR_ACTION_BEFORE_PERMISSION_LOSS,
+                        current.actionableError?.actionLabel
+                    )
                     .commitOrThrow()
             }
             val next = current.copy(
@@ -113,23 +129,54 @@ class SetupImportStore private constructor(
         val previous = preferences
             .getString(KEY_STATUS_BEFORE_PERMISSION_LOSS, null)
             ?.toEnumOrNull<SetupImportStatus>()
+        val previousPauseReason = preferences
+            .getString(KEY_PAUSE_REASON_BEFORE_PERMISSION_LOSS, null)
+            ?.toEnumOrNull<SetupPauseReason>()
+        val previousActionableError = preferences
+            .getString(KEY_ERROR_CODE_BEFORE_PERMISSION_LOSS, null)
+            ?.let { code ->
+                SetupActionableError(
+                    code = code,
+                    message = preferences.getString(
+                        KEY_ERROR_MESSAGE_BEFORE_PERMISSION_LOSS,
+                        ""
+                    ).orEmpty(),
+                    actionLabel = preferences.getString(
+                        KEY_ERROR_ACTION_BEFORE_PERMISSION_LOSS,
+                        ""
+                    ).orEmpty()
+                )
+            }
+        val previousWasActive = previous in SetupImportState.ACTIVE_STATUSES
         val recoveredStatus = when {
             previous == null -> SetupImportStatus.NOT_STARTED
-            previous in SetupImportState.ACTIVE_STATUSES -> SetupImportStatus.PAUSED
-            previous == SetupImportStatus.PERMISSION_NEEDED -> SetupImportStatus.NOT_STARTED
+            previousWasActive -> SetupImportStatus.PAUSED
+            previous == SetupImportStatus.PERMISSION_NEEDED ->
+                SetupImportStatus.NOT_STARTED
             else -> previous
         }
         val next = current.copy(
             status = recoveredStatus,
-            pauseReason = if (previous in SetupImportState.ACTIVE_STATUSES) {
-                SetupPauseReason.INTERRUPTED
-            } else {
-                null
+            pauseReason = when {
+                previousWasActive -> SetupPauseReason.INTERRUPTED
+                previous == null ||
+                    previous == SetupImportStatus.PERMISSION_NEEDED -> null
+                else -> previousPauseReason
             },
-            actionableError = null
+            actionableError = when {
+                previousWasActive -> SetupActionableError(
+                    code = ERROR_INTERRUPTED,
+                    message =
+                        "Setup paused when Pocket Financer stopped. " +
+                            "Your completed work is still saved.",
+                    actionLabel = "Resume setup"
+                )
+                previous == null ||
+                    previous == SetupImportStatus.PERMISSION_NEEDED -> null
+                else -> previousActionableError
+            }
         )
-        persist(next)
-        preferences.edit().remove(KEY_STATUS_BEFORE_PERMISSION_LOSS).commitOrThrow()
+        persist(next, clearPermissionRecoveryStatus = true)
         return next
     }
 
@@ -141,6 +188,17 @@ class SetupImportStore private constructor(
         persist(next)
         return next
     }
+
+    /**
+     * Publishes a truthful in-process fallback after durable persistence has
+     * already failed. The next process start still repairs any persisted
+     * active state to INTERRUPTED; this prevents the current UI from claiming
+     * that stopped work is still running.
+     */
+    @Synchronized
+    internal fun publishVolatilePersistenceFallback(
+        state: SetupImportState
+    ): SetupImportState = state.normalized().also { _state.value = it }
 
     fun setModelDownloadConfirmed(confirmed: Boolean): SetupImportState =
         update { it.copy(modelDownloadConfirmed = confirmed) }
@@ -481,7 +539,12 @@ class SetupImportStore private constructor(
             editor.remove(KEY_SELECTED_SLM_ID)
         }
         if (clearPermissionRecoveryStatus) {
-            editor.remove(KEY_STATUS_BEFORE_PERMISSION_LOSS)
+            editor
+                .remove(KEY_STATUS_BEFORE_PERMISSION_LOSS)
+                .remove(KEY_PAUSE_REASON_BEFORE_PERMISSION_LOSS)
+                .remove(KEY_ERROR_CODE_BEFORE_PERMISSION_LOSS)
+                .remove(KEY_ERROR_MESSAGE_BEFORE_PERMISSION_LOSS)
+                .remove(KEY_ERROR_ACTION_BEFORE_PERMISSION_LOSS)
         }
         if (clearLocalFinancialEraseMarker) {
             editor.remove(KEY_LOCAL_FINANCIAL_ERASE_PENDING)
@@ -522,11 +585,19 @@ class SetupImportStore private constructor(
         const val ERROR_INTERRUPTED = "INTERRUPTED"
         const val ERROR_SMS_PERMISSION_REQUIRED = "SMS_PERMISSION_REQUIRED"
 
-        private const val SCHEMA_VERSION = 5
+        private const val SCHEMA_VERSION = 6
         private const val KEY_SCHEMA_VERSION = "setup_import_schema_version"
         private const val KEY_STATUS = "setup_import_status"
         private const val KEY_STATUS_BEFORE_PERMISSION_LOSS =
             "setup_import_status_before_permission_loss"
+        private const val KEY_PAUSE_REASON_BEFORE_PERMISSION_LOSS =
+            "setup_import_pause_reason_before_permission_loss"
+        private const val KEY_ERROR_CODE_BEFORE_PERMISSION_LOSS =
+            "setup_import_error_code_before_permission_loss"
+        private const val KEY_ERROR_MESSAGE_BEFORE_PERMISSION_LOSS =
+            "setup_import_error_message_before_permission_loss"
+        private const val KEY_ERROR_ACTION_BEFORE_PERMISSION_LOSS =
+            "setup_import_error_action_before_permission_loss"
         private const val KEY_COVERAGE_START = "setup_import_coverage_start"
         private const val KEY_COVERAGE_END = "setup_import_coverage_end"
         private const val KEY_COVERAGE_WINDOW_DAYS =

@@ -84,7 +84,7 @@ class TransactionRepository @Inject constructor(
             sourceFingerprint = source.fallbackFingerprint,
             sourceAlternateFingerprint = source.alternateFingerprint
         )
-        val persisted = appDatabase.withTransaction {
+        return appDatabase.withTransaction {
             val existing = transactionDao.findBySource(
                 connector = source.connector,
                 messageId = source.messageId,
@@ -127,15 +127,15 @@ class TransactionRepository @Inject constructor(
             )?.let { matchingCandidate ->
                 candidateDao.deleteByKey(matchingCandidate.candidateKey)
             }
-            (
-                transactionDao.getById(owned.id)
-                    ?: error("Persisted transaction disappeared")
-                ) to inserted
+            val persisted = transactionDao.getById(owned.id)
+                ?: error("Persisted transaction disappeared")
+            // Convert before Room commits. If a corrupt row cannot be mapped,
+            // the source handoff rolls back instead of throwing after an insert.
+            InsertResult(
+                transaction = persisted.toDomain(),
+                inserted = inserted
+            )
         }
-        return InsertResult(
-            transaction = persisted.first.toDomain(),
-            inserted = persisted.second
-        )
     }
 
     suspend fun updateTransaction(

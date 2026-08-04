@@ -66,9 +66,70 @@ data class HomeUiState(
     val modelDownloadState: ModelDownloader.DownloadState = ModelDownloader.DownloadState(),
     val upgradeRecommendation: ModelUpgradeRecommendation = ModelUpgradeRecommendation(),
     val setupImportState: SetupImportState = SetupImportState(),
+    val historicalImportCancelling: Boolean = false,
+    val historicalImportCancellationAllowed: Boolean = false,
+    val historicalImportRunning: Boolean = false,
+    val historicalImportFinishing: Boolean = false,
+    val historicalImportPreparingModel: Boolean = false,
+    val manualSmsOperationRunning: Boolean = false,
+    val manualOperationStartPending: Boolean = false,
     val automaticProcessingEnabled: Boolean =
         AutomaticProcessingPreferences.DEFAULT_ENABLED
 )
+
+/**
+ * Initial history import has one explicit phase at a time: preparation,
+ * cancellable SMS work, cancellation drain, or non-cancellable final commit.
+ */
+internal fun historicalImportIsFinishing(
+    state: OnboardingSyncManager.OnboardingSyncState
+): Boolean =
+    historicalImportIsRunning(state) &&
+        !state.isPreparingHistoricalModel &&
+        !state.isCancellationAllowed &&
+        !state.isCancelling
+
+internal fun historicalImportIsRunning(
+    state: OnboardingSyncManager.OnboardingSyncState
+): Boolean =
+    state.runPurpose == OnboardingSyncManager.RunPurpose.INITIAL_SETUP &&
+        state.isRunning
+
+/**
+ * Covers both an accepted service run and the short Android service-start
+ * handoff before [HomeSyncManager] can publish its run id.
+ */
+internal fun manualSmsOperationIsRunning(
+    state: HomeSyncState,
+    startPending: Boolean = false
+): Boolean =
+    startPending ||
+        state.activeRunId != null ||
+        state.status in setOf(
+            HomeSyncState.Status.SCANNING,
+            HomeSyncState.Status.SYNCING,
+            HomeSyncState.Status.CANCELLING
+        )
+
+internal enum class SmsProcessingStopTarget {
+    HISTORICAL,
+    MANUAL,
+    NONE
+}
+
+internal fun smsProcessingStopTarget(
+    onboardingState: OnboardingSyncManager.OnboardingSyncState,
+    manualState: HomeSyncState
+): SmsProcessingStopTarget = when {
+    historicalImportIsRunning(onboardingState) ->
+        SmsProcessingStopTarget.HISTORICAL
+    manualState.activeRunId != null &&
+        manualState.status in setOf(
+            HomeSyncState.Status.SCANNING,
+            HomeSyncState.Status.SYNCING
+        ) -> SmsProcessingStopTarget.MANUAL
+    else -> SmsProcessingStopTarget.NONE
+}
 
 @HiltViewModel
 class HomeViewModel @Inject constructor(
@@ -93,6 +154,8 @@ class HomeViewModel @Inject constructor(
 
     private val _selectedPeriod = MutableStateFlow("Day")
     val selectedPeriod: StateFlow<String> = _selectedPeriod.asStateFlow()
+    private var requestedManualServiceRunId: String? = null
+
     val uiState: StateFlow<HomeUiState> = combine(
         transactionRepository.getAllByDateDesc(),
         _selectedPeriod,
@@ -102,7 +165,8 @@ class HomeViewModel @Inject constructor(
         modelUpgradeSessionDismissalStore.dismissedTierIds,
         setupImportStore.state,
         automaticProcessingPreferences.enabled,
-        appFlowCoordinator.state
+        appFlowCoordinator.state,
+        syncManager.manualOperationReservation
     ) { flows ->
         @Suppress("UNCHECKED_CAST")
         val txs = flows[0] as List<Transaction>
@@ -115,6 +179,8 @@ class HomeViewModel @Inject constructor(
         val setupImportState = flows[6] as SetupImportState
         val automaticProcessingEnabled = flows[7] as Boolean
         val appFlowState = flows[8] as SlmAppFlowState
+        val manualOperationStartPending =
+            (flows[9] as ManualOperationReservation?) != null
 
         val periodDataMap = calculatePeriodData(txs)
         val device = deviceCapabilities.assessDevice()
@@ -179,13 +245,34 @@ class HomeViewModel @Inject constructor(
             isDismissed = recommendedSlm?.id in dismissedTierIds,
             startBlockedMessage = modelUpgradeStartBlockedMessage(
                 onboarding = onboardingSyncState,
-                otherFlowBusy = syncState.status == HomeSyncState.Status.SYNCING ||
+                otherFlowBusy = manualSmsOperationIsRunning(
+                    state = syncState,
+                    startPending = manualOperationStartPending
+                ) ||
                     downloadState.isDownloading ||
                     appFlowState.activeCount > 0 ||
                     appFlowState.admissionPaused
             )
         )
 
+        val isHistoricalRun =
+            onboardingSyncState.runPurpose ==
+                OnboardingSyncManager.RunPurpose.INITIAL_SETUP &&
+                onboardingSyncState.isRunning
+        val permissionCardVisible =
+            setupImportState.status == SetupImportStatus.PERMISSION_NEEDED
+        val manualRunCanStop =
+            syncState.activeRunId != null &&
+                syncState.status in setOf(
+                    HomeSyncState.Status.SCANNING,
+                    HomeSyncState.Status.SYNCING
+                )
+        val manualRunIsStopping =
+            syncState.status == HomeSyncState.Status.CANCELLING
+        val manualSmsOperationRunning = manualSmsOperationIsRunning(
+            state = syncState,
+            startPending = manualOperationStartPending
+        )
         HomeUiState(
             selectedPeriod = period,
             periodData = periodDataMap,
@@ -194,6 +281,25 @@ class HomeViewModel @Inject constructor(
             modelDownloadState = downloadState,
             upgradeRecommendation = upgradeRec,
             setupImportState = setupImportState,
+            historicalImportCancelling =
+                (isHistoricalRun && onboardingSyncState.isCancelling) ||
+                    (permissionCardVisible && manualRunIsStopping),
+            historicalImportCancellationAllowed =
+                (
+                    isHistoricalRun &&
+                        onboardingSyncState.isCancellationAllowed &&
+                        !onboardingSyncState.isCancelling
+                    ) ||
+                    (permissionCardVisible && manualRunCanStop),
+            historicalImportRunning = isHistoricalRun,
+            historicalImportFinishing =
+                historicalImportIsFinishing(onboardingSyncState),
+            historicalImportPreparingModel =
+                isHistoricalRun &&
+                    onboardingSyncState.isPreparingHistoricalModel &&
+                    !onboardingSyncState.isCancelling,
+            manualSmsOperationRunning = manualSmsOperationRunning,
+            manualOperationStartPending = manualOperationStartPending,
             automaticProcessingEnabled = automaticProcessingEnabled
         )
     }.stateIn(
@@ -204,6 +310,21 @@ class HomeViewModel @Inject constructor(
 
     init {
         refreshPermissionHealth()
+        viewModelScope.launch {
+            syncManager.serviceStartAcknowledgement
+                .filterNotNull()
+                .collect { acknowledgement ->
+                    val matchesRequest =
+                        acknowledgement.runId ==
+                        requestedManualServiceRunId
+                    if (matchesRequest) {
+                        requestedManualServiceRunId = null
+                    }
+                    if (matchesRequest && !acknowledgement.accepted) {
+                        showManualStartFailure()
+                    }
+                }
+        }
     }
 
     fun selectPeriod(period: String) {
@@ -211,19 +332,34 @@ class HomeViewModel @Inject constructor(
     }
 
     fun checkForUnsynced() {
-        viewModelScope.launch {
+        val reservationId = syncManager.withSmsOperationStartBoundary {
             if (
+                onboardingSyncManager.syncState.value.isRunning ||
+                manualSmsOperationIsRunning(
+                    state = syncManager.syncState.value,
+                    startPending =
+                        syncManager.manualOperationReservation.value != null
+                ) ||
                 !manualRecentSyncAvailable(
                     setupImportStore.state.value.status
                 )
             ) {
-                return@launch
-            }
-            if (!smsRepository.hasPermissions()) {
+                null
+            } else if (!smsRepository.hasPermissions()) {
                 setupImportStore.reconcilePermission(granted = false)
-                return@launch
+                null
+            } else {
+                syncManager.tryReserveRecentScan()
             }
-            syncManager.checkForUnsyncedSms()
+        }
+        if (reservationId == null) return
+
+        viewModelScope.launch {
+            try {
+                syncManager.checkForUnsyncedSms()
+            } finally {
+                syncManager.releaseManualOperationReservation(reservationId)
+            }
             val scanState = syncManager.syncState.value
             val pendingCount = scanState.queue.count { it.status == "pending" }
             val toastMsg = when (scanState.recentScanOutcome) {
@@ -251,31 +387,125 @@ class HomeViewModel @Inject constructor(
     }
 
     fun startSync() {
-        if (
-            !manualRecentSyncAvailable(
-                setupImportStore.state.value.status
+        val runId = syncManager.withSmsOperationStartBoundary {
+            if (
+                onboardingSyncManager.syncState.value.isRunning ||
+                manualSmsOperationIsRunning(
+                    state = syncManager.syncState.value,
+                    startPending =
+                        syncManager.manualOperationReservation.value != null
+                ) ||
+                !manualRecentSyncAvailable(
+                    setupImportStore.state.value.status
+                )
+            ) {
+                null
+            } else if (!smsRepository.hasPermissions()) {
+                setupImportStore.reconcilePermission(granted = false)
+                null
+            } else {
+                syncManager.tryReserveServiceStart()
+            }
+        }
+        if (runId == null) return
+        requestedManualServiceRunId = runId
+
+        try {
+            SyncService.start(context, runId)
+        } catch (_: RuntimeException) {
+            syncManager.acknowledgeServiceStart(
+                runId = runId,
+                accepted = false
+            )
+        }
+    }
+
+    private fun showManualStartFailure() {
+        android.widget.Toast.makeText(
+            context,
+            "SMS processing did not start. Please try again.",
+            android.widget.Toast.LENGTH_SHORT
+        ).show()
+    }
+
+    fun stopManualSync() {
+        requestManualSyncStop(showFailureToast = true)
+    }
+
+    fun stopSmsProcessing() {
+        // Match the operation represented by the setup card. If legacy state
+        // ever contains both runs, the visible historical Stop must never
+        // silently cancel the hidden manual run instead.
+        when (
+            smsProcessingStopTarget(
+                onboardingState = onboardingSyncManager.syncState.value,
+                manualState = syncManager.syncState.value
             )
         ) {
-            return
+            SmsProcessingStopTarget.HISTORICAL -> stopHistoricalImport()
+            SmsProcessingStopTarget.MANUAL ->
+                requestManualSyncStop(showFailureToast = true)
+            SmsProcessingStopTarget.NONE -> Unit
         }
-        if (!smsRepository.hasPermissions()) {
-            setupImportStore.reconcilePermission(granted = false)
-            return
+    }
+
+    private fun requestManualSyncStop(
+        showFailureToast: Boolean
+    ): Boolean {
+        val runId = syncManager.syncState.value.activeRunId ?: return false
+        val commandAccepted = try {
+            SyncService.requestStop(context, runId)
+        } catch (_: RuntimeException) {
+            false
         }
-        viewModelScope.launch {
-            SyncService.start(context)
+        if (!commandAccepted && showFailureToast) {
+            android.widget.Toast.makeText(
+                context,
+                "Could not request a stop. Please try again.",
+                android.widget.Toast.LENGTH_SHORT
+            ).show()
+            return false
+        }
+        if (!commandAccepted) return false
+        // Publish only after Android accepts the run-scoped command. The UI
+        // still changes immediately, without creating a rollback window in
+        // which the worker can observe a stop that was never dispatched.
+        return syncManager.requestServiceStop(runId)
+    }
+
+    fun stopHistoricalImport() {
+        val requested =
+            onboardingSyncManager.requestHistoricalImportCancellation(context)
+        if (
+            !requested &&
+            onboardingSyncManager.syncState.value.isCancellationAllowed
+        ) {
+            android.widget.Toast.makeText(
+                context,
+                "Could not request a stop. Please try again.",
+                android.widget.Toast.LENGTH_SHORT
+            ).show()
         }
     }
 
     fun refreshPermissionHealth() {
         reconcilePreparedModelAvailability()
-        setupImportStore.reconcilePermission(
-            granted = smsRepository.hasPermissions()
-        )
+        reconcileSmsPermission(smsRepository.hasPermissions())
     }
 
     fun onSmsPermissionResult(granted: Boolean) {
+        reconcileSmsPermission(granted)
+    }
+
+    private fun reconcileSmsPermission(granted: Boolean) {
         setupImportStore.reconcilePermission(granted)
+        if (!granted) {
+            // Revocation is also a stop signal for any already-read batch.
+            // Prior commits remain, while native work is cancelled and drained
+            // instead of continuing invisibly behind a permission card.
+            requestManualSyncStop(showFailureToast = false)
+            onboardingSyncManager.requestHistoricalImportCancellation(context)
+        }
     }
 
     fun confirmModelDownload() {
@@ -283,70 +513,107 @@ class HomeViewModel @Inject constructor(
     }
 
     fun startSetupOrResume() {
-        val setup = reconcilePreparedModelAvailability()
-        if (!smsRepository.hasPermissions()) {
-            setupImportStore.reconcilePermission(granted = false)
-            return
-        }
-        if (!setup.modelPrepared && !setup.modelDownloadConfirmed) return
+        syncManager.withSmsOperationStartBoundary {
+            if (
+                onboardingSyncManager.syncState.value.isRunning ||
+                manualSmsOperationIsRunning(
+                    state = syncManager.syncState.value,
+                    startPending =
+                        syncManager.manualOperationReservation.value != null
+                )
+            ) return@withSmsOperationStartBoundary
 
-        val resumableWindow =
-            (setup.activeScanWindowDays ?: setup.coverageWindowDays)
-            ?.takeIf {
-                setup.status in setOf(
-                    SetupImportStatus.PAUSED,
-                    SetupImportStatus.FAILED
+            val setup = reconcilePreparedModelAvailability()
+            if (!smsRepository.hasPermissions()) {
+                setupImportStore.reconcilePermission(granted = false)
+                return@withSmsOperationStartBoundary
+            }
+            if (!setup.modelPrepared && !setup.modelDownloadConfirmed) {
+                return@withSmsOperationStartBoundary
+            }
+
+            val resumableWindow =
+                (setup.activeScanWindowDays ?: setup.coverageWindowDays)
+                ?.takeIf {
+                    setup.status in setOf(
+                        SetupImportStatus.PAUSED,
+                        SetupImportStatus.FAILED
+                    )
+                }
+            if (resumableWindow != null) {
+                onboardingSyncManager.resumeHistoricalImport(
+                    context = context,
+                    slm = currentSetupTier(),
+                    resumeWindowDays = resumableWindow
+                )
+            } else {
+                onboardingSyncManager.startOnboarding(
+                    context,
+                    currentSetupTier()
                 )
             }
-        if (resumableWindow != null) {
-            onboardingSyncManager.resumeHistoricalImport(
-                context = context,
-                slm = currentSetupTier(),
-                resumeWindowDays = resumableWindow
-            )
-        } else {
-            onboardingSyncManager.startOnboarding(
-                context,
-                currentSetupTier()
-            )
         }
     }
 
     fun scanOlderMessages() {
-        if (!smsRepository.hasPermissions()) {
-            setupImportStore.reconcilePermission(granted = false)
-            return
+        syncManager.withSmsOperationStartBoundary {
+            if (
+                onboardingSyncManager.syncState.value.isRunning ||
+                manualSmsOperationIsRunning(
+                    state = syncManager.syncState.value,
+                    startPending =
+                        syncManager.manualOperationReservation.value != null
+                )
+            ) return@withSmsOperationStartBoundary
+
+            if (!smsRepository.hasPermissions()) {
+                setupImportStore.reconcilePermission(granted = false)
+                return@withSmsOperationStartBoundary
+            }
+            val setup = reconcilePreparedModelAvailability()
+            if (!setup.modelPrepared) {
+                startSetupOrResume()
+                return@withSmsOperationStartBoundary
+            }
+            onboardingSyncManager.startHistoricalImport(
+                context = context,
+                slm = currentSetupTier(),
+                coveredWindowDays = setup.coverageWindowDays
+            )
         }
-        val setup = reconcilePreparedModelAvailability()
-        if (!setup.modelPrepared) {
-            startSetupOrResume()
-            return
-        }
-        onboardingSyncManager.startHistoricalImport(
-            context = context,
-            slm = currentSetupTier(),
-            coveredWindowDays = setup.coverageWindowDays
-        )
     }
 
     fun startModelUpgrade() {
-        val onboarding = onboardingSyncManager.syncState.value
-        val appFlows = appFlowCoordinator.state.value
-        val otherFlowBusy = syncManager.syncState.value.status ==
-            HomeSyncState.Status.SYNCING ||
-            modelDownloader.state.value.isDownloading ||
-            appFlows.activeCount > 0 ||
-            appFlows.admissionPaused
-        if (modelUpgradeStartBlockedMessage(onboarding, otherFlowBusy) != null) return
-        val device = deviceCapabilities.assessDevice()
-        val recommendedSlm =
-            unfinishedModelUpgradeTarget(onboarding)
-                ?: selectModelUpgradeTarget(
-                    device = device,
-                    allowDebugEmulatorOverride = allowDebugEmulatorModelUpgrade(context)
-                ).tier
-                ?: return
-        onboardingSyncManager.startModelUpgrade(context, recommendedSlm)
+        syncManager.withSmsOperationStartBoundary {
+            val onboarding = onboardingSyncManager.syncState.value
+            val appFlows = appFlowCoordinator.state.value
+            val otherFlowBusy =
+                manualSmsOperationIsRunning(
+                    state = syncManager.syncState.value,
+                    startPending =
+                        syncManager.manualOperationReservation.value != null
+                ) ||
+                    modelDownloader.state.value.isDownloading ||
+                    appFlows.activeCount > 0 ||
+                    appFlows.admissionPaused
+            if (
+                modelUpgradeStartBlockedMessage(
+                    onboarding = onboarding,
+                    otherFlowBusy = otherFlowBusy
+                ) != null
+            ) return@withSmsOperationStartBoundary
+
+            val device = deviceCapabilities.assessDevice()
+            val recommendedSlm =
+                unfinishedModelUpgradeTarget(onboarding)
+                    ?: selectModelUpgradeTarget(
+                        device = device,
+                        allowDebugEmulatorOverride =
+                            allowDebugEmulatorModelUpgrade(context)
+                    ).tier
+                ?: return@withSmsOperationStartBoundary
+            onboardingSyncManager.startModelUpgrade(context, recommendedSlm)
+        }
     }
 
     fun cancelModelUpgrade() {
