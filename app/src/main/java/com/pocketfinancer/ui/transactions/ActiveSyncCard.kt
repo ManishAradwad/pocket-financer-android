@@ -30,6 +30,8 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.pocketfinancer.ui.home.HomeSyncState
 import com.pocketfinancer.ui.home.SyncSmsItem
+import com.pocketfinancer.ui.onboarding.HistoricalSmsProcessingActivity
+import com.pocketfinancer.ui.onboarding.HistoricalSmsProcessingStage
 import com.pocketfinancer.ui.theme.AppTypography
 import com.pocketfinancer.ui.theme.M3_Error
 import com.pocketfinancer.ui.theme.M3_ErrorContainer
@@ -61,6 +63,9 @@ internal data class ActiveSyncCardUiModel(
     val stateDescription: String
 )
 
+internal fun String.isLedgerVerifiedSuccess(): Boolean =
+    this == "synced" || this == "already_saved"
+
 /**
  * Selects the item represented by the compact transaction-screen monitor.
  *
@@ -79,7 +84,7 @@ internal fun HomeSyncState.syncCardItem(): SyncSmsItem? = when (status) {
     HomeSyncState.Status.DONE -> {
         queue.lastOrNull { it.status == "error" }
             ?: queue.lastOrNull {
-                it.status != "synced" &&
+                !it.status.isLedgerVerifiedSuccess() &&
                     it.status != "filtered_out" &&
                     it.status != "error"
             }
@@ -156,14 +161,18 @@ internal fun HomeSyncState.toActiveSyncCardUiModel(
     }
 
     val saved = queue.count { it.status == "synced" }
+    val alreadySaved = queue.count { it.status == "already_saved" }
     val skipped = queue.count { it.status == "filtered_out" }
     val failed = queue.count { it.status == "error" }
     val incomplete = queue.count {
-        it.status != "synced" && it.status != "filtered_out" && it.status != "error"
+        !it.status.isLedgerVerifiedSuccess() &&
+            it.status != "filtered_out" &&
+            it.status != "error"
     }
     val hasIssues = failed > 0 || incomplete > 0
     val resultCounts = buildList {
         if (saved > 0) add("$saved saved")
+        if (alreadySaved > 0) add("$alreadySaved already saved")
         if (skipped > 0) add("$skipped skipped")
         if (failed > 0) add("$failed failed")
         if (incomplete > 0) add("$incomplete incomplete")
@@ -171,6 +180,7 @@ internal fun HomeSyncState.toActiveSyncCardUiModel(
     val summary = "Queue: $resultCounts"
     val result = when (activeSms.status) {
         "synced" -> "Saved to transaction ledger"
+        "already_saved" -> "Already verified in transaction ledger"
         "filtered_out" -> "Skipped — no transaction found"
         "error" -> "Processing needs attention"
         "pending", "syncing" -> "Sync ended before processing"
@@ -191,6 +201,56 @@ internal fun HomeSyncState.toActiveSyncCardUiModel(
     )
 }
 
+internal fun HistoricalSmsProcessingActivity.toActiveSyncCardUiModel(
+    isCancelling: Boolean,
+    isFinishing: Boolean
+): ActiveSyncCardUiModel {
+    val step = when {
+        isCancelling && stage == HistoricalSmsProcessingStage.PERSISTING ->
+            "Finishing current encrypted save"
+        isCancelling -> "Stopping safely"
+        isFinishing && stage == HistoricalSmsProcessingStage.PERSISTING ->
+            "Committing current transaction"
+        isFinishing -> "Finalizing setup"
+        stage == HistoricalSmsProcessingStage.FILTERING -> "Checking message"
+        stage == HistoricalSmsProcessingStage.THINKING -> "Reasoning on device"
+        stage == HistoricalSmsProcessingStage.GENERATING -> "Extracting transaction"
+        else -> "Saving transaction"
+    }
+    val title = when {
+        isCancelling -> "Stopping historical sync"
+        isFinishing -> "Finishing historical sync"
+        else -> "Processing message $position of $total"
+    }
+    val source = sender.ifBlank { "Unknown sender" }
+    val detail = if (isCancelling || isFinishing) {
+        "Message $position of $total • From $source"
+    } else {
+        "From $source"
+    }
+    val badge = when {
+        isCancelling -> "STOPPING"
+        isFinishing -> "FINISHING"
+        else -> "LIVE"
+    }
+    val action = when {
+        isCancelling -> "View stopping details"
+        isFinishing -> "View finishing details"
+        else -> "View live log"
+    }
+
+    return ActiveSyncCardUiModel(
+        tone = ActiveSyncCardTone.PROCESSING,
+        title = title,
+        detail = detail,
+        badge = badge,
+        stepLabel = "CURRENT STEP",
+        stepValue = step,
+        actionLabel = action,
+        stateDescription = "$title. $detail. Current step: $step."
+    )
+}
+
 @Composable
 fun ActiveSyncCard(
     activeSms: SyncSmsItem,
@@ -198,6 +258,39 @@ fun ActiveSyncCard(
     onClick: () -> Unit
 ) {
     val model = syncState.toActiveSyncCardUiModel(activeSms) ?: return
+    PipelineActivityCard(
+        sender = activeSms.sender,
+        body = activeSms.body,
+        model = model,
+        onClick = onClick
+    )
+}
+
+@Composable
+fun HistoricalActiveSyncCard(
+    activity: HistoricalSmsProcessingActivity,
+    isCancelling: Boolean,
+    isFinishing: Boolean,
+    onClick: () -> Unit
+) {
+    PipelineActivityCard(
+        sender = activity.sender,
+        body = activity.body,
+        model = activity.toActiveSyncCardUiModel(
+            isCancelling = isCancelling,
+            isFinishing = isFinishing
+        ),
+        onClick = onClick
+    )
+}
+
+@Composable
+private fun PipelineActivityCard(
+    sender: String,
+    body: String,
+    model: ActiveSyncCardUiModel,
+    onClick: () -> Unit
+) {
     val accentColor = when (model.tone) {
         ActiveSyncCardTone.PROCESSING -> Color(0xFFF2C94C)
         ActiveSyncCardTone.SUCCESS -> M3_Pos
@@ -342,7 +435,7 @@ fun ActiveSyncCard(
                 }
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = activeSms.sender,
+                        text = sender.ifBlank { "Unknown sender" },
                         color = M3_OnSurface,
                         style = AppTypography.eyebrowBold,
                         maxLines = 1,
@@ -350,7 +443,7 @@ fun ActiveSyncCard(
                     )
                     Spacer(modifier = Modifier.height(1.dp))
                     Text(
-                        text = activeSms.body,
+                        text = body,
                         color = M3_OnSurfaceVariant,
                         style = AppTypography.monoBody,
                         maxLines = 2,

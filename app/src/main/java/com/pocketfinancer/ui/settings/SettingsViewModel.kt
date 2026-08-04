@@ -52,6 +52,7 @@ import com.pocketfinancer.ui.home.SyncService
 import com.pocketfinancer.ui.onboarding.OnboardingRunGenerationStore
 import com.pocketfinancer.ui.onboarding.OnboardingService
 import com.pocketfinancer.ui.onboarding.OnboardingSyncManager
+import com.pocketfinancer.ui.onboarding.withoutHistoricalSmsActivity
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
@@ -200,6 +201,9 @@ class SettingsViewModel @Inject constructor(
     private var modelActionJob: Job? = null
     private var downloadJob: Job? = null
     private var resetJob: Job? = null
+    private val onboardingFlowState = onboardingSyncManager.syncState
+        .map { it.withoutHistoricalSmsActivity() }
+        .distinctUntilChanged()
 
     init {
         assessDevice()
@@ -237,7 +241,7 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch {
             combine(
                 homeSyncManager.syncState,
-                onboardingSyncManager.syncState,
+                onboardingFlowState,
                 appFlowCoordinator.state,
                 modelDownloader.state,
                 homeSyncManager.manualOperationReservation

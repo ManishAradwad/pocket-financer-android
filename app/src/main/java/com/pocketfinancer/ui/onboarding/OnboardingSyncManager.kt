@@ -56,7 +56,8 @@ class OnboardingSyncManager @Inject constructor(
         val syncTransactionalCount: Int = 0,
         val syncParsedCount: Int = 0,
         val syncSpendsTotal: Double = 0.0,
-        val syncRecentTransactions: List<ExtractedTxPreview> = emptyList()
+        val syncRecentTransactions: List<ExtractedTxPreview> = emptyList(),
+        val activeHistoricalSms: HistoricalSmsProcessingActivity? = null
     )
 
     private val _syncState = MutableStateFlow(OnboardingSyncState())
@@ -127,6 +128,7 @@ class OnboardingSyncManager @Inject constructor(
                     isRunning = false,
                     isDownloading = false,
                     isPreparingHistoricalModel = false,
+                    activeHistoricalSms = null,
                     modelLoadError =
                         "Confirm the approximately 700 MB model download first."
                 )
@@ -147,6 +149,7 @@ class OnboardingSyncManager @Inject constructor(
                     isRunning = false,
                     isDownloading = false,
                     isPreparingHistoricalModel = false,
+                    activeHistoricalSms = null,
                     modelLoadError = if (purpose == RunPurpose.MODEL_UPGRADE) {
                         "Model upgrade is temporarily paused while other model maintenance completes."
                     } else {
@@ -296,6 +299,7 @@ class OnboardingSyncManager @Inject constructor(
                     isDownloading = false,
                     isCancellationAllowed = false,
                     isPreparingHistoricalModel = false,
+                    activeHistoricalSms = null,
                     downloadState = current.downloadState.copy(
                         isDownloading = false
                     ),
@@ -517,6 +521,7 @@ class OnboardingSyncManager @Inject constructor(
                 syncParsedCount = 0,
                 syncSpendsTotal = 0.0,
                 syncRecentTransactions = emptyList(),
+                activeHistoricalSms = null,
                 syncMessage =
                     "SMS processing stopped. Completed saves remain on this device."
             )
@@ -552,6 +557,7 @@ class OnboardingSyncManager @Inject constructor(
                 syncParsedCount = 0,
                 syncSpendsTotal = 0.0,
                 syncRecentTransactions = emptyList(),
+                activeHistoricalSms = null,
                 syncMessage = syncMessage
             )
             if (_syncState.compareAndSet(current, settled)) return true
@@ -620,6 +626,7 @@ class OnboardingSyncManager @Inject constructor(
                     isCancellationAllowed = false,
                     isPreparingHistoricalModel = false,
                     isDownloading = false,
+                    activeHistoricalSms = null,
                     downloadState = current.downloadState.copy(
                         isDownloading = false,
                         error = null
@@ -663,6 +670,7 @@ class OnboardingSyncManager @Inject constructor(
                 isCancellationAllowed = false,
                 isPreparingHistoricalModel = false,
                 isDownloading = false,
+                activeHistoricalSms = null,
                 downloadState = terminalDownloadState.copy(
                     isDownloading = false,
                     isComplete = false,
@@ -686,6 +694,85 @@ class OnboardingSyncManager @Inject constructor(
 
     fun updateState(transform: (OnboardingSyncState) -> OnboardingSyncState) {
         _syncState.update(transform)
+    }
+
+    internal fun beginHistoricalSmsProcessing(
+        runId: String,
+        activity: HistoricalSmsProcessingActivity
+    ): Boolean {
+        while (true) {
+            val current = _syncState.value
+            if (!historicalRunMatches(current, runId) || current.isCancelling) {
+                return false
+            }
+            if (
+                _syncState.compareAndSet(
+                    current,
+                    current.copy(activeHistoricalSms = activity)
+                )
+            ) {
+                return true
+            }
+        }
+    }
+
+    internal fun updateHistoricalSmsProcessing(
+        runId: String,
+        candidateKey: String,
+        transform: (
+            HistoricalSmsProcessingActivity
+        ) -> HistoricalSmsProcessingActivity
+    ): Boolean {
+        while (true) {
+            val current = _syncState.value
+            val activity = current.activeHistoricalSms
+            if (
+                !historicalRunMatches(current, runId) ||
+                activity?.candidateKey != candidateKey
+            ) {
+                return false
+            }
+            if (
+                _syncState.compareAndSet(
+                    current,
+                    current.copy(activeHistoricalSms = transform(activity))
+                )
+            ) {
+                return true
+            }
+        }
+    }
+
+    /**
+     * Clearing is allowed while a matching run drains after cancellation or a
+     * terminal transition. This is stricter than event publication so stale
+     * callbacks cannot leave raw evidence resident in manager state.
+     */
+    internal fun clearHistoricalSmsProcessing(
+        runId: String,
+        candidateKey: String? = null
+    ): Boolean {
+        while (true) {
+            val current = _syncState.value
+            val activity = current.activeHistoricalSms ?: return true
+            if (
+                current.runId != runId ||
+                (
+                    candidateKey != null &&
+                        activity.candidateKey != candidateKey
+                    )
+            ) {
+                return false
+            }
+            if (
+                _syncState.compareAndSet(
+                    current,
+                    current.copy(activeHistoricalSms = null)
+                )
+            ) {
+                return true
+            }
+        }
     }
 
     fun reset() {

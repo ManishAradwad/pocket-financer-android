@@ -1627,31 +1627,68 @@ class OnboardingService : Service() {
 
             val txStartTime = System.currentTimeMillis()
             var checkpointSettlement: HistoricalPersistenceSettlement? = null
-            val result = withContext(Dispatchers.IO) {
+            val candidateKey = sms.sourceIdentity.opaqueCandidateKey
+            val activity = HistoricalSmsProcessingActivity(
+                candidateKey = candidateKey,
+                sender = sms.address,
+                body = sms.body,
+                date = sms.date,
+                position = index + 1,
+                total = totalCount
+            )
+            if (!syncManager.beginHistoricalSmsProcessing(runId, activity)) {
+                throw CancellationException(
+                    "Historical SMS activity no longer belongs to this run"
+                )
+            }
+            val observer = HistoricalSmsProcessingObserver(
+                initial = activity,
+                publish = { snapshot ->
+                    syncManager.updateHistoricalSmsProcessing(
+                        runId = runId,
+                        candidateKey = candidateKey
+                    ) { snapshot }
+                }
+            )
+            val result = try {
+                withContext(Dispatchers.IO) {
+                    try {
+                        pipelineService.processSingle(
+                            sms = sms,
+                            lease = activeLease,
+                            onPersistenceCommitted = { committed ->
+                                val settlement = settleHistoricalPersistedResult(
+                                    setupImportStore = setupImportStore,
+                                    alreadySavedCount = alreadySavedCount,
+                                    counters = counters,
+                                    result = committed
+                                )
+                                counters = settlement.counters
+                                checkpointSettlement = settlement
+                            },
+                            observer = observer
+                        )
+                    } catch (
+                        postCommit: PipelineService.PostPersistenceCommitException
+                    ) {
+                        throw postCommit
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Sync parse error", e)
+                        PipelineService.ProcessingResult.Failure(
+                            message = e.message ?: "Unknown pipeline error",
+                            retryable = true
+                        )
+                    }
+                }
+            } finally {
                 try {
-                    pipelineService.processSingle(
-                        sms = sms,
-                        lease = activeLease,
-                        onPersistenceCommitted = { committed ->
-                            val settlement = settleHistoricalPersistedResult(
-                                setupImportStore = setupImportStore,
-                                alreadySavedCount = alreadySavedCount,
-                                counters = counters,
-                                result = committed
-                            )
-                            counters = settlement.counters
-                            checkpointSettlement = settlement
-                        }
-                    )
-                } catch (postCommit: PipelineService.PostPersistenceCommitException) {
-                    throw postCommit
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    Log.e(TAG, "Sync parse error", e)
-                    PipelineService.ProcessingResult.Failure(
-                        message = e.message ?: "Unknown pipeline error",
-                        retryable = true
+                    observer.flush()
+                } finally {
+                    syncManager.clearHistoricalSmsProcessing(
+                        runId = runId,
+                        candidateKey = candidateKey
                     )
                 }
             }
@@ -1911,6 +1948,7 @@ class OnboardingService : Service() {
         )
         } finally {
             withContext(NonCancellable) {
+                syncManager.clearHistoricalSmsProcessing(runId)
                 batchLease?.release()
                 provisionalPin?.rollbackUnlessCommitted()
             }
@@ -1960,6 +1998,7 @@ class OnboardingService : Service() {
                     isDownloading = false,
                     isCancellationAllowed = false,
                     isPreparingHistoricalModel = false,
+                    activeHistoricalSms = null,
                     syncMessage =
                         "SMS access must be restored to finish setup.",
                     modelLoadError = errorMessage
@@ -2031,7 +2070,8 @@ class OnboardingService : Service() {
                     isRunning = false,
                     isCancellationAllowed = false,
                     isPreparingHistoricalModel = false,
-                    isDownloading = false
+                    isDownloading = false,
+                    activeHistoricalSms = null
                 )
             }
         }
@@ -2092,7 +2132,8 @@ internal fun scrubCompletedOnboardingState(
     isDownloading = false,
     isModelLoaded = true,
     syncMessage = "Setup finished",
-    syncLogs = emptyList()
+    syncLogs = emptyList(),
+    activeHistoricalSms = null
 )
 
 internal const val USER_REQUESTED_HISTORY_PAUSE_ERROR =

@@ -46,13 +46,19 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import com.pocketfinancer.data.model.Transaction
 import com.pocketfinancer.data.model.TransactionType
 import com.pocketfinancer.setup.SetupImportStatus
 import com.pocketfinancer.ui.theme.*
+import com.pocketfinancer.ui.onboarding.HistoricalSmsProcessingActivity
+import com.pocketfinancer.ui.transactions.HistoricalActiveSyncCard
 import com.pocketfinancer.ui.transactions.TelemetryLogsViewer
+import com.pocketfinancer.ui.transactions.TelemetryRuntimeFacts
 import java.text.SimpleDateFormat
 import java.util.*
+import kotlinx.coroutines.flow.Flow
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -60,8 +66,10 @@ fun HomeScreen(
     onNavigateToTab: (String) -> Unit,
     viewModel: HomeViewModel = hiltViewModel()
 ) {
-    val state by viewModel.uiState.collectAsState()
-    val selectedPeriod by viewModel.selectedPeriod.collectAsState()
+    val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val selectedPeriod by viewModel.selectedPeriod.collectAsStateWithLifecycle()
+    val activeHistoricalSmsCard by
+        viewModel.activeHistoricalSmsCard.collectSensitiveHistoricalState()
     val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
     val coroutineScope = rememberCoroutineScope()
@@ -69,10 +77,17 @@ fun HomeScreen(
     val pData = state.periodData[selectedPeriod] ?: PeriodData()
     var showDrawer by remember { mutableStateOf(false) }
     var selectedTelemetrySmsId by remember { mutableStateOf<String?>(null) }
+    var showHistoricalTelemetry by remember { mutableStateOf(false) }
     var showModelDownloadConfirmation by remember { mutableStateOf(false) }
     var showHowThisWorks by remember { mutableStateOf(false) }
     var pendingBackgroundAction by remember {
         mutableStateOf<(() -> Unit)?>(null)
+    }
+
+    LaunchedEffect(state.historicalImportRunning) {
+        if (!state.historicalImportRunning) {
+            showHistoricalTelemetry = false
+        }
     }
 
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -273,6 +288,17 @@ fun HomeScreen(
                         onAction = onSetupAction,
                         onHowThisWorks = { showHowThisWorks = true }
                     )
+                }
+
+                activeHistoricalSmsCard?.let { activity ->
+                    item(key = "active-historical-sms") {
+                        HistoricalActiveSyncCard(
+                            activity = activity,
+                            isCancelling = state.historicalImportCancelling,
+                            isFinishing = state.historicalImportFinishing,
+                            onClick = { showHistoricalTelemetry = true }
+                        )
+                    }
                 }
 
                 // ── Hero Card ──
@@ -719,7 +745,28 @@ fun HomeScreen(
             }
         }
 
-        // ── Telemetry Logs Sheet ──
+        // ── Historical import live telemetry sheet ──
+        // Full token output is collected only inside the sheet's narrow
+        // restart scope. Intra-run gaps show a source-free placeholder; raw
+        // evidence is still cleared as soon as each candidate settles.
+        if (
+            historicalTelemetryIsVisible(
+                requested = showHistoricalTelemetry,
+                historicalImportRunning = state.historicalImportRunning
+            )
+        ) {
+            HistoricalTelemetrySheet(
+                activityFlow = viewModel.activeHistoricalSms,
+                viewModel = viewModel,
+                isStopping = state.historicalImportCancelling,
+                canStop = state.historicalImportCancellationAllowed,
+                isFinishing = state.historicalImportFinishing,
+                onStop = viewModel::stopHistoricalImport,
+                onClose = { showHistoricalTelemetry = false }
+            )
+        }
+
+        // ── Manual-sync telemetry logs sheet ──
         // Keep only an opaque row id in Compose state and resolve the row from
         // the latest queue snapshot. The manager replaces terminal rows with
         // privacy-safe copies after processing.
@@ -900,6 +947,246 @@ fun HomeScreen(
         )
     }
 }
+
+internal fun historicalTelemetryIsVisible(
+    requested: Boolean,
+    historicalImportRunning: Boolean
+): Boolean = requested && historicalImportRunning
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun HistoricalTelemetrySheet(
+    activityFlow: Flow<HistoricalSmsProcessingActivity?>,
+    viewModel: HomeViewModel,
+    isStopping: Boolean,
+    canStop: Boolean,
+    isFinishing: Boolean,
+    onStop: () -> Unit,
+    onClose: () -> Unit
+) {
+    val historicalActivity by
+        activityFlow.collectSensitiveHistoricalState()
+
+    ModalBottomSheet(
+        onDismissRequest = onClose,
+        sheetState = rememberModalBottomSheetState(
+            skipPartiallyExpanded = true
+        ),
+        containerColor = M3_SurfaceContainerLow,
+        contentColor = M3_OnSurface,
+        dragHandle = {
+            Box(
+                modifier = Modifier
+                    .padding(vertical = 12.dp)
+                    .width(48.dp)
+                    .height(6.dp)
+                    .background(
+                        M3_OutlineVariant.copy(alpha = 0.6f),
+                        RoundedCornerShape(3.dp)
+                    )
+            )
+        }
+    ) {
+        if (historicalActivity == null) {
+            HistoricalTelemetryGap(
+                isStopping = isStopping,
+                canStop = canStop,
+                isFinishing = isFinishing,
+                onStop = onStop,
+                onClose = onClose
+            )
+            return@ModalBottomSheet
+        }
+
+        val activity = historicalActivity ?: return@ModalBottomSheet
+        val parsedOutput = historicalParsedOutput(activity) { json ->
+            viewModel.getParsedOutput(json)
+        }
+        val historicalFilterLogs = remember(
+            activity.candidateKey,
+            activity.sender,
+            activity.body
+        ) {
+            viewModel.getHistoricalFilterLogs(activity)
+        }
+        val historicalPrompt = remember(
+            activity.candidateKey,
+            activity.sender,
+            activity.body
+        ) {
+            viewModel.getHistoricalPromptContent(activity)
+        }
+
+        key(activity.candidateKey) {
+            TelemetryLogsViewer(
+                sender = activity.sender,
+                body = activity.body,
+                status = "syncing",
+                hasThinkingMode = activity.hasThinkingMode,
+                isActive = true,
+                activeStageIndex = activity.stageIndex,
+                thinkingOutput = activity.thinkingOutput,
+                jsonOutput = activity.jsonOutput,
+                filterLogs = historicalFilterLogs,
+                kvLogs = activity.historicalCacheLogs(),
+                slmPrompt = historicalPrompt,
+                parsedOutput = parsedOutput,
+                performanceText = activity.historicalPerformanceText(),
+                activeModelName = activity.modelName,
+                runtimeFacts = activity.toTelemetryRuntimeFacts(),
+                thinkingOutputTruncated = activity.thinkingOutputTruncated,
+                jsonOutputTruncated = activity.jsonOutputTruncated,
+                isStopping = isStopping,
+                canStop = canStop,
+                isFinishing = isFinishing,
+                onStop = onStop,
+                onClose = onClose
+            )
+        }
+    }
+}
+
+@Composable
+private fun HistoricalTelemetryGap(
+    isStopping: Boolean,
+    canStop: Boolean,
+    isFinishing: Boolean,
+    onStop: () -> Unit,
+    onClose: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .navigationBarsPadding()
+            .padding(horizontal = 24.dp, vertical = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(18.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "ON-DEVICE EXTRACTION LOGS",
+                style = AppTypography.eyebrowBold,
+                color = M3_OnSurface
+            )
+            TextButton(onClick = onClose) { Text("Close Logs") }
+        }
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            CircularProgressIndicator(modifier = Modifier.size(28.dp))
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(
+                    text = when {
+                        isStopping -> "Stopping SMS processing"
+                        isFinishing -> "Finishing history import"
+                        else -> "Preparing next eligible message"
+                    },
+                    style = MaterialTheme.typography.titleMedium
+                )
+                Text(
+                    text = "The previous message's details were cleared from this live view.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = M3_OnSurfaceVariant
+                )
+            }
+        }
+        if (canStop && !isStopping && !isFinishing) {
+            OutlinedButton(
+                onClick = onStop,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Stop SMS processing")
+            }
+        }
+        Spacer(modifier = Modifier.height(8.dp))
+    }
+}
+
+/**
+ * Stops high-frequency telemetry collection with the UI lifecycle and clears
+ * the Compose holder immediately on STOP so raw SMS/model output is not kept
+ * by an inactive composition.
+ */
+@Composable
+internal fun <T> Flow<T?>.collectSensitiveHistoricalState(): State<T?> {
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    return produceState<T?>(
+        initialValue = null,
+        this,
+        lifecycle
+    ) {
+        collectHistoricalSmsWhileStarted(
+            lifecycle = lifecycle,
+            source = this@collectSensitiveHistoricalState,
+            publish = { value = it }
+        )
+    }
+}
+
+internal suspend fun <T> collectHistoricalSmsWhileStarted(
+    lifecycle: Lifecycle,
+    source: Flow<T?>,
+    publish: (T?) -> Unit
+) {
+    lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+        try {
+            source.collect { publish(it) }
+        } finally {
+            publish(null)
+        }
+    }
+}
+
+internal fun historicalParsedOutput(
+    activity: HistoricalSmsProcessingActivity,
+    parse: (String) -> String
+): String = when {
+    activity.jsonOutput.isEmpty() -> ""
+    activity.stageIndex < 3 && activity.jsonOutputTruncated ->
+        "Live JSON preview truncated; waiting for inference to finish."
+    activity.stageIndex < 3 -> "Waiting for complete JSON..."
+    activity.jsonOutputTruncated ->
+        "Parsed successfully; full JSON was omitted from the live display."
+    else -> parse(activity.jsonOutput)
+}
+
+internal fun HistoricalSmsProcessingActivity.toTelemetryRuntimeFacts(): TelemetryRuntimeFacts? {
+    val grammar = grammarEnabled ?: return null
+    return TelemetryRuntimeFacts(
+        grammarEnabled = grammar,
+        thinkingTokenBudget = thinkingTokenBudget,
+        answerTokenBudget = answerTokenBudget,
+        promptEvalMs = performance?.promptEvalMs,
+        evalMs = performance?.evalMs,
+        generatedTokens = performance?.generatedTokens,
+        cacheAttempted = cache?.attempted,
+        cacheHit = cache?.hit,
+        cachePrefixTokens = cache?.prefixTokens
+    )
+}
+
+internal fun HistoricalSmsProcessingActivity.historicalPerformanceText(): String? =
+    performance?.let { value ->
+        String.format(
+            Locale.US,
+            "%d tokens • %.2f tok/s",
+            value.generatedTokens,
+            value.tokensPerSecond
+        )
+    }
+
+internal fun HistoricalSmsProcessingActivity.historicalCacheLogs(): List<String> =
+    cache?.let { value ->
+        listOf(
+            "Prefix cache attempted: ${value.attempted}",
+            "Prefix cache hit: ${value.hit}",
+            "Cached prefix tokens: ${value.prefixTokens}"
+        )
+    } ?: listOf("Exact prefix-cache telemetry will appear after inference completes.")
 
 @Composable
 private fun SetupImportCard(

@@ -10,10 +10,12 @@ import com.pocketfinancer.data.model.TransactionType
 import com.pocketfinancer.data.repository.TransactionRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import com.pocketfinancer.pipeline.SmsFilterPipeline
 import com.pocketfinancer.pipeline.PromptBuilder
+import com.pocketfinancer.pipeline.PipelineService
 import com.pocketfinancer.pipeline.ExtractionParser
 import com.pocketfinancer.pipeline.AutomaticProcessingPreferences
 import com.pocketfinancer.hardware.DeviceCapabilities
@@ -30,6 +32,8 @@ import com.pocketfinancer.setup.reconcileSetupModelAvailability
 import com.pocketfinancer.sms.SmsRepository
 import com.pocketfinancer.ui.onboarding.OnboardingStep
 import com.pocketfinancer.ui.onboarding.OnboardingSyncManager
+import com.pocketfinancer.ui.onboarding.HistoricalSmsProcessingActivity
+import com.pocketfinancer.ui.onboarding.withoutHistoricalSmsActivity
 import java.util.Calendar
 import javax.inject.Inject
 
@@ -95,6 +99,45 @@ internal fun historicalImportIsRunning(
     state.runPurpose == OnboardingSyncManager.RunPurpose.INITIAL_SETUP &&
         state.isRunning
 
+internal fun activeHistoricalSmsForHome(
+    state: OnboardingSyncManager.OnboardingSyncState
+): HistoricalSmsProcessingActivity? =
+    state.activeHistoricalSms.takeIf { historicalImportIsRunning(state) }
+
+internal fun HistoricalSmsProcessingActivity.cardSnapshot(): HistoricalSmsProcessingActivity =
+    copy(
+        modelName = null,
+        grammarEnabled = null,
+        thinkingTokenBudget = 0,
+        answerTokenBudget = 0,
+        thinkingOutput = "",
+        jsonOutput = "",
+        thinkingOutputTruncated = false,
+        jsonOutputTruncated = false,
+        performance = null,
+        cache = null
+    )
+
+/**
+ * Sensitive per-SMS evidence is deliberately kept out of [HomeUiState], whose
+ * while-subscribed replay cache may stop observing while Home is off screen.
+ * This small eager projection continues observing the process owner so a
+ * terminal clear is always reflected even when there is no UI collector.
+ */
+internal fun historicalSmsCardState(
+    source: StateFlow<OnboardingSyncManager.OnboardingSyncState>,
+    scope: CoroutineScope
+): StateFlow<HistoricalSmsProcessingActivity?> =
+    source
+        .map { state -> activeHistoricalSmsForHome(state)?.cardSnapshot() }
+        .distinctUntilChanged()
+        .stateIn(
+            scope = scope,
+            started = SharingStarted.Eagerly,
+            initialValue = activeHistoricalSmsForHome(source.value)
+                ?.cardSnapshot()
+        )
+
 /**
  * Covers both an accepted service run and the short Android service-start
  * handoff before [HomeSyncManager] can publish its run id.
@@ -156,12 +199,25 @@ class HomeViewModel @Inject constructor(
     val selectedPeriod: StateFlow<String> = _selectedPeriod.asStateFlow()
     private var requestedManualServiceRunId: String? = null
 
+    val activeHistoricalSms: Flow<HistoricalSmsProcessingActivity?> =
+        onboardingSyncManager.syncState.map(::activeHistoricalSmsForHome)
+
+    val activeHistoricalSmsCard: StateFlow<HistoricalSmsProcessingActivity?> =
+        historicalSmsCardState(
+            source = onboardingSyncManager.syncState,
+            scope = viewModelScope
+        )
+
+    private val onboardingUiState = onboardingSyncManager.syncState
+        .map { it.withoutHistoricalSmsActivity() }
+        .distinctUntilChanged()
+
     val uiState: StateFlow<HomeUiState> = combine(
         transactionRepository.getAllByDateDesc(),
         _selectedPeriod,
         syncManager.syncState,
         modelDownloader.state,
-        onboardingSyncManager.syncState,
+        onboardingUiState,
         modelUpgradeSessionDismissalStore.dismissedTierIds,
         setupImportStore.state,
         automaticProcessingPreferences.enabled,
@@ -779,6 +835,32 @@ class HomeViewModel @Inject constructor(
             return listOf(SOURCE_EVIDENCE_UNAVAILABLE)
         }
         return smsFilterPipeline.filterWithDetails(item.sender, item.body).logs
+    }
+
+    fun getHistoricalFilterLogs(
+        activity: HistoricalSmsProcessingActivity
+    ): List<String> = smsFilterPipeline
+        .filterWithDetails(activity.sender, activity.body)
+        .logs
+
+    /**
+     * Returns both chat messages passed to the extraction request. Model-
+     * specific chat-template rendering happens inside the local runtime and is
+     * deliberately not reconstructed or claimed here.
+     */
+    fun getHistoricalPromptContent(
+        activity: HistoricalSmsProcessingActivity
+    ): String = buildString {
+        appendLine("system:")
+        appendLine(PipelineService.EXTRACTION_SYSTEM_MESSAGE)
+        appendLine()
+        appendLine("user:")
+        append(
+            promptBuilder.buildExtractionPrompt(
+                activity.sender,
+                activity.body
+            )
+        )
     }
 
     fun getKvCacheLogs(item: SyncSmsItem): List<String> {

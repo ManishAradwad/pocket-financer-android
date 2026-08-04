@@ -2,6 +2,8 @@ package com.pocketfinancer.ui.transactions
 
 import com.pocketfinancer.ui.home.HomeSyncState
 import com.pocketfinancer.ui.home.SyncSmsItem
+import com.pocketfinancer.ui.onboarding.HistoricalSmsProcessingActivity
+import com.pocketfinancer.ui.onboarding.HistoricalSmsProcessingStage
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -70,6 +72,85 @@ class ActiveSyncCardUiModelTest {
                 stateDescription = "Sync complete. Queue: 1 saved • 1 skipped. Skipped — no transaction found."
             ),
             state.toActiveSyncCardUiModel(skipped)
+        )
+    }
+
+    @Test
+    fun `already saved is a terminal ledger verified success`() {
+        val existing = sms(status = "already_saved")
+        val state = HomeSyncState(
+            status = HomeSyncState.Status.DONE,
+            queue = listOf(existing)
+        )
+
+        assertSame(existing, state.syncCardItem())
+        val model = state.toActiveSyncCardUiModel(existing)
+        assertEquals(ActiveSyncCardTone.SUCCESS, model?.tone)
+        assertEquals("Queue: 1 already saved", model?.detail)
+        assertEquals(
+            "Already verified in transaction ledger",
+            model?.stepValue
+        )
+        assertEquals(
+            "Verified in encrypted ledger",
+            telemetrySettledPersistenceLabel("already_saved")
+        )
+        val settledFacts = telemetrySettledFacts("already_saved")
+        assertFalse(settledFacts.upstreamCompleted)
+        assertTrue(settledFacts.upstreamUnavailable)
+        assertTrue(settledFacts.ledgerVerified)
+    }
+
+    @Test
+    fun `historical activity model exposes exact position stage and drain semantics`() {
+        val activity = HistoricalSmsProcessingActivity(
+            candidateKey = "opaque-key",
+            sender = "HDFC Bank",
+            body = "Account ending 6254 was debited.",
+            date = 0L,
+            position = 3,
+            total = 9,
+            stage = HistoricalSmsProcessingStage.GENERATING,
+            hasThinkingMode = true
+        )
+
+        val live = activity.toActiveSyncCardUiModel(
+            isCancelling = false,
+            isFinishing = false
+        )
+        assertEquals("Processing message 3 of 9", live.title)
+        assertEquals("Extracting transaction", live.stepValue)
+        assertEquals("LIVE", live.badge)
+
+        val finishing = activity.copy(
+            stage = HistoricalSmsProcessingStage.PERSISTING
+        ).toActiveSyncCardUiModel(
+            isCancelling = false,
+            isFinishing = true
+        )
+        assertEquals("Finishing historical sync", finishing.title)
+        assertEquals("Message 3 of 9 • From HDFC Bank", finishing.detail)
+        assertEquals("Committing current transaction", finishing.stepValue)
+        assertEquals("FINISHING", finishing.badge)
+
+        val cancelling = activity.toActiveSyncCardUiModel(
+            isCancelling = true,
+            isFinishing = false
+        )
+        assertEquals("Stopping historical sync", cancelling.title)
+        assertEquals("Stopping safely", cancelling.stepValue)
+        assertEquals("STOPPING", cancelling.badge)
+    }
+
+    @Test
+    fun `truncated live output is labeled without changing complete output`() {
+        assertEquals(
+            "partial\n\n[Live output truncated for display.]",
+            "partial".withLiveOutputTruncationNotice(truncated = true)
+        )
+        assertEquals(
+            "complete",
+            "complete".withLiveOutputTruncationNotice(truncated = false)
         )
     }
 

@@ -26,6 +26,43 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.pocketfinancer.ui.theme.*
 
+data class TelemetryRuntimeFacts(
+    val grammarEnabled: Boolean,
+    val thinkingTokenBudget: Int,
+    val answerTokenBudget: Int,
+    val promptEvalMs: Long? = null,
+    val evalMs: Long? = null,
+    val generatedTokens: Int? = null,
+    val cacheAttempted: Boolean? = null,
+    val cacheHit: Boolean? = null,
+    val cachePrefixTokens: Int? = null
+)
+
+internal fun telemetrySettledPersistenceLabel(status: String): String? =
+    when (status) {
+        "synced" -> "Saved to encrypted ledger"
+        "already_saved" -> "Verified in encrypted ledger"
+        else -> null
+    }
+
+internal data class TelemetrySettledFacts(
+    val upstreamCompleted: Boolean,
+    val upstreamUnavailable: Boolean,
+    val ledgerVerified: Boolean
+)
+
+/**
+ * `already_saved` can be assigned by the source-identity preflight before the
+ * filter or model runs. Without provenance, only the ledger result is known;
+ * claiming completed upstream stages would be misleading.
+ */
+internal fun telemetrySettledFacts(status: String): TelemetrySettledFacts =
+    TelemetrySettledFacts(
+        upstreamCompleted = status == "synced",
+        upstreamUnavailable = status == "already_saved",
+        ledgerVerified = status.isLedgerVerifiedSuccess()
+    )
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun TelemetryLogsViewer(
@@ -43,7 +80,12 @@ fun TelemetryLogsViewer(
     parsedOutput: String,
     performanceText: String?,
     activeModelName: String? = null,
+    runtimeFacts: TelemetryRuntimeFacts? = null,
+    thinkingOutputTruncated: Boolean = false,
+    jsonOutputTruncated: Boolean = false,
     isStopping: Boolean = false,
+    canStop: Boolean = true,
+    isFinishing: Boolean = false,
     onStop: (() -> Unit)? = null,
     onClose: () -> Unit
 ) {
@@ -113,7 +155,7 @@ fun TelemetryLogsViewer(
         if (isActive && onStop != null) {
             OutlinedButton(
                 onClick = onStop,
-                enabled = !isStopping,
+                enabled = canStop && !isStopping && !isFinishing,
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(12.dp),
                 colors = ButtonDefaults.outlinedButtonColors(
@@ -122,7 +164,7 @@ fun TelemetryLogsViewer(
                 ),
                 border = BorderStroke(
                     1.dp,
-                    if (isStopping) {
+                    if (isStopping || isFinishing || !canStop) {
                         M3_OutlineVariant
                     } else {
                         M3_Error.copy(alpha = 0.55f)
@@ -130,7 +172,7 @@ fun TelemetryLogsViewer(
                 )
             ) {
                 Icon(
-                    imageVector = if (isStopping) {
+                    imageVector = if (isStopping || isFinishing || !canStop) {
                         Icons.Rounded.HourglassTop
                     } else {
                         Icons.Rounded.StopCircle
@@ -140,10 +182,11 @@ fun TelemetryLogsViewer(
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    if (isStopping) {
-                        "Stopping safely..."
-                    } else {
-                        "Stop SMS processing"
+                    when {
+                        isStopping -> "Stopping safely..."
+                        isFinishing -> "Finishing current save..."
+                        !canStop -> "Stop unavailable during commit"
+                        else -> "Stop SMS processing"
                     }
                 )
             }
@@ -179,7 +222,7 @@ fun TelemetryLogsViewer(
                             style = AppTypography.eyebrowBold
                         )
                         Text(
-                            text = activeModelName ?: "Qwen-1.7B-Chat-Int4.gguf",
+                            text = activeModelName ?: "Model details unavailable",
                             color = M3_OnSurfaceVariant,
                             style = AppTypography.timestamp
                         )
@@ -200,12 +243,16 @@ fun TelemetryLogsViewer(
             }
         }
 
+        runtimeFacts?.let { facts ->
+            RuntimeFactsCard(facts)
+        }
+
         // Timeline Flow Section
         Column(
             modifier = Modifier.fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            val isSettledSuccess = status == "synced"
+            val settledFacts = telemetrySettledFacts(status)
             val isSettledFiltered = status == "filtered_out"
             val isSettledError = status == "error"
 
@@ -213,10 +260,17 @@ fun TelemetryLogsViewer(
             val isStage0Done = if (isActive) {
                 activeStageIndex > 0
             } else {
-                isSettledSuccess || isSettledFiltered || isSettledError
+                settledFacts.upstreamCompleted ||
+                    isSettledFiltered ||
+                    isSettledError
             }
             val isStage0Active = isActive && activeStageIndex == 0
-            val stage0Status = if (isStage0Done) "Checked" else if (isStage0Active) "Checking..." else "Pending"
+            val stage0Status = when {
+                isStage0Done -> "Checked"
+                isStage0Active -> "Checking..."
+                settledFacts.upstreamUnavailable -> "Details unavailable"
+                else -> "Pending"
+            }
             val stage0Color = if (isStage0Done) M3_Pos else if (isStage0Active) Color(0xFFF2C94C) else M3_OnSurfaceVariant.copy(alpha = 0.4f)
             
             TimelineStage(
@@ -253,12 +307,13 @@ fun TelemetryLogsViewer(
             val isStage1Done = if (isActive) {
                 activeStageIndex >= (if (hasThinkingMode) 1 else 2)
             } else {
-                isSettledSuccess
+                settledFacts.upstreamCompleted
             }
             val isStage1Active = isActive && activeStageIndex == 1 && !isStage1Done
             val stage1Status = when {
                 isStage1Done -> "Prompt Compiled"
                 isStage1Active -> "Compiling..."
+                settledFacts.upstreamUnavailable -> "Details unavailable"
                 isSettledError -> "Status unavailable"
                 isSettledFiltered -> "Not retained"
                 else -> "Pending"
@@ -280,18 +335,31 @@ fun TelemetryLogsViewer(
             ) {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutputBox(title = "KV Cache Session Logs", content = kvLogs.joinToString("\n"))
-                    OutputBox(title = "Complete SLM Input Prompt", content = slmPrompt)
+                    OutputBox(
+                        title = "Prompt content supplied to runtime",
+                        content = slmPrompt
+                    )
+                    Text(
+                        text = "The model-specific chat template is rendered inside the local runtime and is not claimed as an exact rendered template here.",
+                        color = M3_OnSurfaceVariant,
+                        style = MaterialTheme.typography.labelSmall
+                    )
                 }
             }
 
             // Stage 2: Local SLM Inference Execution
-            val isStage2Done = if (isActive) activeStageIndex > 2 else isSettledSuccess
+            val isStage2Done = if (isActive) {
+                activeStageIndex > 2
+            } else {
+                settledFacts.upstreamCompleted
+            }
             val isStage2Active = isActive && (activeStageIndex == 1 || activeStageIndex == 2)
             val stage2Status = when {
                 isStage2Done -> "Inference Complete"
                 isStage2Active -> {
                     if (activeStageIndex == 1 && hasThinkingMode) "Phase 1: Thinking Pass" else "Phase 2: Structured JSON"
                 }
+                settledFacts.upstreamUnavailable -> "Details unavailable"
                 isSettledError -> "Status unavailable"
                 isSettledFiltered -> "No transaction"
                 else -> "Pending"
@@ -319,20 +387,32 @@ fun TelemetryLogsViewer(
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     // Show Thinking Output block ONLY if the model supports thinking mode AND we have thinking content (or are currently running thinking pass)
                     if (hasThinkingMode && (thinkingOutput.isNotEmpty() || (isStage2Active && activeStageIndex == 1))) {
-                        val displayThinking = thinkingOutput.ifEmpty { "Waiting for thinking tokens..." }
+                        val displayThinking = thinkingOutput
+                            .ifEmpty { "Waiting for thinking tokens..." }
+                            .withLiveOutputTruncationNotice(thinkingOutputTruncated)
                         OutputBox(title = "Thinking Output (<think> block)", content = displayThinking)
                     }
 
-                    val displayJson = jsonOutput.ifEmpty { if (isStage2Active && activeStageIndex == 2) "Streaming JSON output..." else "Waiting for JSON output..." }
+                    val displayJson = jsonOutput
+                        .ifEmpty {
+                            if (isStage2Active && activeStageIndex == 2) {
+                                "Streaming JSON output..."
+                            } else {
+                                "Waiting for JSON output..."
+                            }
+                        }
+                        .withLiveOutputTruncationNotice(jsonOutputTruncated)
                     OutputBox(title = "Raw JSON Output", content = displayJson)
                 }
             }
 
             // Stage 3: Database Persistence
-            val isStage3Done = isSettledSuccess || (isActive && activeStageIndex > 3)
+            val isStage3Done =
+                settledFacts.ledgerVerified || (isActive && activeStageIndex > 3)
             val isStage3Active = isActive && activeStageIndex == 3
             val stage3Status = when {
-                isStage3Done -> "Saved to DB"
+                isStage3Done ->
+                    telemetrySettledPersistenceLabel(status) ?: "Saved to encrypted ledger"
                 isStage3Active -> "Writing..."
                 isSettledFiltered || isSettledError -> "Not saved"
                 else -> "Pending"
@@ -360,7 +440,7 @@ fun TelemetryLogsViewer(
             }
         }
 
-        // Zero Data Security Card
+        // Local processing boundary
         Card(
             colors = CardDefaults.cardColors(containerColor = M3_SurfaceContainerHigh),
             shape = RoundedCornerShape(12.dp),
@@ -381,19 +461,105 @@ fun TelemetryLogsViewer(
                 )
                 Column {
                     Text(
-                        text = "Zero Data Left Your Screen",
+                        text = "Local SMS Processing",
                         color = M3_OnSurface,
                         style = AppTypography.eyebrowBold
                     )
                     Spacer(modifier = Modifier.height(2.dp))
                     Text(
-                        text = "Parameters run natively using llama.cpp within local native boundaries (JNI/NDK). Internet permission was not requested nor required.",
+                        text = "SMS extraction and model inference run locally on this device. This processing pipeline does not transmit SMS content or model output.",
                         color = M3_OnSurfaceVariant,
                         style = MaterialTheme.typography.labelSmall
                     )
                 }
             }
         }
+    }
+}
+
+internal fun String.withLiveOutputTruncationNotice(truncated: Boolean): String =
+    if (truncated) {
+        "$this\n\n[Live output truncated for display.]"
+    } else {
+        this
+    }
+
+@Composable
+private fun RuntimeFactsCard(facts: TelemetryRuntimeFacts) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = M3_SurfaceContainer),
+        shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.2f))
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text(
+                text = "RUNTIME REQUEST SNAPSHOT",
+                color = M3_OnSurfaceVariant,
+                style = AppTypography.eyebrowBold
+            )
+            RuntimeFactRow(
+                label = "Structured grammar",
+                value = if (facts.grammarEnabled) "Enabled" else "Disabled"
+            )
+            RuntimeFactRow(
+                label = "Token budgets",
+                value = "${facts.thinkingTokenBudget} thinking • ${facts.answerTokenBudget} answer"
+            )
+            RuntimeFactRow(
+                label = "Prompt evaluation",
+                value = facts.promptEvalMs?.let { "$it ms" }
+                    ?: "Awaiting inference result"
+            )
+            RuntimeFactRow(
+                label = "Generation",
+                value = if (
+                    facts.evalMs != null && facts.generatedTokens != null
+                ) {
+                    "${facts.evalMs} ms • ${facts.generatedTokens} tokens"
+                } else {
+                    "Awaiting inference result"
+                }
+            )
+            RuntimeFactRow(
+                label = "Prefix cache",
+                value = when (facts.cacheAttempted) {
+                    null -> "Awaiting inference result"
+                    false ->
+                        "Not attempted • ${facts.cachePrefixTokens ?: 0} prefix tokens"
+                    true -> {
+                        val outcome = if (facts.cacheHit == true) "Hit" else "Miss"
+                        "$outcome • ${facts.cachePrefixTokens ?: 0} prefix tokens"
+                    }
+                }
+            )
+        }
+    }
+}
+
+@Composable
+private fun RuntimeFactRow(label: String, value: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.Top
+    ) {
+        Text(
+            text = label,
+            color = M3_OnSurfaceVariant,
+            style = MaterialTheme.typography.labelSmall,
+            modifier = Modifier.weight(1f)
+        )
+        Text(
+            text = value,
+            color = M3_OnSurface,
+            style = AppTypography.monoBody,
+            modifier = Modifier.weight(1.35f)
+        )
     }
 }
 

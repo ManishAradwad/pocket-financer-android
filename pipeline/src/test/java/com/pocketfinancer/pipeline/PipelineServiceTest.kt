@@ -4,11 +4,13 @@ import com.pocketfinancer.data.model.Account
 import com.pocketfinancer.data.model.TransactionType
 import com.pocketfinancer.data.repository.AccountRepository
 import com.pocketfinancer.data.repository.TransactionRepository
+import com.pocketfinancer.inference.SlmCacheDiagnostics
 import com.pocketfinancer.inference.SlmExtractionRequest
 import com.pocketfinancer.inference.SlmExtractionResult
 import com.pocketfinancer.inference.SlmLease
 import com.pocketfinancer.inference.SlmModelSpec
 import com.pocketfinancer.inference.SlmModelStorage
+import com.pocketfinancer.inference.SlmPerformanceData
 import com.pocketfinancer.sms.SmsReader
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -196,6 +198,76 @@ class PipelineServiceTest {
         }
 
     @Test
+    fun `observer receives ordered filter inference token completion and persistence events`() =
+        runTest {
+            val perf = SlmPerformanceData(
+                tLoadMs = 11,
+                tPromptEvalMs = 22,
+                tEvalMs = 33,
+                nTokens = 44
+            )
+            val cache = SlmCacheDiagnostics(
+                attempted = true,
+                hit = true,
+                sessionFile = "session-test.bin",
+                prefixTokens = 55
+            )
+            val extractionResult = SlmExtractionResult.Success(
+                json = """{"amount":500.0,"type":"credit"}""",
+                perf = perf,
+                model = model,
+                cache = cache
+            )
+            val events = mutableListOf<PipelineService.ProcessingEvent>()
+            every { extractionParser.parse(any()) } returns extractedTransaction()
+            coEvery { lease.extract(any()) } coAnswers {
+                val request = firstArg<SlmExtractionRequest>()
+                request.thinkingCallback?.onToken("checking ")
+                request.thinkingCallback?.onToken("amount")
+                request.jsonCallback?.onToken("{\"amount\":")
+                request.jsonCallback?.onToken("500.0}")
+                extractionResult
+            }
+
+            val result = pipeline.processSingle(
+                sms = transactionSms(),
+                lease = lease,
+                observer = PipelineService.ProcessingObserver { event ->
+                    events += event
+                }
+            )
+
+            assertIs<PipelineService.ProcessingResult.Saved>(result)
+            assertEquals(
+                listOf(
+                    PipelineService.ProcessingEvent.DeterministicFilterStarted,
+                    PipelineService.ProcessingEvent.DeterministicFilterPassed,
+                    PipelineService.ProcessingEvent.InferenceStarted(
+                        model = model,
+                        thinkingEnabled = true,
+                        grammarEnabled = true,
+                        thinkingTokenBudget = 1024,
+                        answerTokenBudget = 256
+                    ),
+                    PipelineService.ProcessingEvent.ThinkingTokenDelta("checking "),
+                    PipelineService.ProcessingEvent.ThinkingTokenDelta("amount"),
+                    PipelineService.ProcessingEvent.JsonTokenDelta("{\"amount\":"),
+                    PipelineService.ProcessingEvent.JsonTokenDelta("500.0}"),
+                    PipelineService.ProcessingEvent.InferenceCompleted(extractionResult),
+                    PipelineService.ProcessingEvent.PersistenceStarted
+                ),
+                events
+            )
+            val completed = assertIs<
+                PipelineService.ProcessingEvent.InferenceCompleted
+            >(events[7])
+            assertEquals(extractionResult.json, completed.json)
+            assertEquals(perf, completed.perf)
+            assertEquals(cache, completed.cache)
+            assertEquals(model, completed.model)
+        }
+
+    @Test
     fun `successful extraction persists outside runtime call with exact model artifact`() =
         runTest {
             every { extractionParser.parse(any()) } returns extractedTransaction()
@@ -282,6 +354,12 @@ class PipelineServiceTest {
         assertFailsWith<CancellationException> {
             pipeline.processSingle(transactionSms(), lease)
         }
+        assertEquals(
+            "Processing transactional SMS",
+            pipeline.pipelineState.value?.message
+        )
+        assertTrue(pipeline.pipelineState.value?.message?.contains(testSender) == false)
+        assertTrue(pipeline.pipelineState.value?.message?.contains(testBody) == false)
         coVerify(exactly = 0) { transactionRepository.insertIfAbsent(any()) }
     }
 
@@ -380,18 +458,137 @@ class PipelineServiceTest {
         }
 
     @Test
-    fun `non-transactional SMS never reaches runtime`() = runTest {
+    fun `non-transactional SMS reports filter rejection and never reaches runtime`() =
+        runTest {
         val sms = SmsReader.SmsMessage(
             address = "+919999999999",
             body = "Hello there, Rs. 500",
             date = 1_000L,
             type = 1
         )
+        val events = mutableListOf<PipelineService.ProcessingEvent>()
 
-        val result = pipeline.processSingle(sms, lease)
+        val result = pipeline.processSingle(
+            sms = sms,
+            lease = lease,
+            observer = PipelineService.ProcessingObserver { event ->
+                events += event
+            }
+        )
 
         assertIs<PipelineService.ProcessingResult.Skipped>(result)
+        assertEquals(
+            listOf(
+                PipelineService.ProcessingEvent.DeterministicFilterStarted,
+                PipelineService.ProcessingEvent.DeterministicFilterRejected
+            ),
+            events
+        )
         coVerify(exactly = 0) { lease.extract(any()) }
+    }
+
+    @Test
+    fun `observer non-fatal throwables cannot change inference or persistence outcome`() = runTest {
+        every { extractionParser.parse(any()) } returns extractedTransaction()
+        val extractionResult = SlmExtractionResult.Success(
+            json = """{"amount":500.0,"type":"credit"}""",
+            model = model
+        )
+        coEvery { lease.extract(any()) } coAnswers {
+            val request = firstArg<SlmExtractionRequest>()
+            request.thinkingCallback?.onToken("private reasoning")
+            request.jsonCallback?.onToken(extractionResult.json)
+            extractionResult
+        }
+        var attemptedNotifications = 0
+        val failingObserver = PipelineService.ProcessingObserver {
+            attemptedNotifications += 1
+            throw AssertionError("rendering failed")
+        }
+
+        val result = pipeline.processSingle(
+            sms = transactionSms(),
+            lease = lease,
+            observer = failingObserver
+        )
+
+        assertIs<PipelineService.ProcessingResult.Saved>(result)
+        assertEquals(7, attemptedNotifications)
+        coVerify(exactly = 1) { transactionRepository.insertIfAbsent(any()) }
+    }
+
+    @Test
+    fun `observer fatal VM errors are never swallowed`() = runTest {
+        assertFailsWith<OutOfMemoryError> {
+            pipeline.processSingle(
+                sms = transactionSms(),
+                lease = lease,
+                observer = PipelineService.ProcessingObserver {
+                    throw OutOfMemoryError("fatal observer failure")
+                }
+            )
+        }
+
+        coVerify(exactly = 0) { lease.extract(any()) }
+        coVerify(exactly = 0) { transactionRepository.insertIfAbsent(any()) }
+    }
+
+    @Test
+    fun `fatal token observer error escapes runtime error conversion`() = runTest {
+        coEvery { lease.extract(any()) } coAnswers {
+            val request = firstArg<SlmExtractionRequest>()
+            try {
+                request.thinkingCallback?.onToken("private reasoning")
+            } catch (_: OutOfMemoryError) {
+                // Mirrors a runtime boundary that converts callback throwables
+                // into a regular inference error result.
+            }
+            SlmExtractionResult.Error(
+                message = "runtime converted callback failure",
+                model = model
+            )
+        }
+
+        assertFailsWith<OutOfMemoryError> {
+            pipeline.processSingle(
+                sms = transactionSms(),
+                lease = lease,
+                observer = PipelineService.ProcessingObserver { event ->
+                    if (event is PipelineService.ProcessingEvent.ThinkingTokenDelta) {
+                        throw OutOfMemoryError("fatal token observer failure")
+                    }
+                }
+            )
+        }
+
+        coVerify(exactly = 0) { transactionRepository.insertIfAbsent(any()) }
+    }
+
+    @Test
+    fun `fatal token observer error wins over runtime cancellation`() = runTest {
+        coEvery { lease.extract(any()) } coAnswers {
+            val request = firstArg<SlmExtractionRequest>()
+            try {
+                request.jsonCallback?.onToken("{\"amount\":")
+            } catch (_: OutOfMemoryError) {
+                // Mirrors a coordinator stop racing the backend failure.
+            }
+            throw CancellationException("runtime stopped")
+        }
+
+        assertFailsWith<OutOfMemoryError> {
+            pipeline.processSingle(
+                sms = transactionSms(),
+                lease = lease,
+                observer = PipelineService.ProcessingObserver { event ->
+                    if (event is PipelineService.ProcessingEvent.JsonTokenDelta) {
+                        throw OutOfMemoryError("fatal token observer failure")
+                    }
+                }
+            )
+        }
+
+        coVerify(exactly = 0) { transactionRepository.insertIfAbsent(any()) }
     }
 
     private fun transactionSms(date: Long = 1_000L) = SmsReader.SmsMessage(
