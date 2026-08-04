@@ -102,7 +102,7 @@ jobs:
           java-version: '17'
 
       - name: Validate Gradle wrapper and set up Gradle
-        uses: gradle/actions/setup-gradle@v6
+        uses: gradle/actions/setup-gradle@v6.2.0
         with:
           validate-wrappers: true
 
