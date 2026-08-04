@@ -19,6 +19,39 @@ updates:
           - patch
     # Major Android/Gradle upgrades need an explicit maintainer-reviewed PR.
     ignore:
+      # These releases require the API 37 / AGP 9 platform migration.
+      - dependency-name: 'com.google.dagger:*'
+        versions:
+          - '[2.59,)'
+      - dependency-name: 'com.google.dagger.hilt.android'
+        versions:
+          - '[2.59,)'
+      - dependency-name: 'androidx.hilt:hilt-navigation-compose'
+        versions:
+          - '[1.4.0,)'
+      - dependency-name: 'androidx.lifecycle:*'
+        versions:
+          - '[2.11.0,)'
+      - dependency-name: 'androidx.core:*'
+        versions:
+          - '[1.19.0,)'
+      # Room 2.8 needs a separately reviewed migration-test and encrypted-database upgrade.
+      - dependency-name: 'androidx.room:*'
+        versions:
+          - '[2.8.0,)'
+      - dependency-name: 'androidx.room'
+        versions:
+          - '[2.8.0,)'
+      # Kotlin 2.4 metadata requires the Hilt / AGP 9 migration.
+      - dependency-name: 'org.jetbrains.kotlin:*'
+        versions:
+          - '[2.4.0,)'
+      - dependency-name: 'org.jetbrains.kotlin.android'
+        versions:
+          - '[2.4.0,)'
+      - dependency-name: 'org.jetbrains.kotlin.plugin.compose'
+        versions:
+          - '[2.4.0,)'
       - dependency-name: '*'
         update-types:
           - version-update:semver-major

@@ -33,7 +33,7 @@ class SmsReaderUnitTest {
     @Test
     fun `fetchInbox should query correct URI`() {
         val cursor = MatrixCursor(arrayOf("_id", "address", "body", "date", "type"))
-        cursor.addRow(arrayOf(1, "AX-HDFCBK", "Rs.500 credited", 1000L, 1))
+        cursor.addRow(arrayOf<Any?>(1, "AX-HDFCBK", "Rs.500 credited", 1000L, 1))
 
         every {
             mockContentResolver.query(
@@ -55,7 +55,7 @@ class SmsReaderUnitTest {
             arrayOf("_id", "address", "body", "date", "date_sent", "type")
         )
         cursor.addRow(
-            arrayOf(
+            arrayOf<Any?>(
                 1,
                 "AX-HDFCBK",
                 "Rs.500 credited to a/c XX0000",
@@ -88,7 +88,7 @@ class SmsReaderUnitTest {
             arrayOf("_id", "address", "body", "date", "date_sent", "type")
         )
         cursor.addRow(
-            arrayOf(
+            arrayOf<Any?>(
                 9,
                 "AX-HDFCBK",
                 "Rs.500 credited to a/c XX0000",
@@ -197,7 +197,7 @@ class SmsReaderUnitTest {
     fun `fetchInbox should respect limit`() {
         val cursor = MatrixCursor(arrayOf("_id", "address", "body", "date", "type"))
         for (i in 1..10) {
-            cursor.addRow(arrayOf(i, "AX-BANK", "SMS $i", i * 1000L, 1))
+            cursor.addRow(arrayOf<Any?>(i, "AX-BANK", "SMS $i", i * 1000L, 1))
         }
 
         every {
@@ -214,9 +214,9 @@ class SmsReaderUnitTest {
     @Test
     fun `fetchInbox should filter by address pattern`() {
         val cursor = MatrixCursor(arrayOf("_id", "address", "body", "date", "type"))
-        cursor.addRow(arrayOf(1, "AX-HDFCBK", "HDFC SMS", 1000L, 1))
-        cursor.addRow(arrayOf(2, "AX-SBINB", "SBI SMS", 2000L, 1))
-        cursor.addRow(arrayOf(3, "AX-ICICIB", "ICICI SMS", 3000L, 1))
+        cursor.addRow(arrayOf<Any?>(1, "AX-HDFCBK", "HDFC SMS", 1000L, 1))
+        cursor.addRow(arrayOf<Any?>(2, "AX-SBINB", "SBI SMS", 2000L, 1))
+        cursor.addRow(arrayOf<Any?>(3, "AX-ICICIB", "ICICI SMS", 3000L, 1))
 
         every {
             mockContentResolver.query(
@@ -290,7 +290,7 @@ class SmsReaderUnitTest {
     fun `fetchInbox should skip rows according to offset`() {
         val cursor = MatrixCursor(arrayOf("_id", "address", "body", "date", "type"))
         for (i in 1..5) {
-            cursor.addRow(arrayOf(i, "AX-BANK-$i", "SMS $i", i * 1000L, 1))
+            cursor.addRow(arrayOf<Any?>(i, "AX-BANK-$i", "SMS $i", i * 1000L, 1))
         }
 
         every {
@@ -309,7 +309,7 @@ class SmsReaderUnitTest {
     @Test
     fun `fetchInbox should skip address filter when addressPattern is invalid regex`() {
         val cursor = MatrixCursor(arrayOf("_id", "address", "body", "date", "type"))
-        cursor.addRow(arrayOf(1, "AX-HDFCBK", "HDFC SMS", 1000L, 1))
+        cursor.addRow(arrayOf<Any?>(1, "AX-HDFCBK", "HDFC SMS", 1000L, 1))
 
         every {
             mockContentResolver.query(
