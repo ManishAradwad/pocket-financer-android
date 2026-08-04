@@ -1,10 +1,10 @@
 package com.pocketfinancer.ui.home
 
 import android.content.Context
-import android.content.pm.ApplicationInfo
-import android.os.Build
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.pocketfinancer.SlmAppFlowCoordinator
+import com.pocketfinancer.SlmAppFlowState
 import com.pocketfinancer.data.model.Transaction
 import com.pocketfinancer.data.model.TransactionType
 import com.pocketfinancer.data.repository.TransactionRepository
@@ -54,7 +54,8 @@ data class ModelUpgradeRecommendation(
     val statusMessage: String? = null,
     val error: String? = null,
     val isDebugEmulatorOverride: Boolean = false,
-    val isDismissed: Boolean = false
+    val isDismissed: Boolean = false,
+    val startBlockedMessage: String? = null
 )
 
 data class HomeUiState(
@@ -62,6 +63,7 @@ data class HomeUiState(
     val periodData: Map<String, PeriodData> = emptyMap(),
     val totalTransactionCount: Int = 0,
     val syncState: HomeSyncState = HomeSyncState(),
+    val modelDownloadState: ModelDownloader.DownloadState = ModelDownloader.DownloadState(),
     val upgradeRecommendation: ModelUpgradeRecommendation = ModelUpgradeRecommendation(),
     val setupImportState: SetupImportState = SetupImportState(),
     val automaticProcessingEnabled: Boolean =
@@ -81,25 +83,26 @@ class HomeViewModel @Inject constructor(
     private val deviceCapabilities: DeviceCapabilities,
     private val modelDownloader: ModelDownloader,
     private val onboardingSyncManager: OnboardingSyncManager,
+    private val appFlowCoordinator: SlmAppFlowCoordinator,
     private val smsRepository: SmsRepository,
     private val setupImportStore: SetupImportStore,
+    private val modelUpgradeSessionDismissalStore: ModelUpgradeSessionDismissalStore,
     private val automaticProcessingPreferences:
         AutomaticProcessingPreferences
 ) : ViewModel() {
 
     private val _selectedPeriod = MutableStateFlow("Day")
     val selectedPeriod: StateFlow<String> = _selectedPeriod.asStateFlow()
-    private val _isDismissed = MutableStateFlow(false)
-
     val uiState: StateFlow<HomeUiState> = combine(
         transactionRepository.getAllByDateDesc(),
         _selectedPeriod,
         syncManager.syncState,
         modelDownloader.state,
         onboardingSyncManager.syncState,
-        _isDismissed,
+        modelUpgradeSessionDismissalStore.dismissedTierIds,
         setupImportStore.state,
-        automaticProcessingPreferences.enabled
+        automaticProcessingPreferences.enabled,
+        appFlowCoordinator.state
     ) { flows ->
         @Suppress("UNCHECKED_CAST")
         val txs = flows[0] as List<Transaction>
@@ -107,14 +110,16 @@ class HomeViewModel @Inject constructor(
         val syncState = flows[2] as HomeSyncState
         val downloadState = flows[3] as ModelDownloader.DownloadState
         val onboardingSyncState = flows[4] as OnboardingSyncManager.OnboardingSyncState
-        val isDismissed = flows[5] as Boolean
+        @Suppress("UNCHECKED_CAST")
+        val dismissedTierIds = flows[5] as Set<String>
         val setupImportState = flows[6] as SetupImportState
         val automaticProcessingEnabled = flows[7] as Boolean
+        val appFlowState = flows[8] as SlmAppFlowState
 
         val periodDataMap = calculatePeriodData(txs)
         val device = deviceCapabilities.assessDevice()
         val currentSlm = resolveActiveSlmTier(context, modelStorage.modelDirectory, device)
-        val allowDebugOverride = allowDebugEmulatorOverride()
+        val allowDebugOverride = allowDebugEmulatorModelUpgrade(context)
         val upgradeTarget = selectModelUpgradeTarget(
             device = device,
             allowDebugEmulatorOverride = allowDebugOverride
@@ -171,7 +176,14 @@ class HomeViewModel @Inject constructor(
                                 allowDebugEmulatorOverride = false
                             ).tier == SlmTier.DEFAULT_ONBOARDING_SLM
                     ),
-            isDismissed = isDismissed
+            isDismissed = recommendedSlm?.id in dismissedTierIds,
+            startBlockedMessage = modelUpgradeStartBlockedMessage(
+                onboarding = onboardingSyncState,
+                otherFlowBusy = syncState.status == HomeSyncState.Status.SYNCING ||
+                    downloadState.isDownloading ||
+                    appFlowState.activeCount > 0 ||
+                    appFlowState.admissionPaused
+            )
         )
 
         HomeUiState(
@@ -179,6 +191,7 @@ class HomeViewModel @Inject constructor(
             periodData = periodDataMap,
             totalTransactionCount = txs.size,
             syncState = syncState,
+            modelDownloadState = downloadState,
             upgradeRecommendation = upgradeRec,
             setupImportState = setupImportState,
             automaticProcessingEnabled = automaticProcessingEnabled
@@ -317,12 +330,20 @@ class HomeViewModel @Inject constructor(
     }
 
     fun startModelUpgrade() {
+        val onboarding = onboardingSyncManager.syncState.value
+        val appFlows = appFlowCoordinator.state.value
+        val otherFlowBusy = syncManager.syncState.value.status ==
+            HomeSyncState.Status.SYNCING ||
+            modelDownloader.state.value.isDownloading ||
+            appFlows.activeCount > 0 ||
+            appFlows.admissionPaused
+        if (modelUpgradeStartBlockedMessage(onboarding, otherFlowBusy) != null) return
         val device = deviceCapabilities.assessDevice()
         val recommendedSlm =
-            unfinishedModelUpgradeTarget(onboardingSyncManager.syncState.value)
+            unfinishedModelUpgradeTarget(onboarding)
                 ?: selectModelUpgradeTarget(
                     device = device,
-                    allowDebugEmulatorOverride = allowDebugEmulatorOverride()
+                    allowDebugEmulatorOverride = allowDebugEmulatorModelUpgrade(context)
                 ).tier
                 ?: return
         onboardingSyncManager.startModelUpgrade(context, recommendedSlm)
@@ -338,7 +359,8 @@ class HomeViewModel @Inject constructor(
     }
 
     fun dismissUpgradeBanner() {
-        _isDismissed.value = true
+        uiState.value.upgradeRecommendation.recommendedSlm
+            ?.let { modelUpgradeSessionDismissalStore.dismiss(it.id) }
     }
 
     fun resetSyncState() {
@@ -528,16 +550,6 @@ class HomeViewModel @Inject constructor(
         const val KEY_SELECTED_SLM_ID = "selected_slm_id"
     }
 
-    private fun isProbablyEmulator(): Boolean =
-        Build.FINGERPRINT.startsWith("generic") ||
-            Build.FINGERPRINT.startsWith("unknown") ||
-            Build.MODEL.contains("Emulator", ignoreCase = true) ||
-            Build.MODEL.contains("Android SDK built for", ignoreCase = true) ||
-            Build.PRODUCT.contains("sdk", ignoreCase = true)
-
-    private fun allowDebugEmulatorOverride(): Boolean =
-        (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0 &&
-            isProbablyEmulator()
 }
 
 internal fun setupTierForPreparation(

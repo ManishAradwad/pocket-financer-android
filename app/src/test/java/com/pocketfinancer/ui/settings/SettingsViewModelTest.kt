@@ -2,6 +2,7 @@ package com.pocketfinancer.ui.settings
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.content.pm.ApplicationInfo
 import android.util.Log
 import com.pocketfinancer.ProvisionalSelectedModelPin
 import com.pocketfinancer.SelectedModelResidency
@@ -93,6 +94,33 @@ class SettingsViewModelTest {
             runCurrent()
 
             assertTrue(viewModel.state.value.gbnfGrammarEnabled)
+        }
+
+    @Test
+    fun `active initial setup blocks an upgrade at click time`() =
+        runTest(dispatcher) {
+            val fixture = fixture(initialSetupModelPrepared = true)
+            val viewModel = fixture.createViewModel()
+            runCurrent()
+
+            // Do not let collectors run after this state change: the action
+            // must guard against the click-time race using the manager itself.
+            fixture.onboardingState.value =
+                OnboardingSyncManager.OnboardingSyncState(
+                    isRunning = true,
+                    runPurpose = OnboardingSyncManager.RunPurpose.INITIAL_SETUP,
+                    selectedSlm = SlmTier.DEFAULT_ONBOARDING_SLM
+                )
+
+            viewModel.startRecommendedModelUpgrade()
+
+            verify(exactly = 0) {
+                fixture.onboardingSync.startModelUpgrade(any(), any())
+            }
+            assertEquals(
+                "Finish the current setup or history import before starting a model upgrade.",
+                viewModel.state.value.upgradeRecommendation.startBlockedMessage
+            )
         }
 
     @Test
@@ -617,6 +645,12 @@ class SettingsViewModelTest {
         val setupImportState = MutableStateFlow(
             SetupImportState(modelPrepared = initialSetupModelPrepared)
         )
+        val homeSync = mockk<HomeSyncManager>()
+        val homeSyncState = MutableStateFlow(HomeSyncState())
+        val onboardingSync = mockk<OnboardingSyncManager>(relaxed = true)
+        val onboardingState = MutableStateFlow(
+            OnboardingSyncManager.OnboardingSyncState()
+        )
         val permissionHealthReader = mockk<SettingsPermissionHealthReader>()
         val permissionHealth = MutableStateFlow(
             SettingsPermissionHealthSnapshot(
@@ -652,6 +686,7 @@ class SettingsViewModelTest {
         every {
             context.getSharedPreferences(".app_settings", Context.MODE_PRIVATE)
         } returns sharedPreferences
+        every { context.applicationInfo } returns ApplicationInfo()
         every { permissionHealthReader.read() } answers {
             permissionHealth.value
         }
@@ -661,6 +696,8 @@ class SettingsViewModelTest {
         } returns onboardingCompleted
         every { automaticProcessingPreferences.enabled } returns automaticProcessing
         every { setupImportStore.state } returns setupImportState
+        every { homeSync.syncState } returns homeSyncState
+        every { onboardingSync.syncState } returns onboardingState
         coEvery {
             automaticProcessingPreferences.disableAndCleanupPending(any())
         } coAnswers {
@@ -712,7 +749,11 @@ class SettingsViewModelTest {
             modelDownloader = modelDownloader,
             downloaderState = downloaderState,
             selectedModelResidency = selectedModelResidency,
-            setupImportStore = setupImportStore
+            setupImportStore = setupImportStore,
+            homeSync = homeSync,
+            homeSyncState = homeSyncState,
+            onboardingSync = onboardingSync,
+            onboardingState = onboardingState
         )
     }
 
@@ -738,15 +779,14 @@ class SettingsViewModelTest {
         val modelDownloader: ModelDownloader,
         val downloaderState: MutableStateFlow<ModelDownloader.DownloadState>,
         val selectedModelResidency: SelectedModelResidency,
-        val setupImportStore: SetupImportStore
+        val setupImportStore: SetupImportStore,
+        val homeSync: HomeSyncManager,
+        val homeSyncState: MutableStateFlow<HomeSyncState>,
+        val onboardingSync: OnboardingSyncManager,
+        val onboardingState:
+            MutableStateFlow<OnboardingSyncManager.OnboardingSyncState>
     ) {
         fun createViewModel(): SettingsViewModel {
-            val homeSync = mockk<HomeSyncManager>()
-            val onboardingSync = mockk<OnboardingSyncManager>()
-            every { homeSync.syncState } returns MutableStateFlow(HomeSyncState())
-            every { onboardingSync.syncState } returns MutableStateFlow(
-                OnboardingSyncManager.OnboardingSyncState()
-            )
             return SettingsViewModel(
                 context = context,
                 deviceCapabilities = deviceCapabilities,

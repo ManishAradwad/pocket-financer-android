@@ -35,6 +35,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
+import com.pocketfinancer.inference.ModelDownloader
+import com.pocketfinancer.ui.model.ModelDownloadProgressPanel
+import kotlinx.coroutines.launch
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -56,6 +59,8 @@ fun HomeScreen(
     val state by viewModel.uiState.collectAsState()
     val selectedPeriod by viewModel.selectedPeriod.collectAsState()
     val context = LocalContext.current
+    val snackbarHostState = remember { SnackbarHostState() }
+    val coroutineScope = rememberCoroutineScope()
 
     val pData = state.periodData[selectedPeriod] ?: PeriodData()
     var showDrawer by remember { mutableStateOf(false) }
@@ -244,6 +249,7 @@ fun HomeScreen(
                 item {
                     SetupImportCard(
                         state = state.setupImportState,
+                        downloadState = state.modelDownloadState,
                         automaticProcessingEnabled =
                             state.automaticProcessingEnabled,
                         onAction = onSetupAction,
@@ -375,7 +381,19 @@ fun HomeScreen(
                                 }
                             },
                             onCancel = { viewModel.cancelModelUpgrade() },
-                            onDismiss = { viewModel.dismissUpgradeBanner() }
+                            onDismiss = {
+                                viewModel.dismissUpgradeBanner()
+                                coroutineScope.launch {
+                                    val result = snackbarHostState.showSnackbar(
+                                        message = "You can upgrade later from Settings > On-device AI.",
+                                        actionLabel = "Open settings",
+                                        duration = SnackbarDuration.Long
+                                    )
+                                    if (result == SnackbarResult.ActionPerformed) {
+                                        onNavigateToTab("settings")
+                                    }
+                                }
+                            }
                         )
                     }
                 }
@@ -619,6 +637,13 @@ fun HomeScreen(
         }
 
         // ── Drawer Overlay ──
+        SnackbarHost(
+            hostState = snackbarHostState,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(16.dp)
+        )
+
         if (showDrawer) {
             ModalBottomSheet(
                 onDismissRequest = { showDrawer = false },
@@ -826,6 +851,7 @@ fun HomeScreen(
 private fun SetupImportCard(
     state: com.pocketfinancer.setup.SetupImportState,
     automaticProcessingEnabled: Boolean,
+    downloadState: ModelDownloader.DownloadState,
     onAction: (SetupCardAction) -> Unit,
     onHowThisWorks: () -> Unit
 ) {
@@ -909,11 +935,19 @@ private fun SetupImportCard(
                 )
             }
             if (model.showProgress) {
-                LinearProgressIndicator(
-                    modifier = Modifier.fillMaxWidth(),
-                    color = M3_Primary,
-                    trackColor = M3_SurfaceContainerHigh
-                )
+                if (state.status == SetupImportStatus.DOWNLOADING) {
+                    ModelDownloadProgressPanel(
+                        downloadState = downloadState,
+                        label = "Downloading the on-device model...",
+                        preparingLabel = "Preparing the on-device model download..."
+                    )
+                } else {
+                    LinearProgressIndicator(
+                        modifier = Modifier.fillMaxWidth(),
+                        color = M3_Primary,
+                        trackColor = M3_SurfaceContainerHigh
+                    )
+                }
             }
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -2138,56 +2172,10 @@ fun ModelUpgradeBanner(
                 }
 
             if (recommendation.isDownloading && !recommendation.isCancelling) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(M3_SurfaceContainer, RoundedCornerShape(12.dp))
-                        .padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "Downloading model in background...",
-                            color = M3_OnSurface,
-                            style = MaterialTheme.typography.labelSmall
-                        )
-                        Text(
-                            text = "${"%.0f".format(ds.progress * 100)}%",
-                            color = M3_Primary,
-                            style = AppTypography.bodySmallBold
-                        )
-                    }
-                    LinearProgressIndicator(
-                        progress = { ds.progress },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(6.dp)
-                            .clip(RoundedCornerShape(3.dp)),
-                        color = M3_Primary,
-                        trackColor = M3_OutlineVariant.copy(alpha = 0.3f)
-                    )
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text(
-                            text = "${"%.1f".format(ds.downloadedMb)} / ${"%.1f".format(ds.totalMb)} MB",
-                            color = M3_OnSurfaceVariant,
-                            style = AppTypography.timestamp
-                        )
-                        if (ds.speedMbps > 0) {
-                            Text(
-                                text = "${"%.1f".format(ds.speedMbps)} MB/s",
-                                color = M3_OnSurfaceVariant,
-                                style = AppTypography.timestamp
-                            )
-                        }
-                    }
-                }
+                ModelDownloadProgressPanel(
+                    downloadState = ds,
+                    preparingLabel = "Preparing model upgrade download..."
+                )
             } else if (recommendation.isRunning) {
                 Row(
                     modifier = Modifier
@@ -2231,6 +2219,13 @@ fun ModelUpgradeBanner(
                     }
                 }
             } else {
+                recommendation.startBlockedMessage?.let { message ->
+                    Text(
+                        text = message,
+                        color = M3_OnSurfaceVariant,
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.End,
@@ -2242,13 +2237,13 @@ fun ModelUpgradeBanner(
                     Spacer(modifier = Modifier.width(8.dp))
                     Button(
                         onClick = onUpgrade,
+                        enabled = recommendation.startBlockedMessage == null,
                         colors = ButtonDefaults.buttonColors(containerColor = M3_Primary),
                         shape = RoundedCornerShape(100)
                     ) {
                         Icon(
                             imageVector = Icons.Rounded.Download,
                             contentDescription = null,
-                            tint = M3_OnPrimary,
                             modifier = Modifier.size(16.dp)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
@@ -2258,7 +2253,6 @@ fun ModelUpgradeBanner(
                                 recommendation.error != null -> "Retry Upgrade"
                                 else -> "Upgrade Model"
                             },
-                            color = M3_OnPrimary,
                             style = AppTypography.titleSmallBold
                         )
                     }

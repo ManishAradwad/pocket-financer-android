@@ -6,6 +6,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import com.pocketfinancer.ui.onboarding.OnboardingSyncManager
 
 class ModelUpgradePolicyTest {
 
@@ -78,6 +79,19 @@ class ModelUpgradePolicyTest {
                 current = SlmTier.QWEN3_1_7B_Q4_K_M,
                 target = SlmTier.QWEN3_1_7B_Q4_K_M
             )
+        )
+    }
+
+    @Test
+    fun `other model work blocks a new upgrade on every surface`() {
+        val message = modelUpgradeStartBlockedMessage(
+            onboarding = OnboardingSyncManager.OnboardingSyncState(),
+            otherFlowBusy = true
+        )
+
+        assertEquals(
+            "Finish the current model task before starting a model upgrade.",
+            message
         )
     }
 

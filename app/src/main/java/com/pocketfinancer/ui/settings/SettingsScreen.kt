@@ -34,6 +34,7 @@ import com.pocketfinancer.hardware.DeviceCapabilities
 import com.pocketfinancer.hardware.SlmTier
 import com.pocketfinancer.inference.DownloadOwner
 import com.pocketfinancer.ui.theme.*
+import com.pocketfinancer.ui.model.ModelDownloadProgressPanel
 
 @Composable
 fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
@@ -340,7 +341,16 @@ private fun OnDeviceAiCard(state: SettingsUiState, viewModel: SettingsViewModel)
             },
             valueColor = if (state.modelLoaded) M3_Pos else M3_OnSurface
         )
-        if (!state.initialSetupModelPrepared) {
+        val initialDownload = state.initialSetupDownloadState
+        val upgrade = state.upgradeRecommendation
+        if (initialDownload != null) {
+            ModelDownloadProgressPanel(
+                downloadState = initialDownload,
+                modifier = Modifier.padding(top = 10.dp),
+                label = "Downloading the first on-device model...",
+                preparingLabel = "Preparing the first on-device model download..."
+            )
+        } else if (!state.initialSetupModelPrepared) {
             Text(
                 text =
                     "Prepare the first on-device model from Home. The Home " +
@@ -351,28 +361,13 @@ private fun OnDeviceAiCard(state: SettingsUiState, viewModel: SettingsViewModel)
                 modifier = Modifier.padding(top = 10.dp)
             )
         } else if (download.isDownloading) {
-            Text(
-                text = "Downloading " +
-                    (activeDownloadTier?.name ?: download.artifactFileName ?: "model"),
-                color = M3_OnSurface,
-                style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.padding(top = 8.dp)
-            )
-            LinearProgressIndicator(
-                progress = { download.progress },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 8.dp),
-                color = M3_Primary,
-                trackColor = M3_SurfaceContainerLow
-            )
-            Text(
-                "${"%.0f".format(download.progress * 100)}% · " +
-                    "${"%.1f".format(download.downloadedMb)} / " +
-                    "${"%.1f".format(download.totalMb)} MB",
-                color = M3_OnSurfaceVariant,
-                style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.padding(top = 4.dp)
+            val downloadName =
+                activeDownloadTier?.name ?: download.artifactFileName ?: "model"
+            ModelDownloadProgressPanel(
+                downloadState = download,
+                modifier = Modifier.padding(top = 10.dp),
+                label = "Downloading $downloadName...",
+                preparingLabel = "Preparing $downloadName download..."
             )
             OutlinedButton(
                 onClick = viewModel::cancelDownload,
@@ -383,6 +378,8 @@ private fun OnDeviceAiCard(state: SettingsUiState, viewModel: SettingsViewModel)
             ) {
                 Text(if (download.owner == DownloadOwner.SETTINGS) "Cancel download" else "Managed from Home")
             }
+        } else if (upgrade.isUpgradeAvailable) {
+            RecommendedModelUpgrade(state = state, viewModel = viewModel)
         } else if (!download.isComplete) {
             Button(
                 onClick = viewModel::downloadSelectedModel,
@@ -415,6 +412,126 @@ private fun OnDeviceAiCard(state: SettingsUiState, viewModel: SettingsViewModel)
                 style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.padding(top = 8.dp)
             )
+        }
+    }
+}
+
+@Composable
+private fun RecommendedModelUpgrade(
+    state: SettingsUiState,
+    viewModel: SettingsViewModel
+) {
+    val upgrade = state.upgradeRecommendation
+    val target = upgrade.recommendedSlm ?: return
+    val wasCancelled = !upgrade.isRunning && upgrade.statusMessage == "Cancelled"
+
+    HorizontalDivider(
+        modifier = Modifier.padding(vertical = 12.dp),
+        color = M3_OutlineVariant.copy(alpha = 0.35f)
+    )
+    Text(
+        text = "UPDATE AVAILABLE",
+        color = M3_Primary,
+        style = MaterialTheme.typography.labelSmall
+    )
+    Text(
+        text = target.name,
+        color = M3_OnSurface,
+        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+        modifier = Modifier.padding(top = 4.dp)
+    )
+    Text(
+        text = "A higher-quality local model is available (~${"%.1f".format(target.sizeGb)} GB). " +
+            "The current model remains active until the download is validated and safely activated.",
+        color = M3_OnSurfaceVariant,
+        style = MaterialTheme.typography.bodySmall,
+        modifier = Modifier.padding(top = 4.dp)
+    )
+
+    when {
+        upgrade.isDownloading && !upgrade.isCancelling -> {
+            ModelDownloadProgressPanel(
+                downloadState = upgrade.downloadState,
+                modifier = Modifier.padding(top = 10.dp),
+                preparingLabel = "Preparing model upgrade download..."
+            )
+        }
+        upgrade.isRunning -> {
+            Row(
+                modifier = Modifier.padding(top = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(20.dp),
+                    strokeWidth = 2.dp,
+                    color = M3_Primary
+                )
+                Column {
+                    Text(
+                        text = when {
+                            upgrade.isCancelling -> "Cancelling model upgrade..."
+                            upgrade.isApplying -> "Activating model..."
+                            else -> "Preparing model upgrade..."
+                        },
+                        color = M3_OnSurface,
+                        style = MaterialTheme.typography.labelMedium
+                    )
+                    upgrade.statusMessage?.let { message ->
+                        Text(
+                            text = message,
+                            color = M3_OnSurfaceVariant,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
+            }
+        }
+        else -> {
+            upgrade.error?.let { error ->
+                Text(
+                    text = error,
+                    color = M3_Error,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(top = 8.dp)
+                )
+            }
+            upgrade.startBlockedMessage?.let { message ->
+                Text(
+                    text = message,
+                    color = M3_OnSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(top = 8.dp)
+                )
+            }
+            Button(
+                onClick = viewModel::startRecommendedModelUpgrade,
+                enabled = upgrade.startBlockedMessage == null &&
+                    !state.flowBusy &&
+                    !state.resetRunning &&
+                    !state.testRunning &&
+                    !state.loadingModel,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 10.dp)
+            ) {
+                Text(
+                    when {
+                        wasCancelled -> "Resume upgrade"
+                        upgrade.error != null -> "Retry upgrade"
+                        else -> "Download and use update"
+                    }
+                )
+            }
+        }
+    }
+
+    if (upgrade.canCancel) {
+        TextButton(
+            onClick = viewModel::cancelRecommendedModelUpgrade,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("Cancel upgrade")
         }
     }
 }
@@ -725,44 +842,13 @@ private fun EngineCard(state: SettingsUiState, viewModel: SettingsViewModel) {
         // ── Download Section ──
 
         if (ds.isDownloading) {
-            LabelValue(
-                "Downloading",
-                activeDownloadTier?.let { it.name + " · " + it.sizeMb + " MB" }
-                    ?: ds.artifactFileName ?: "Model"
+            val downloadName =
+                activeDownloadTier?.name ?: ds.artifactFileName ?: "model"
+            ModelDownloadProgressPanel(
+                downloadState = ds,
+                label = "Downloading $downloadName...",
+                preparingLabel = "Preparing $downloadName download..."
             )
-            // Progress bar during download
-            LinearProgressIndicator(
-                progress = { ds.progress },
-                modifier = Modifier.fillMaxWidth(),
-                color = M3_Primary,
-                trackColor = M3_SurfaceContainerLow,
-            )
-
-            Spacer(modifier = Modifier.height(6.dp))
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Text(
-                    text = "${"%.0f".format(ds.progress * 100)}% · ${"%.1f".format(ds.downloadedMb)} / ${"%.1f".format(ds.totalMb)} MB",
-                    color = M3_OnSurfaceVariant,
-                    style = MaterialTheme.typography.bodySmall
-                )
-                Text(
-                    text = if (ds.speedMbps > 0.01f) "${"%.1f".format(ds.speedMbps)} MB/s" else "",
-                    color = M3_OnSurfaceVariant,
-                    style = MaterialTheme.typography.bodySmall
-                )
-            }
-
-            if (ds.etaSeconds > 0) {
-                Text(
-                    text = "ETA: ${formatEta(ds.etaSeconds)}",
-                    color = M3_OnSurfaceVariant,
-                    style = MaterialTheme.typography.bodySmall
-                )
-            }
 
             Spacer(modifier = Modifier.height(8.dp))
 
@@ -881,12 +967,6 @@ private fun EngineCard(state: SettingsUiState, viewModel: SettingsViewModel) {
     }
 }
 
-private fun formatEta(seconds: Long): String {
-    if (seconds < 60) return "${seconds}s"
-    val m = seconds / 60
-    val s = seconds % 60
-    return "${m}m ${s}s"
-}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Reusable Components
