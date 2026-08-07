@@ -6,7 +6,7 @@
 [![Language](https://img.shields.io/badge/Language-Kotlin_100%25-7F52FF?style=flat-square&logo=kotlin&logoColor=white)](https://kotlinlang.org/)
 [![Database](https://img.shields.io/badge/Database-SQLCipher_Room_AES--256-005C8A?style=flat-square&logo=sqlite&logoColor=white)](https://www.zetetic.net/sqlcipher/)
 
-Pocket Financer is a secure, **privacy-first, on-device financial tracking and analytics application** designed specifically for Indian bank and card SMS notifications. It reads transactional alerts (such as bank debits, credit card swipes, UPI transfers, and deposits) and automatically populates a local dashboard.
+Pocket Financer is a secure, **privacy-first, on-device financial tracking and analytics application** designed specifically for Indian bank and card SMS notifications. It reads transactional alerts (such as bank debits, credit card swipes, UPI transfers, and deposits) and populates a local dashboard through manual scans or optional automatic processing.
 
 The downloadable APK supports 64-bit ARM Android devices running Android 8.0
 or newer. The x86_64 build included in the universal APK supports emulators;
@@ -27,7 +27,7 @@ By leveraging a local **Small Language Model (SLM)** backed by `llama.cpp` via a
 *   **Dynamic Hardware Auto-Tuning**: Smart hardware profiling detects device RAM capacities and CPU architectures (specifically checking for `ARMv8.2-A` instruction features like `i8mm` and `dotprod` to accelerate integer math) to select the optimal model size automatically.
 *   **Disk-Based KV Cache Caching**: Saves and loads the static prefix KV cache state to/from disk using SHA-256 hashes. This cuts prefill time from ~140 seconds down to `< 100ms` on subsequent runs while automatically cleaning up old stale session files.
 *   **Cryptographically Secured Database**: Persists transaction and account information in a Room database encrypted with **SQLCipher (AES-256)**, protecting the local ledger at rest.
-*   **Durable Real-time & Historical Ingestion**: An Android `BroadcastReceiver` first admits raw evidence to an encrypted Room outbox, then gives WorkManager only an opaque candidate key. Inbox discovery preserves provider IDs and widens from 7 to 30 to 90 days only when no new eligible candidates are found.
+*   **Durable Real-time & Historical Ingestion**: Automatic processing is off until the user opts in. When enabled, an Android `BroadcastReceiver` admits raw evidence to an encrypted Room outbox, then gives WorkManager only an opaque candidate key. Inbox discovery remains available manually, preserves provider IDs, and widens from 7 to 30 to 90 days only when no new eligible candidates are found.
 *   **Fast, Resumable First Run**: The pre-shell flow contains one calm introduction and the required SMS permission. Model preparation (about 700 MB) starts only after explicit confirmation, while durable setup/import status, verified coverage, counts, and actionable failures remain visible on Home across recreation or process restart.
 *   **Private, Evidence-Backed Ledger**: Saved transactions retain their source SMS sender and body in encrypted local storage. Settings provides a confirmed erase-all-local-financial-data action while preserving downloaded model files.
 *   **Modern Jetpack Compose UI**: Designed around Material 3 dark-themed specs to present clean dashboards, transaction histories, system hardware capabilities, and engine diagnostics.
@@ -40,7 +40,9 @@ By leveraging a local **Small Language Model (SLM)** backed by `llama.cpp` via a
 ```mermaid
 graph TD
     A[Incoming SMS Alert] -->|Telephony.SMS_RECEIVED| B(SmsReceiver)
-    B -->|Encrypted candidate admission| Q[(SQLCipher outbox)]
+    B --> P{Automatic processing enabled?}
+    P -->|No| M[Await a later manual scan]
+    P -->|Yes: encrypted candidate admission| Q[(SQLCipher outbox)]
     Q -->|Opaque candidate key| W[Unique WorkManager job]
     W --> C[PipelineService]
     C -->|Pre-Filter Checks| FP{SmsFilterPipeline<br>6-Stage Deterministic Filter}

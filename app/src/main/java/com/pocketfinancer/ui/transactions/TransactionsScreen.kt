@@ -37,15 +37,21 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.ui.semantics.LiveRegionMode
-import androidx.compose.ui.semantics.liveRegion
-import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.semantics.stateDescription
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketfinancer.data.model.Transaction
 import com.pocketfinancer.data.model.TransactionType
 import com.pocketfinancer.data.model.Account
 import com.pocketfinancer.ui.home.HomeSyncState
+import com.pocketfinancer.ui.smsprocessing.SmsPipelineActivityCard
+import com.pocketfinancer.ui.smsprocessing.SmsPipelinePhase
+import com.pocketfinancer.ui.smsprocessing.SmsProcessingTarget
+import com.pocketfinancer.ui.smsprocessing.SmsStopUiState
+import com.pocketfinancer.ui.smsprocessing.SmsTelemetryBottomSheet
+import com.pocketfinancer.ui.smsprocessing.SmsTelemetryPresenter
+import com.pocketfinancer.ui.smsprocessing.activeSmsPipelineItem
+import com.pocketfinancer.ui.smsprocessing.ownsManualProcessingTarget
+import com.pocketfinancer.ui.smsprocessing.smsPipelineCardItem
+import com.pocketfinancer.ui.smsprocessing.toSmsPipelineCardUiModel
 import com.pocketfinancer.ui.theme.*
 import java.text.SimpleDateFormat
 import java.util.*
@@ -57,7 +63,9 @@ fun TransactionsScreen(
     viewModel: TransactionsViewModel = hiltViewModel()
 ) {
     val state by viewModel.uiState.collectAsState()
-    var selectedProcessingSmsId by remember { mutableStateOf<String?>(null) }
+    var selectedProcessingTarget by remember {
+        mutableStateOf<SmsProcessingTarget?>(null)
+    }
     var isSearching by remember { mutableStateOf(false) }
     var sortMenuExpanded by remember { mutableStateOf(false) }
     val focusRequester = remember { FocusRequester() }
@@ -361,14 +369,10 @@ fun TransactionsScreen(
                 state.transactions.groupBy { formatDateKey(it.date) }
             }
 
-            val syncCardSms = state.syncState.syncCardItem()
-            val manualSyncActive =
-                state.syncState.status == HomeSyncState.Status.SCANNING ||
-                    state.syncState.status == HomeSyncState.Status.SYNCING ||
-                    state.syncState.status == HomeSyncState.Status.CANCELLING
+            val pipelineCard = state.syncState.toSmsPipelineCardUiModel()
             val showEmptyState = shouldShowTransactionsEmptyState(
                 hasTransactions = state.transactions.isNotEmpty(),
-                hasSyncCard = syncCardSms != null,
+                hasSyncCard = pipelineCard != null,
                 syncStatus = state.syncState.status
             )
 
@@ -391,162 +395,23 @@ fun TransactionsScreen(
                         .fillMaxSize()
                         .weight(1f)
                 ) {
-                    // Active / latest local pipeline result
-                    if (manualSyncActive && syncCardSms == null) {
-                        item {
-                            val isStopping =
-                                state.syncState.status ==
-                                    HomeSyncState.Status.CANCELLING
-                            val controlTitle = if (isStopping) {
-                                "Stopping SMS processing"
-                            } else if (
-                                state.syncState.status ==
-                                    HomeSyncState.Status.SCANNING
-                            ) {
-                                "Scanning recent messages"
-                            } else {
-                                "Processing recent messages"
-                            }
-                            val controlBody = if (isStopping) {
-                                "Finishing the active on-device operation safely. Completed saves remain available."
-                            } else if (
-                                state.syncState.status ==
-                                    HomeSyncState.Status.SCANNING
-                            ) {
-                                "Checking the recent SMS window on this device."
-                            } else {
-                                "Preparing the next eligible message on this device."
-                            }
-                            Card(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 16.dp, vertical = 4.dp)
-                                    .semantics {
-                                        liveRegion = LiveRegionMode.Polite
-                                        stateDescription =
-                                            "$controlTitle. $controlBody"
-                                    },
-                                colors = CardDefaults.cardColors(
-                                    containerColor = M3_SurfaceContainer
-                                )
-                            ) {
-                                Column(
-                                    modifier = Modifier.padding(16.dp),
-                                    verticalArrangement =
-                                        Arrangement.spacedBy(8.dp)
-                                ) {
-                                    Text(
-                                        text = controlTitle,
-                                        style = MaterialTheme.typography.titleMedium,
-                                        color = M3_OnSurface
-                                    )
-                                    Text(
-                                        text = controlBody,
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        color = M3_OnSurfaceVariant
-                                    )
-                                    OutlinedButton(
-                                        onClick = viewModel::stopManualSync,
-                                        enabled = !isStopping,
-                                        modifier = Modifier.fillMaxWidth(),
-                                        colors = ButtonDefaults
-                                            .outlinedButtonColors(
-                                                contentColor = M3_Error,
-                                                disabledContentColor =
-                                                    M3_OnSurfaceVariant
-                                            )
-                                    ) {
-                                        Icon(
-                                            imageVector = if (isStopping) {
-                                                Icons.Rounded.HourglassTop
-                                            } else {
-                                                Icons.Rounded.StopCircle
-                                            },
-                                            contentDescription = null
-                                        )
-                                        Spacer(Modifier.width(8.dp))
-                                        Text(
-                                            if (isStopping) {
-                                                "Stopping safely..."
-                                            } else {
-                                                "Stop SMS processing"
-                                            }
-                                        )
+                    pipelineCard?.let { model ->
+                        item(key = "manual-sms-pipeline") {
+                            SmsPipelineActivityCard(
+                                model = model,
+                                modifier = Modifier.padding(
+                                    horizontal = 16.dp,
+                                    vertical = 4.dp
+                                ),
+                                onInspect = { target ->
+                                    selectedProcessingTarget = target
+                                },
+                                onStop = { target ->
+                                    if (target is SmsProcessingTarget.ManualRecent) {
+                                        viewModel.stopManualSync(target)
                                     }
                                 }
-                            }
-                        }
-                    }
-                    if (syncCardSms != null) {
-                        item {
-                            Column {
-                                ActiveSyncCard(
-                                    activeSms = syncCardSms,
-                                    syncState = state.syncState,
-                                    onClick = {
-                                        selectedProcessingSmsId = syncCardSms.id
-                                    }
-                                )
-                                if (
-                                    state.syncState.status ==
-                                        HomeSyncState.Status.SYNCING ||
-                                    state.syncState.status ==
-                                        HomeSyncState.Status.CANCELLING
-                                ) {
-                                    OutlinedButton(
-                                        onClick = viewModel::stopManualSync,
-                                        enabled =
-                                            state.syncState.status !=
-                                                HomeSyncState.Status.CANCELLING,
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(
-                                                horizontal = 16.dp,
-                                                vertical = 4.dp
-                                            ),
-                                        colors = ButtonDefaults
-                                            .outlinedButtonColors(
-                                                contentColor = M3_Error,
-                                                disabledContentColor =
-                                                    M3_OnSurfaceVariant
-                                            ),
-                                        border = BorderStroke(
-                                            1.dp,
-                                            if (
-                                                state.syncState.status ==
-                                                HomeSyncState.Status.CANCELLING
-                                            ) {
-                                                M3_OutlineVariant
-                                            } else {
-                                                M3_Error.copy(alpha = 0.55f)
-                                            }
-                                        )
-                                    ) {
-                                        Icon(
-                                            imageVector = if (
-                                                state.syncState.status ==
-                                                HomeSyncState.Status.CANCELLING
-                                            ) {
-                                                Icons.Rounded.HourglassTop
-                                            } else {
-                                                Icons.Rounded.StopCircle
-                                            },
-                                            contentDescription = null
-                                        )
-                                        Spacer(Modifier.width(8.dp))
-                                        Text(
-                                            if (
-                                                state.syncState.status ==
-                                                HomeSyncState.Status.CANCELLING
-                                            ) {
-                                                "Stopping safely..."
-                                            } else {
-                                                "Stop SMS processing"
-                                            }
-                                        )
-                                    }
-                                }
-                            }
+                            )
                         }
                     }
 
@@ -1171,123 +1036,91 @@ fun TransactionsScreen(
             }
         }
 
-        // ── Telemetry Details Bottom Sheet ──
-        val selectedProcessingSms =
-            selectedProcessingSmsId?.let { selectedId ->
-                state.syncState.queue.firstOrNull { it.id == selectedId }
-            }
-        if (selectedProcessingSms != null) {
-            val sms = selectedProcessingSms
+        // ── Shared telemetry details bottom sheet ──
+        val processingTarget = selectedProcessingTarget
+        val telemetryModel = remember(state.syncState, processingTarget) {
+            when (processingTarget) {
+                null,
+                is SmsProcessingTarget.Historical -> null
 
-            val currentIndex = state.syncState.currentIndex
-            val isActive = when (state.syncState.status) {
-                HomeSyncState.Status.SYNCING,
-                HomeSyncState.Status.CANCELLING ->
-                    currentIndex != null &&
-                        currentIndex < state.syncState.queue.size &&
-                        state.syncState.queue[currentIndex].id == sms.id
-                else -> false
-            }
-
-            val activeStageIndex = if (isActive) {
-                state.syncState.currentStageIndex ?: 0
-            } else if (
-                sms.status == "synced" ||
-                sms.status == "already_saved" ||
-                sms.status == "filtered_out"
-            ) {
-                4
-            } else {
-                0
-            }
-
-            val finalThinkingOutput = if (isActive) {
-                state.syncState.thinkingOutput
-            } else {
-                ""
-            }
-
-            val finalJsonOutput = if (isActive) {
-                state.syncState.jsonOutput
-            } else if (sms.status == "synced") {
-                "Raw JSON output was not retained after sync."
-            } else if (sms.status == "already_saved") {
-                "Raw JSON output was not retained for an existing transaction."
-            } else if (sms.status == "filtered_out") {
-                "No transaction JSON was retained for this message."
-            } else if (sms.status == "error") {
-                "Output is unavailable because processing did not finish."
-            } else {
-                ""
-            }
-
-            val finalParsedOutput = if (isActive) {
-                if (state.syncState.jsonOutput.isNotEmpty()) {
-                    val parsed = viewModel.getParsedOutput(state.syncState.jsonOutput)
-                    if (parsed == "Parsed: null (non-financial)" && activeStageIndex < 3) {
-                        "Waiting for complete JSON..."
+                is SmsProcessingTarget.ManualRecent -> {
+                    if (!state.syncState.ownsManualProcessingTarget(processingTarget)) {
+                        null
+                    } else if (processingTarget.candidateKey != null) {
+                        val candidate = state.syncState.activeSmsPipelineItem()
+                        if (candidate != null) {
+                            SmsTelemetryPresenter.manual(
+                                state = state.syncState,
+                                sms = candidate,
+                                filterLogs = viewModel.getFilterLogs(candidate),
+                                cacheLogs = viewModel.getKvCacheLogs(candidate),
+                                slmPrompt = viewModel.getSlmPrompt(candidate),
+                                parseJson = viewModel::getParsedOutput,
+                                target = processingTarget
+                            )
+                        } else {
+                            null
+                        }
                     } else {
-                        parsed
+                        val stopping = state.syncState.status ==
+                            HomeSyncState.Status.CANCELLING
+                        SmsTelemetryPresenter.gap(
+                            target = processingTarget,
+                            phase = when {
+                                stopping -> SmsPipelinePhase.STOPPING
+                                state.syncState.status == HomeSyncState.Status.SCANNING ->
+                                    SmsPipelinePhase.SCANNING
+                                else -> SmsPipelinePhase.PROCESSING
+                            },
+                            stopState = if (stopping) {
+                                SmsStopUiState.STOPPING
+                            } else {
+                                SmsStopUiState.AVAILABLE
+                            }
+                        )
                     }
-                } else {
-                    ""
-                }
-            } else if (sms.status == "synced") {
-                "Saved transaction: amount=${sms.parsedAmount ?: "-"}, counterparty=${sms.parsedMerchant ?: "-"}"
-            } else if (sms.status == "already_saved") {
-                "The encrypted ledger already owns this source evidence."
-            } else if (sms.status == "filtered_out") {
-                "No transaction was saved for this message."
-            } else if (sms.status == "error") {
-                "The message could not be saved. The failed stage was not retained."
-            } else {
-                ""
-            }
-
-            ModalBottomSheet(
-                onDismissRequest = { selectedProcessingSmsId = null },
-                sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-                containerColor = M3_SurfaceContainerLow,
-                contentColor = M3_OnSurface,
-                dragHandle = {
-                    Box(
-                        modifier = Modifier
-                            .padding(vertical = 12.dp)
-                            .width(48.dp)
-                            .height(6.dp)
-                            .background(M3_OutlineVariant.copy(alpha = 0.6f), RoundedCornerShape(3.dp))
-                    )
-                }
-            ) {
-                val hasThinking = state.syncState.hasThinkingMode
-                val performanceText = if (isActive) {
-                    state.syncState.activeSmsPerformance
-                } else {
-                    null
                 }
 
-                TelemetryLogsViewer(
-                    sender = sms.sender,
-                    body = sms.body,
-                    status = sms.status,
-                    hasThinkingMode = hasThinking,
-                    isActive = isActive,
-                    activeStageIndex = activeStageIndex,
-                    thinkingOutput = finalThinkingOutput,
-                    jsonOutput = finalJsonOutput,
-                    filterLogs = viewModel.getFilterLogs(sms),
-                    kvLogs = viewModel.getKvCacheLogs(sms),
-                    slmPrompt = viewModel.getSlmPrompt(sms),
-                    parsedOutput = finalParsedOutput,
-                    performanceText = performanceText,
-                    activeModelName = state.syncState.activeModelName,
-                    isStopping =
-                        state.syncState.status ==
-                            HomeSyncState.Status.CANCELLING,
-                    onStop = viewModel::stopManualSync,
-                    onClose = { selectedProcessingSmsId = null }
-                )
+                is SmsProcessingTarget.ManualResult -> {
+                    state.syncState.queue
+                        .firstOrNull {
+                            it.id == processingTarget.candidateKey &&
+                                it.status != "syncing"
+                        }
+                        ?.let { candidate ->
+                            SmsTelemetryPresenter.manual(
+                                state = state.syncState,
+                                sms = candidate,
+                                filterLogs = viewModel.getFilterLogs(candidate),
+                                cacheLogs = viewModel.getKvCacheLogs(candidate),
+                                slmPrompt = viewModel.getSlmPrompt(candidate),
+                                parseJson = viewModel::getParsedOutput,
+                                target = processingTarget
+                            )
+                        }
+                }
             }
+        }
+
+        LaunchedEffect(processingTarget, telemetryModel) {
+            if (processingTarget != null && telemetryModel == null) {
+                selectedProcessingTarget = null
+            }
+        }
+
+        telemetryModel?.let { model ->
+            SmsTelemetryBottomSheet(
+                model = model,
+                onStop = { target ->
+                    if (target is SmsProcessingTarget.ManualRecent) {
+                        viewModel.stopManualSync(target)
+                    }
+                },
+                onClose = {
+                    viewModel.resetSyncState()
+                    selectedProcessingTarget = null
+                }
+            )
         }
     }
 }

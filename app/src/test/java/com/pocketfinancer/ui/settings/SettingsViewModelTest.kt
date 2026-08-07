@@ -307,6 +307,10 @@ class SettingsViewModelTest {
     @Test
     fun `automatic processing preference is exposed and updated through settings state`() =
         runTest(dispatcher) {
+            assertEquals(
+                AutomaticProcessingPreferences.DEFAULT_ENABLED,
+                SettingsUiState().processIncomingSms
+            )
             val fixture = fixture(automaticProcessingInitiallyEnabled = true)
             val viewModel = fixture.createViewModel()
 
@@ -365,7 +369,7 @@ class SettingsViewModelTest {
         }
 
     @Test
-    fun `failed OFF persistence truthfully reports automatic updates remain on`() =
+    fun `failed OFF persistence truthfully reports automatic processing remains on`() =
         runTest(dispatcher) {
             val fixture = fixture(automaticProcessingInitiallyEnabled = true)
             coEvery {
@@ -722,7 +726,8 @@ class SettingsViewModelTest {
 
     private fun fixture(
         gbnfInitiallyEnabled: Boolean = true,
-        automaticProcessingInitiallyEnabled: Boolean = true,
+        automaticProcessingInitiallyEnabled: Boolean =
+            AutomaticProcessingPreferences.DEFAULT_ENABLED,
         modelLoaded: Boolean = false,
         onboardingCompleted: Boolean = true,
         initialSetupModelPrepared: Boolean = true

@@ -8,6 +8,10 @@ import com.pocketfinancer.setup.SetupImportStatus
 import com.pocketfinancer.setup.SetupPauseReason
 import com.pocketfinancer.setup.reconcileSetupModelAvailability
 import com.pocketfinancer.ui.onboarding.OnboardingSyncManager
+import com.pocketfinancer.ui.smsprocessing.SmsProcessingTarget
+import com.pocketfinancer.ui.smsprocessing.SmsPipelinePhase
+import com.pocketfinancer.ui.smsprocessing.ownsManualProcessingTarget
+import com.pocketfinancer.ui.smsprocessing.toSmsPipelineCardUiModel
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -237,14 +241,13 @@ class TrustworthyHomeStateTest {
     }
 
     @Test
-    fun `historical scanning and processing expose an explicit stop target`() {
+    fun `historical setup card keeps aggregate progress without duplicate stop`() {
         val scanning = setupImportCardModel(
             state = SetupImportState(
                 status = SetupImportStatus.SCANNING,
                 activeScanWindowDays = 90,
                 modelPrepared = true
-            ),
-            canStopSmsProcessing = true
+            )
         )
         val processing = setupImportCardModel(
             state = SetupImportState(
@@ -254,18 +257,14 @@ class TrustworthyHomeStateTest {
                 savedCount = 1,
                 rejectedCount = 1,
                 modelPrepared = true
-            ),
-            canStopSmsProcessing = true
+            )
         )
 
-        assertEquals(SetupCardAction.STOP_SMS_PROCESSING, scanning.primaryAction)
-        assertEquals("Stop SMS processing", scanning.primaryLabel)
-        assertEquals(
-            SetupCardActionTarget.STOP_SMS_PROCESSING,
-            scanning.primaryAction!!.target()
-        )
-        assertEquals(SetupCardAction.STOP_SMS_PROCESSING, processing.primaryAction)
-        assertEquals("Stop SMS processing", processing.primaryLabel)
+        assertEquals(null, scanning.primaryAction)
+        assertEquals(null, scanning.primaryLabel)
+        assertEquals(null, processing.primaryAction)
+        assertEquals(null, processing.primaryLabel)
+        assertTrue(processing.evidence!!.contains("2 of 4 checked"))
     }
 
     @Test
@@ -279,8 +278,7 @@ class TrustworthyHomeStateTest {
                 rejectedCount = 1,
                 modelPrepared = true
             ),
-            isCancelling = true,
-            canStopSmsProcessing = true
+            isCancelling = true
         )
 
         assertEquals("Stopping SMS processing", card.title)
@@ -301,7 +299,6 @@ class TrustworthyHomeStateTest {
                 rejectedCount = 1,
                 modelPrepared = true
             ),
-            canStopSmsProcessing = false,
             isFinishing = true
         )
 
@@ -414,23 +411,20 @@ class TrustworthyHomeStateTest {
     }
 
     @Test
-    fun `setup card removes competing actions during manual work or model upgrade`() {
+    fun `setup card does not replace coverage with duplicate manual activity`() {
         val ready = SetupImportState(
             status = SetupImportStatus.READY,
             modelPrepared = true
         )
-        val duringManual = setupImportCardModel(
-            state = ready,
-            manualSmsOperationRunning = true
-        )
+        val duringManual = setupImportCardModel(state = ready)
         val duringUpgrade = setupImportCardModel(
             state = ready,
             modelUpgradeRunning = true
         )
 
-        assertEquals("Recent SMS processing is active", duringManual.title)
-        assertEquals(null, duringManual.primaryAction)
-        assertTrue(duringManual.showProgress)
+        assertEquals("READY · COVERAGE UNKNOWN", duringManual.eyebrow)
+        assertEquals(SetupCardAction.SCAN_RECENT, duringManual.primaryAction)
+        assertFalse(duringManual.showProgress)
         assertEquals("Model upgrade is in progress", duringUpgrade.title)
         assertEquals(null, duringUpgrade.primaryAction)
         assertTrue(duringUpgrade.showProgress)
@@ -448,39 +442,153 @@ class TrustworthyHomeStateTest {
             assertEquals(null, blocked.primaryAction)
         }
 
-        val pausedDuringManual = setupImportCardModel(
-            state = ready.copy(status = SetupImportStatus.PAUSED),
-            manualSmsOperationRunning = true
-        )
-        assertEquals(
-            "Recent SMS processing is active",
-            pausedDuringManual.title
-        )
-        assertEquals(null, pausedDuringManual.primaryAction)
     }
 
     @Test
-    fun `visible historical stop wins if legacy state contains both runs`() {
-        val historical = OnboardingSyncManager.OnboardingSyncState(
-            runId = "historical-run",
-            isRunning = true,
-            isCancellationAllowed = true,
-            runPurpose = OnboardingSyncManager.RunPurpose.INITIAL_SETUP
+    fun `manual stop accepts only the exact rendered run and candidate`() {
+        val candidate = SyncSmsItem(
+            id = "candidate",
+            sender = "AX-BANK",
+            body = "Rs 100 debited",
+            date = 1L,
+            status = "syncing"
         )
-        val manual = HomeSyncState(
+        val successor = HomeSyncState(
             status = HomeSyncState.Status.SYNCING,
+            activeRunId = "successor-run",
+            queue = listOf(candidate),
+            currentIndex = 0
+        )
+
+        assertFalse(
+            successor.ownsManualProcessingTarget(
+                SmsProcessingTarget.ManualRecent("stale-run", candidate.id)
+            )
+        )
+        assertFalse(
+            successor.ownsManualProcessingTarget(
+                SmsProcessingTarget.ManualRecent("successor-run", "next")
+            )
+        )
+        assertTrue(
+            successor.ownsManualProcessingTarget(
+                SmsProcessingTarget.ManualRecent(
+                    "successor-run",
+                    candidate.id
+                )
+            )
+        )
+        assertFalse(
+            successor.copy(
+                queue = listOf(candidate.copy(status = "error"))
+            ).ownsManualProcessingTarget(
+                SmsProcessingTarget.ManualRecent(
+                    "successor-run",
+                    candidate.id
+                )
+            )
+        )
+    }
+
+    @Test
+    fun `manual telemetry never rebinds a stale target to a successor`() {
+        val candidate = SyncSmsItem(
+            id = "candidate",
+            sender = "AX-BANK",
+            body = "Rs 100 debited",
+            date = 1L,
+            status = "syncing"
+        )
+        val successor = HomeSyncState(
+            status = HomeSyncState.Status.SYNCING,
+            activeRunId = "successor-run",
+            queue = listOf(candidate),
+            currentIndex = 0
+        )
+
+        assertFalse(
+            manualTelemetryTargetIsCurrent(
+                target = SmsProcessingTarget.ManualRecent(
+                    runId = "stale-run",
+                    candidateKey = candidate.id
+                ),
+                state = successor
+            )
+        )
+        assertFalse(
+            manualTelemetryTargetIsCurrent(
+                target = SmsProcessingTarget.ManualResult(candidate.id),
+                state = successor
+            )
+        )
+        assertTrue(
+            manualTelemetryTargetIsCurrent(
+                target = SmsProcessingTarget.ManualResult(candidate.id),
+                state = successor.copy(
+                    queue = listOf(candidate.copy(status = "pending"))
+                )
+            )
+        )
+        assertTrue(
+            manualTelemetryTargetIsCurrent(
+                target = SmsProcessingTarget.ManualRecent(
+                    runId = "successor-run",
+                    candidateKey = candidate.id
+                ),
+                state = successor
+            )
+        )
+        assertFalse(
+            manualTelemetryTargetIsCurrent(
+                target = SmsProcessingTarget.ManualRecent(
+                    runId = "successor-run",
+                    candidateKey = "missing"
+                ),
+                state = successor
+            )
+        )
+    }
+
+    @Test
+    fun `run-level manual telemetry closes instead of rebinding to a candidate`() {
+        val candidate = SyncSmsItem(
+            id = "candidate-b",
+            sender = "AX-BANK",
+            body = "Rs 100 debited",
+            date = 1L,
+            status = "syncing"
+        )
+        val runLevel = SmsProcessingTarget.ManualRecent(
+            runId = "manual-run",
+            candidateKey = null
+        )
+        val scanning = HomeSyncState(
+            status = HomeSyncState.Status.SCANNING,
             activeRunId = "manual-run"
         )
 
-        assertEquals(
-            SmsProcessingStopTarget.HISTORICAL,
-            smsProcessingStopTarget(historical, manual)
+        assertTrue(manualTelemetryTargetIsCurrent(runLevel, scanning))
+        assertFalse(
+            manualTelemetryTargetIsCurrent(
+                runLevel,
+                scanning.copy(
+                    status = HomeSyncState.Status.SYNCING,
+                    queue = listOf(candidate),
+                    currentIndex = 0
+                )
+            )
         )
-        assertEquals(
-            SmsProcessingStopTarget.MANUAL,
-            smsProcessingStopTarget(
-                historical.copy(isRunning = false),
-                manual
+        assertTrue(
+            manualTelemetryTargetIsCurrent(
+                SmsProcessingTarget.ManualRecent(
+                    runId = "manual-run",
+                    candidateKey = candidate.id
+                ),
+                scanning.copy(
+                    status = HomeSyncState.Status.SYNCING,
+                    queue = listOf(candidate),
+                    currentIndex = 0
+                )
             )
         )
     }
@@ -543,22 +651,17 @@ class TrustworthyHomeStateTest {
     }
 
     @Test
-    fun `restored permission pause keeps stop retry before resume`() {
+    fun `restored permission pause leaves recovery with setup card`() {
         val card = setupImportCardModel(
             state = SetupImportState(
                 status = SetupImportStatus.PAUSED,
                 pauseReason = SetupPauseReason.INTERRUPTED,
                 modelPrepared = true
-            ),
-            canStopSmsProcessing = true
+            )
         )
 
-        assertEquals("Stop active SMS processing", card.title)
-        assertEquals(
-            SetupCardAction.STOP_SMS_PROCESSING,
-            card.primaryAction
-        )
-        assertEquals("Stop SMS processing", card.primaryLabel)
+        assertEquals("Setup stopped before it finished", card.title)
+        assertEquals(SetupCardAction.RESUME, card.primaryAction)
     }
 
     @Test
@@ -641,21 +744,17 @@ class TrustworthyHomeStateTest {
     }
 
     @Test
-    fun `permission card exposes stop retry when dispatch was not accepted`() {
+    fun `permission card keeps permission recovery separate from pipeline stop`() {
         val card = setupImportCardModel(
             state = SetupImportState(
                 status = SetupImportStatus.PERMISSION_NEEDED,
                 modelPrepared = true
-            ),
-            canStopSmsProcessing = true
+            )
         )
 
-        assertEquals("Stop active SMS processing", card.title)
-        assertEquals(
-            SetupCardAction.STOP_SMS_PROCESSING,
-            card.primaryAction
-        )
-        assertEquals("Stop SMS processing", card.primaryLabel)
+        assertEquals("Restore SMS access", card.title)
+        assertEquals(SetupCardAction.RESTORE_PERMISSION, card.primaryAction)
+        assertEquals("Restore access", card.primaryLabel)
         assertFalse(card.showProgress)
     }
 
@@ -827,13 +926,61 @@ class TrustworthyHomeStateTest {
     }
 
     @Test
+    fun `home copy defaults automatic SMS processing to off`() {
+        val setupCard = setupImportCardModel(
+            readyNoHistory(SetupEmptyReason.EMPTY_INBOX)
+        )
+        val emptyMessage = selectedPeriodEmptyMessage(
+            selectedPeriod = "Day",
+            totalTransactionCount = 0,
+            setupStatus = SetupImportStatus.READY_NO_HISTORY
+        )
+
+        assertFalse(HomeUiState().automaticProcessingEnabled)
+        assertTrue(
+            setupCard.body.contains(
+                "will not process new alerts automatically"
+            )
+        )
+        assertTrue(
+            emptyMessage.contains(
+                "will not process new alerts automatically"
+            )
+        )
+    }
+
+    @Test
+    fun `home aggregate state excludes live manual token output`() {
+        val source = HomeSyncState(
+            status = HomeSyncState.Status.SYNCING,
+            activeRunId = "manual-run",
+            thinkingOutput = "private reasoning",
+            jsonOutput = "private JSON",
+            activeSmsPerformance = "12 tok/s",
+            activeModelName = "local-model.gguf"
+        )
+
+        val scrubbed = source.withoutManualSmsTelemetry()
+
+        assertEquals("", scrubbed.thinkingOutput)
+        assertEquals("", scrubbed.jsonOutput)
+        assertEquals(null, scrubbed.activeSmsPerformance)
+        assertEquals(null, scrubbed.activeModelName)
+        assertEquals(source.activeRunId, scrubbed.activeRunId)
+        assertEquals(source.status, scrubbed.status)
+    }
+
+    @Test
     fun `fatal manual processing failure is never presented as success`() {
         val state = HomeSyncState(
             status = HomeSyncState.Status.DONE,
             syncError = "The on-device model is not prepared."
         )
 
-        assertEquals(true, homeSyncHasFailures(state))
+        assertEquals(
+            SmsPipelinePhase.ISSUE,
+            state.toSmsPipelineCardUiModel()?.phase
+        )
     }
 
     @Test
@@ -858,10 +1005,9 @@ class TrustworthyHomeStateTest {
             )
         )
 
-        assertEquals(
-            "1 saved · 1 already present",
-            homeSyncCompletionSummary(state)
-        )
+        val card = state.toSmsPipelineCardUiModel()
+        assertTrue(card!!.detail.contains("1 saved"))
+        assertTrue(card.detail.contains("1 already saved"))
     }
 
     @Test

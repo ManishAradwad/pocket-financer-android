@@ -290,7 +290,20 @@ class ManualSyncCancellationTest {
             }
 
             withTimeout(5_000) { extractionStarted.await() }
-            assertTrue(fixture.manager.requestServiceStop(runId))
+            val renderedCandidateKey =
+                fixture.manager.syncState.value.queue.single().id
+            assertFalse(
+                fixture.manager.requestServiceStop(
+                    runId = runId,
+                    expectedCandidateKey = "stale-candidate"
+                )
+            )
+            assertTrue(
+                fixture.manager.requestServiceStop(
+                    runId = runId,
+                    expectedCandidateKey = renderedCandidateKey
+                )
+            )
             assertEquals(
                 HomeSyncState.Status.CANCELLING,
                 fixture.manager.syncState.value.status
@@ -563,6 +576,30 @@ class ManualSyncCancellationTest {
                 }
             )
             flow.release()
+        } finally {
+            fixture.modelDirectory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `candidate scoped stop distinguishes a rendered scan gap`() = runBlocking {
+        val fixture = cancellationFixture()
+        try {
+            val runId = "scan-gap-run"
+            assertTrue(fixture.manager.beginServiceRun(runId))
+
+            assertFalse(
+                fixture.manager.requestServiceStop(
+                    runId = runId,
+                    expectedCandidateKey = "candidate-not-yet-visible"
+                )
+            )
+            assertTrue(
+                fixture.manager.requestServiceStop(
+                    runId = runId,
+                    expectedCandidateKey = null
+                )
+            )
         } finally {
             fixture.modelDirectory.deleteRecursively()
         }

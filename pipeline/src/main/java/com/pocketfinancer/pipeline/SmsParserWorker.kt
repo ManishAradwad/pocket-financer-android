@@ -161,6 +161,10 @@ class SmsParserWorker(
             ingestionRepository = ingestionRepository
         )
         if (claimDecision is SmsCandidateClaimDecision.AutomaticDisabled) {
+            claimDecision.cancelDiscardedCandidateNotification(
+                context = applicationContext,
+                candidateKey = candidate.candidateKey
+            )
             return Result.success()
         }
         val claimed =
@@ -566,6 +570,7 @@ class SmsWorkSchedulerImpl @Inject internal constructor(
             if (!enabled) {
                 discardPendingAutomaticCandidatesAndNotifications(
                     context = context,
+                    admissionGate = admissionGate,
                     ingestionRepository = ingestionRepository
                 )
                 return@withConsistencyBoundary SmsScheduleResult.AUTOMATIC_DISABLED
@@ -590,6 +595,7 @@ class SmsWorkSchedulerImpl @Inject internal constructor(
             if (!enqueueCandidate(candidateKey)) {
                 discardPendingAutomaticCandidatesAndNotifications(
                     context = context,
+                    admissionGate = admissionGate,
                     ingestionRepository = ingestionRepository
                 )
                 return@withConsistencyBoundary SmsScheduleResult.ADMISSION_PAUSED
@@ -603,6 +609,7 @@ class SmsWorkSchedulerImpl @Inject internal constructor(
                 if (!enabled) {
                     discardPendingAutomaticCandidatesAndNotifications(
                         context = context,
+                        admissionGate = admissionGate,
                         ingestionRepository = ingestionRepository
                     )
                     emptyList()
@@ -620,6 +627,7 @@ class SmsWorkSchedulerImpl @Inject internal constructor(
                     if (!enabled) {
                         discardPendingAutomaticCandidatesAndNotifications(
                             context = context,
+                            admissionGate = admissionGate,
                             ingestionRepository = ingestionRepository
                         )
                         false
@@ -673,7 +681,9 @@ internal fun isOnboardingCompleteForSmsWork(
 ): Boolean = preferences.getBoolean("onboarding_completed", false)
 
 internal sealed interface SmsCandidateClaimDecision {
-    data object AutomaticDisabled : SmsCandidateClaimDecision
+    data class AutomaticDisabled(
+        val discardedCandidate: Boolean
+    ) : SmsCandidateClaimDecision
 
     data class Claimed(
         val candidate: QueuedSmsCandidate?
@@ -700,11 +710,13 @@ internal suspend fun claimSmsCandidateForRun(
             // OFF won before this invocation could establish a claim. Pending
             // evidence, or a same-WorkSpec claim left by process death, can be
             // removed without touching a replacement owner's claim.
-            ingestionRepository.discardAutomaticBeforeClaim(
+            val discardedCandidate = ingestionRepository.discardAutomaticBeforeClaim(
                 candidateKey = candidate.candidateKey,
                 claimToken = claimToken
             )
-            SmsCandidateClaimDecision.AutomaticDisabled
+            SmsCandidateClaimDecision.AutomaticDisabled(
+                discardedCandidate = discardedCandidate
+            )
         } else {
             SmsCandidateClaimDecision.Claimed(
                 ingestionRepository.claim(
@@ -715,6 +727,19 @@ internal suspend fun claimSmsCandidateForRun(
         }
     }
 }
+
+internal fun SmsCandidateClaimDecision.AutomaticDisabled
+    .cancelDiscardedCandidateNotification(
+        context: Context,
+        candidateKey: String
+    ) {
+        if (discardedCandidate) {
+            SmsNotificationHelper.cancelCandidateNotification(
+                context = context,
+                candidateKey = candidateKey
+            )
+        }
+    }
 
 internal suspend fun discardOwnedTerminalCandidate(
     ingestionRepository: SmsIngestionRepository,

@@ -358,23 +358,84 @@ class OnboardingSyncManager @Inject constructor(
      * app-flow lease have all drained.
      */
     fun requestHistoricalImportCancellation(context: Context): Boolean {
-        val current = _syncState.value
-        val runId = current.runId ?: return false
+        val runId = _syncState.value.runId ?: return false
+        return requestHistoricalImportCancellation(
+            context = context,
+            expectedRunId = runId
+        )
+    }
+
+    /**
+     * Requests cancellation only when [expectedRunId] still owns the visible
+     * historical run. UI actions must pass the run id captured by the rendered
+     * card so a stale callback can never stop a successor operation.
+     */
+    fun requestHistoricalImportCancellation(
+        context: Context,
+        expectedRunId: String
+    ): Boolean = requestHistoricalImportCancellationInternal(
+        context = context,
+        expectedRunId = expectedRunId,
+        expectedCandidateKey = null,
+        requireCandidateMatch = false
+    )
+
+    /** Candidate-scoped variant used by controls rendered from live UI state. */
+    fun requestHistoricalImportCancellation(
+        context: Context,
+        expectedRunId: String,
+        expectedCandidateKey: String?
+    ): Boolean = requestHistoricalImportCancellationInternal(
+        context = context,
+        expectedRunId = expectedRunId,
+        expectedCandidateKey = expectedCandidateKey,
+        requireCandidateMatch = true
+    )
+
+    private fun requestHistoricalImportCancellationInternal(
+        context: Context,
+        expectedRunId: String,
+        expectedCandidateKey: String?,
+        requireCandidateMatch: Boolean
+    ): Boolean {
+        val visibleState = _syncState.value
+        if (
+            visibleState.runId != expectedRunId ||
+            (
+                requireCandidateMatch &&
+                    visibleState.activeHistoricalSms?.candidateKey !=
+                    expectedCandidateKey
+                )
+        ) {
+            return false
+        }
         val durableStatus = setupImportStore?.state?.value?.status ?: return false
-        if (!tryRequestHistoricalImportCancellation(runId, durableStatus)) {
+        val cancellationRequested = if (requireCandidateMatch) {
+            tryRequestHistoricalImportCancellationForTarget(
+                runId = expectedRunId,
+                durableStatus = durableStatus,
+                expectedCandidateKey = expectedCandidateKey
+            )
+        } else {
+            tryRequestHistoricalImportCancellation(
+                runId = expectedRunId,
+                durableStatus = durableStatus
+            )
+        }
+        if (!cancellationRequested) {
             return false
         }
 
         val intent = Intent(context, OnboardingService::class.java).apply {
             action = ACTION_STOP_HISTORICAL_IMPORT
-            putExtra(EXTRA_RUN_ID, runId)
+            putExtra(EXTRA_RUN_ID, expectedRunId)
         }
         return try {
             if (context.startService(intent) != null) {
                 true
             } else {
                 restoreHistoricalCancellationAfterDispatchFailure(
-                    runId = runId,
+                    runId = expectedRunId,
                     errorMessage =
                         "Could not ask the background import to stop."
                 )
@@ -382,7 +443,7 @@ class OnboardingSyncManager @Inject constructor(
             }
         } catch (error: Exception) {
             restoreHistoricalCancellationAfterDispatchFailure(
-                runId = runId,
+                runId = expectedRunId,
                 errorMessage = error.message
                     ?: "Could not ask the background import to stop."
             )
@@ -425,10 +486,33 @@ class OnboardingSyncManager @Inject constructor(
     internal fun tryRequestHistoricalImportCancellation(
         runId: String,
         durableStatus: SetupImportStatus?
+    ): Boolean = tryRequestHistoricalImportCancellationMatching(
+        runId = runId,
+        durableStatus = durableStatus,
+        candidateMatches = { true }
+    )
+
+    private fun tryRequestHistoricalImportCancellationForTarget(
+        runId: String,
+        durableStatus: SetupImportStatus?,
+        expectedCandidateKey: String?
+    ): Boolean = tryRequestHistoricalImportCancellationMatching(
+        runId = runId,
+        durableStatus = durableStatus,
+        candidateMatches = { state ->
+            state.activeHistoricalSms?.candidateKey == expectedCandidateKey
+        }
+    )
+
+    private fun tryRequestHistoricalImportCancellationMatching(
+        runId: String,
+        durableStatus: SetupImportStatus?,
+        candidateMatches: (OnboardingSyncState) -> Boolean
     ): Boolean {
         while (true) {
             val current = _syncState.value
             if (
+                !candidateMatches(current) ||
                 !historicalCancellationMatches(
                     state = current,
                     requestedRunId = runId,

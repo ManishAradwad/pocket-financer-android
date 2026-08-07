@@ -9,6 +9,11 @@ import com.pocketfinancer.ui.onboarding.HistoricalSmsProcessingActivity
 import com.pocketfinancer.ui.onboarding.HistoricalSmsProcessingStage
 import com.pocketfinancer.ui.onboarding.OnboardingSyncManager
 import com.pocketfinancer.ui.onboarding.withoutHistoricalSmsActivity
+import com.pocketfinancer.ui.smsprocessing.SmsProcessingTarget
+import com.pocketfinancer.ui.smsprocessing.SmsSourcePreview
+import com.pocketfinancer.ui.smsprocessing.historicalCacheLogs
+import com.pocketfinancer.ui.smsprocessing.historicalParsedOutput
+import com.pocketfinancer.ui.smsprocessing.toSmsTelemetryRuntimeFacts
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -161,25 +166,84 @@ class HistoricalSmsHomePresentationTest {
     }
 
     @Test
-    fun `open telemetry survives candidate gaps but closes with the run`() {
+    fun `historical telemetry stays bound to exact rendered run and candidate`() {
+        val candidate = SmsProcessingTarget.Historical(
+            runId = "history-run",
+            candidateKey = "candidate-a"
+        )
         assertTrue(
-            historicalTelemetryIsVisible(
-                requested = true,
-                historicalImportRunning = true
+            historicalTelemetryTargetIsCurrent(
+                requestedTarget = candidate,
+                currentRunId = "history-run",
+                currentCandidateKey = "candidate-a"
             )
         )
         assertFalse(
-            historicalTelemetryIsVisible(
-                requested = true,
-                historicalImportRunning = false
+            historicalTelemetryTargetIsCurrent(
+                requestedTarget = candidate,
+                currentRunId = "successor-run",
+                currentCandidateKey = "candidate-a"
             )
         )
         assertFalse(
-            historicalTelemetryIsVisible(
-                requested = false,
-                historicalImportRunning = true
+            historicalTelemetryTargetIsCurrent(
+                requestedTarget = candidate,
+                currentRunId = "history-run",
+                currentCandidateKey = "candidate-b"
             )
         )
+        assertTrue(
+            historicalTelemetryTargetIsCurrent(
+                requestedTarget = SmsProcessingTarget.Historical(
+                    runId = "history-run",
+                    candidateKey = null
+                ),
+                currentRunId = "history-run",
+                currentCandidateKey = null
+            )
+        )
+    }
+
+    @Test
+    fun `historical pipeline card wins over manual and gaps clear source`() {
+        val manual = HomeSyncState(
+            status = HomeSyncState.Status.SYNCING,
+            activeRunId = "manual-run",
+            queue = listOf(
+                SyncSmsItem(
+                    id = "manual-candidate",
+                    sender = "Manual bank",
+                    body = "Manual source",
+                    date = 1L,
+                    status = "syncing"
+                )
+            ),
+            currentIndex = 0
+        )
+
+        val historical = homePipelineCardModel(
+            manualState = manual,
+            manualStartPending = false,
+            historicalRunId = "history-run",
+            historicalActivity = activity(),
+            historicalCancelling = false,
+            historicalFinishing = false,
+            historicalPreparingModel = false
+        )
+        val gap = homePipelineCardModel(
+            manualState = manual,
+            manualStartPending = false,
+            historicalRunId = "history-run",
+            historicalActivity = null,
+            historicalCancelling = false,
+            historicalFinishing = false,
+            historicalPreparingModel = false
+        )
+
+        assertTrue(historical?.target is SmsProcessingTarget.Historical)
+        assertEquals("history-run", historical?.target?.runId)
+        assertEquals(SmsSourcePreview.Hidden, gap?.source)
+        assertEquals("history-run", gap?.target?.runId)
     }
 
     @Test
@@ -225,7 +289,7 @@ class HistoricalSmsHomePresentationTest {
             )
         )
 
-        val facts = activity.toTelemetryRuntimeFacts()
+        val facts = activity.toSmsTelemetryRuntimeFacts()
         assertEquals(false, facts?.grammarEnabled)
         assertEquals(1024, facts?.thinkingTokenBudget)
         assertEquals(256, facts?.answerTokenBudget)

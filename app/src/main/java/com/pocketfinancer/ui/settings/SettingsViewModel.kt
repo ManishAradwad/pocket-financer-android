@@ -107,7 +107,7 @@ data class SettingsUiState(
     val filterLogs: List<String>? = null,
     val sessionCacheLogs: List<String>? = null,
     val slmPrompt: String? = null,
-    val processIncomingSms: Boolean = true,
+    val processIncomingSms: Boolean = AutomaticProcessingPreferences.DEFAULT_ENABLED,
     val automaticProcessingChangeRunning: Boolean = false,
     val automaticProcessingError: String? = null,
     val gbnfGrammarEnabled: Boolean = false,
@@ -944,14 +944,14 @@ class SettingsViewModel @Inject constructor(
                 _state.value = _state.value.copy(
                     automaticProcessingError = when {
                         !enabled && automaticUpdatesStillEnabled ->
-                            "Automatic updates are still on because turning them off " +
+                            "Automatic SMS processing is still on because turning it off " +
                                 "could not be saved: " +
                                 (error.message ?: "unknown error")
                         !enabled ->
-                            "Automatic updates are off, but pending-work cleanup failed: " +
+                            "Automatic SMS processing is off, but pending-work cleanup failed: " +
                                 (error.message ?: "unknown error")
                         else ->
-                            "Automatic updates remain off because the change could not " +
+                            "Automatic SMS processing remains off because the change could not " +
                                 "be completed: " +
                                 (error.message ?: "unknown error")
                     }

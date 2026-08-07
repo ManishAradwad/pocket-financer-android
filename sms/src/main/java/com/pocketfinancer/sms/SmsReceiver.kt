@@ -16,7 +16,9 @@ import kotlinx.coroutines.launch
 
 /**
  * BroadcastReceiver for incoming SMS. [goAsync] keeps the receiver alive until
- * raw evidence reaches encrypted storage and opaque WorkManager input is queued.
+ * the automatic-processing policy is applied. After opt-in, raw evidence
+ * reaches encrypted storage and only opaque WorkManager input is queued; while
+ * OFF, the message remains available to a later manual inbox scan.
  */
 class SmsReceiver : BroadcastReceiver() {
 
@@ -54,7 +56,7 @@ class SmsReceiver : BroadcastReceiver() {
                     } catch (e: Exception) {
                         Log.e(
                             "SmsReceiver",
-                            "Failed to admit encrypted background SMS candidate",
+                            "Failed to apply incoming SMS processing policy",
                             e
                         )
                     } finally {

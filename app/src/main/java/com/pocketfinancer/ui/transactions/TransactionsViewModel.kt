@@ -9,6 +9,8 @@ import com.pocketfinancer.data.model.Account
 import com.pocketfinancer.data.repository.TransactionRepository
 import com.pocketfinancer.data.repository.AccountRepository
 import com.pocketfinancer.ui.home.HomeSyncManager
+import com.pocketfinancer.ui.smsprocessing.SmsProcessingTarget
+import com.pocketfinancer.ui.smsprocessing.ownsManualProcessingTarget
 import com.pocketfinancer.ui.home.HomeSyncState
 import com.pocketfinancer.ui.home.SyncService
 import com.pocketfinancer.ui.home.SyncSmsItem
@@ -166,10 +168,10 @@ class TransactionsViewModel @Inject constructor(
         syncManager.resetState()
     }
 
-    fun stopManualSync() {
-        val runId = syncManager.syncState.value.activeRunId ?: return
+    fun stopManualSync(target: SmsProcessingTarget.ManualRecent) {
+        if (!syncManager.syncState.value.ownsManualProcessingTarget(target)) return
         val commandAccepted = try {
-            SyncService.requestStop(context, runId)
+            SyncService.requestStop(context, target)
         } catch (_: RuntimeException) {
             false
         }
@@ -181,7 +183,9 @@ class TransactionsViewModel @Inject constructor(
             ).show()
             return
         }
-        syncManager.requestServiceStop(runId)
+        // SyncService applies the exact run/candidate CAS on delivery. Do not
+        // publish a run-only cancellation here: the candidate may advance
+        // between this UI callback and the service command.
     }
 
     fun updateTransaction(

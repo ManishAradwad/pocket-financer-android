@@ -17,6 +17,7 @@ import com.pocketfinancer.SlmAppFlowLease
 import com.pocketfinancer.inference.SlmRuntimeOwner
 import com.pocketfinancer.pipeline.SmsNotificationHelper
 import com.pocketfinancer.ui.onboarding.OnboardingRunGenerationStore
+import com.pocketfinancer.ui.smsprocessing.SmsProcessingTarget
 import dagger.hilt.android.AndroidEntryPoint
 import java.util.UUID
 import kotlinx.coroutines.*
@@ -52,6 +53,10 @@ class SyncService : Service() {
             "com.pocketfinancer.action.STOP_MANUAL_SMS_SYNC"
         internal const val EXTRA_RUN_ID =
             "com.pocketfinancer.extra.MANUAL_SMS_SYNC_RUN_ID"
+        internal const val EXTRA_EXPECTED_CANDIDATE_KEY =
+            "com.pocketfinancer.extra.MANUAL_SMS_SYNC_CANDIDATE_KEY"
+        internal const val EXTRA_REQUIRE_CANDIDATE_MATCH =
+            "com.pocketfinancer.extra.MANUAL_SMS_SYNC_EXACT_TARGET"
 
         fun start(
             context: Context,
@@ -84,6 +89,12 @@ class SyncService : Service() {
             return context.startService(stopIntent(context, runId)) != null
         }
 
+        fun requestStop(
+            context: Context,
+            target: SmsProcessingTarget.ManualRecent
+        ): Boolean =
+            context.startService(stopIntent(context, target)) != null
+
         internal fun stopIntent(context: Context, runId: String): Intent =
             Intent(context, SyncService::class.java).apply {
                 action = ACTION_STOP
@@ -93,6 +104,16 @@ class SyncService : Service() {
                 )
                 putExtra(EXTRA_RUN_ID, runId)
             }
+
+        internal fun stopIntent(
+            context: Context,
+            target: SmsProcessingTarget.ManualRecent
+        ): Intent = stopIntent(context, target.runId).apply {
+            putExtra(EXTRA_REQUIRE_CANDIDATE_MATCH, true)
+            target.candidateKey?.let {
+                putExtra(EXTRA_EXPECTED_CANDIDATE_KEY, it)
+            }
+        }
 
         internal fun requestedRunId(intent: Intent?): String? =
             intent?.getStringExtra(EXTRA_RUN_ID)
@@ -124,8 +145,20 @@ class SyncService : Service() {
         // active when its PendingIntent is eventually delivered.
         if (intent?.action == ACTION_STOP) {
             val requestedRunId = requestedRunId(intent)
-            val matchesActiveRun =
+            val requiresCandidateMatch = intent.getBooleanExtra(
+                EXTRA_REQUIRE_CANDIDATE_MATCH,
+                false
+            )
+            val matchesActiveRun = if (requiresCandidateMatch) {
+                syncManager.requestServiceStop(
+                    runId = requestedRunId,
+                    expectedCandidateKey = intent.getStringExtra(
+                        EXTRA_EXPECTED_CANDIDATE_KEY
+                    )
+                )
+            } else {
                 syncManager.requestServiceStop(requestedRunId)
+            }
             if (matchesActiveRun) {
                 userStopRequestedRunId = requestedRunId
                 val activeJob = jobSnapshotRecordingStart(startId)

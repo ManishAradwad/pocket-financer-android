@@ -34,6 +34,8 @@ import com.pocketfinancer.ui.onboarding.OnboardingStep
 import com.pocketfinancer.ui.onboarding.OnboardingSyncManager
 import com.pocketfinancer.ui.onboarding.HistoricalSmsProcessingActivity
 import com.pocketfinancer.ui.onboarding.withoutHistoricalSmsActivity
+import com.pocketfinancer.ui.smsprocessing.SmsProcessingTarget
+import com.pocketfinancer.ui.smsprocessing.ownsManualProcessingTarget
 import java.util.Calendar
 import javax.inject.Inject
 
@@ -73,6 +75,7 @@ data class HomeUiState(
     val historicalImportCancelling: Boolean = false,
     val historicalImportCancellationAllowed: Boolean = false,
     val historicalImportRunning: Boolean = false,
+    val historicalImportRunId: String? = null,
     val historicalImportFinishing: Boolean = false,
     val historicalImportPreparingModel: Boolean = false,
     val manualSmsOperationRunning: Boolean = false,
@@ -119,6 +122,18 @@ internal fun HistoricalSmsProcessingActivity.cardSnapshot(): HistoricalSmsProces
     )
 
 /**
+ * The Home aggregate state needs stage and queue ownership, but not live model
+ * output. Keeping token buffers out of its replay cache also avoids rebuilding
+ * the entire dashboard for every coalesced token update.
+ */
+internal fun HomeSyncState.withoutManualSmsTelemetry(): HomeSyncState = copy(
+    thinkingOutput = "",
+    jsonOutput = "",
+    activeSmsPerformance = null,
+    activeModelName = null
+)
+
+/**
  * Sensitive per-SMS evidence is deliberately kept out of [HomeUiState], whose
  * while-subscribed replay cache may stop observing while Home is off screen.
  * This small eager projection continues observing the process owner so a
@@ -154,25 +169,9 @@ internal fun manualSmsOperationIsRunning(
             HomeSyncState.Status.CANCELLING
         )
 
-internal enum class SmsProcessingStopTarget {
-    HISTORICAL,
-    MANUAL,
-    NONE
-}
-
-internal fun smsProcessingStopTarget(
-    onboardingState: OnboardingSyncManager.OnboardingSyncState,
-    manualState: HomeSyncState
-): SmsProcessingStopTarget = when {
-    historicalImportIsRunning(onboardingState) ->
-        SmsProcessingStopTarget.HISTORICAL
-    manualState.activeRunId != null &&
-        manualState.status in setOf(
-            HomeSyncState.Status.SCANNING,
-            HomeSyncState.Status.SYNCING
-        ) -> SmsProcessingStopTarget.MANUAL
-    else -> SmsProcessingStopTarget.NONE
-}
+internal fun HomeSyncState.ownsManualStopTarget(
+    expectedRunId: String
+): Boolean = expectedRunId.isNotBlank() && activeRunId == expectedRunId
 
 @HiltViewModel
 class HomeViewModel @Inject constructor(
@@ -202,6 +201,9 @@ class HomeViewModel @Inject constructor(
     val activeHistoricalSms: Flow<HistoricalSmsProcessingActivity?> =
         onboardingSyncManager.syncState.map(::activeHistoricalSmsForHome)
 
+    /** Collected only by the visible telemetry sheet. */
+    val manualSyncTelemetry: StateFlow<HomeSyncState> = syncManager.syncState
+
     val activeHistoricalSmsCard: StateFlow<HistoricalSmsProcessingActivity?> =
         historicalSmsCardState(
             source = onboardingSyncManager.syncState,
@@ -212,10 +214,14 @@ class HomeViewModel @Inject constructor(
         .map { it.withoutHistoricalSmsActivity() }
         .distinctUntilChanged()
 
+    private val homeSyncUiState = syncManager.syncState
+        .map(HomeSyncState::withoutManualSmsTelemetry)
+        .distinctUntilChanged()
+
     val uiState: StateFlow<HomeUiState> = combine(
         transactionRepository.getAllByDateDesc(),
         _selectedPeriod,
-        syncManager.syncState,
+        homeSyncUiState,
         modelDownloader.state,
         onboardingUiState,
         modelUpgradeSessionDismissalStore.dismissedTierIds,
@@ -315,16 +321,6 @@ class HomeViewModel @Inject constructor(
             onboardingSyncState.runPurpose ==
                 OnboardingSyncManager.RunPurpose.INITIAL_SETUP &&
                 onboardingSyncState.isRunning
-        val permissionCardVisible =
-            setupImportState.status == SetupImportStatus.PERMISSION_NEEDED
-        val manualRunCanStop =
-            syncState.activeRunId != null &&
-                syncState.status in setOf(
-                    HomeSyncState.Status.SCANNING,
-                    HomeSyncState.Status.SYNCING
-                )
-        val manualRunIsStopping =
-            syncState.status == HomeSyncState.Status.CANCELLING
         val manualSmsOperationRunning = manualSmsOperationIsRunning(
             state = syncState,
             startPending = manualOperationStartPending
@@ -338,16 +334,14 @@ class HomeViewModel @Inject constructor(
             upgradeRecommendation = upgradeRec,
             setupImportState = setupImportState,
             historicalImportCancelling =
-                (isHistoricalRun && onboardingSyncState.isCancelling) ||
-                    (permissionCardVisible && manualRunIsStopping),
+                isHistoricalRun && onboardingSyncState.isCancelling,
             historicalImportCancellationAllowed =
-                (
-                    isHistoricalRun &&
-                        onboardingSyncState.isCancellationAllowed &&
-                        !onboardingSyncState.isCancelling
-                    ) ||
-                    (permissionCardVisible && manualRunCanStop),
+                isHistoricalRun &&
+                    onboardingSyncState.isCancellationAllowed &&
+                    !onboardingSyncState.isCancelling,
             historicalImportRunning = isHistoricalRun,
+            historicalImportRunId = onboardingSyncState.runId
+                .takeIf { isHistoricalRun },
             historicalImportFinishing =
                 historicalImportIsFinishing(onboardingSyncState),
             historicalImportPreparingModel =
@@ -484,33 +478,31 @@ class HomeViewModel @Inject constructor(
         ).show()
     }
 
-    fun stopManualSync() {
-        requestManualSyncStop(showFailureToast = true)
-    }
-
-    fun stopSmsProcessing() {
-        // Match the operation represented by the setup card. If legacy state
-        // ever contains both runs, the visible historical Stop must never
-        // silently cancel the hidden manual run instead.
-        when (
-            smsProcessingStopTarget(
-                onboardingState = onboardingSyncManager.syncState.value,
-                manualState = syncManager.syncState.value
-            )
-        ) {
-            SmsProcessingStopTarget.HISTORICAL -> stopHistoricalImport()
-            SmsProcessingStopTarget.MANUAL ->
-                requestManualSyncStop(showFailureToast = true)
-            SmsProcessingStopTarget.NONE -> Unit
-        }
+    fun stopManualSync(target: SmsProcessingTarget.ManualRecent) {
+        requestManualSyncStop(
+            expectedTarget = target,
+            showFailureToast = true
+        )
     }
 
     private fun requestManualSyncStop(
+        expectedTarget: SmsProcessingTarget.ManualRecent? = null,
         showFailureToast: Boolean
     ): Boolean {
-        val runId = syncManager.syncState.value.activeRunId ?: return false
+        val state = syncManager.syncState.value
+        if (
+            expectedTarget != null &&
+            !state.ownsManualProcessingTarget(expectedTarget)
+        ) {
+            return false
+        }
+        val runId = state.activeRunId ?: return false
         val commandAccepted = try {
-            SyncService.requestStop(context, runId)
+            if (expectedTarget != null) {
+                SyncService.requestStop(context, expectedTarget)
+            } else {
+                SyncService.requestStop(context, runId)
+            }
         } catch (_: RuntimeException) {
             false
         }
@@ -523,17 +515,30 @@ class HomeViewModel @Inject constructor(
             return false
         }
         if (!commandAccepted) return false
+        if (expectedTarget != null) {
+            // The service performs the exact run/candidate CAS when Android
+            // delivers this command. A local run-only update here would let a
+            // delayed action cancel the next candidate in the same run.
+            return true
+        }
         // Publish only after Android accepts the run-scoped command. The UI
         // still changes immediately, without creating a rollback window in
         // which the worker can observe a stop that was never dispatched.
         return syncManager.requestServiceStop(runId)
     }
 
-    fun stopHistoricalImport() {
+    fun stopHistoricalImport(target: SmsProcessingTarget.Historical) {
         val requested =
-            onboardingSyncManager.requestHistoricalImportCancellation(context)
+            onboardingSyncManager.requestHistoricalImportCancellation(
+                context = context,
+                expectedRunId = target.runId,
+                expectedCandidateKey = target.candidateKey
+            )
         if (
             !requested &&
+            onboardingSyncManager.syncState.value.runId == target.runId &&
+            onboardingSyncManager.syncState.value.activeHistoricalSms
+                ?.candidateKey == target.candidateKey &&
             onboardingSyncManager.syncState.value.isCancellationAllowed
         ) {
             android.widget.Toast.makeText(
