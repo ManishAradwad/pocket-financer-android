@@ -94,7 +94,10 @@ fun SmsPipelineActivityCard(
     ) {
         BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
             val useStackedLayout =
-                maxWidth < 340.dp || LocalDensity.current.fontScale >= 1.3f
+                maxWidth < 320.dp || LocalDensity.current.fontScale >= 1.3f
+            val controlsNeedOwnRow =
+                model.stopState == SmsStopUiState.STOPPING ||
+                    model.stopState == SmsStopUiState.COMMIT_UNAVAILABLE
 
             Column(modifier = Modifier.padding(14.dp)) {
                 PipelineHeader(
@@ -124,7 +127,19 @@ fun SmsPipelineActivityCard(
                             model = model,
                             onInspect = onInspect,
                             onStop = onStop,
-                            fillWidth = true
+                            fillWidth = true,
+                            stackControls = true
+                        )
+                    }
+                } else if (controlsNeedOwnRow) {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        PipelineStep(model = model, accentColor = accentColor)
+                        PipelineControls(
+                            model = model,
+                            onInspect = onInspect,
+                            onStop = onStop,
+                            fillWidth = true,
+                            stackControls = false
                         )
                     }
                 } else {
@@ -140,7 +155,8 @@ fun SmsPipelineActivityCard(
                             model = model,
                             onInspect = onInspect,
                             onStop = onStop,
-                            fillWidth = false
+                            fillWidth = false,
+                            stackControls = false
                         )
                     }
                 }
@@ -319,75 +335,106 @@ private fun PipelineControls(
     model: SmsPipelineCardUiModel,
     onInspect: (SmsProcessingTarget) -> Unit,
     onStop: (SmsProcessingTarget) -> Unit,
-    fillWidth: Boolean
+    fillWidth: Boolean,
+    stackControls: Boolean
 ) {
-    val target = model.target
-    val modifier = if (fillWidth) Modifier.fillMaxWidth() else Modifier
-    Column(
-        modifier = modifier,
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-        horizontalAlignment = Alignment.End
-    ) {
-        if (model.inspectState == SmsInspectUiState.AVAILABLE && target != null) {
-            OutlinedButton(
-                onClick = { onInspect(target) },
-                modifier = (if (fillWidth) Modifier.fillMaxWidth() else Modifier)
-                    .defaultMinSize(minHeight = 48.dp),
-                colors = ButtonDefaults.outlinedButtonColors(
-                    contentColor = M3_Primary
-                ),
-                border = BorderStroke(1.dp, M3_Primary.copy(alpha = 0.28f))
-            ) {
-                Text(model.inspectLabel, maxLines = 2)
-                Spacer(modifier = Modifier.width(2.dp))
-                Icon(
-                    imageVector = Icons.Rounded.ChevronRight,
-                    contentDescription = null,
-                    modifier = Modifier.size(16.dp)
-                )
+    val target = model.target ?: return
+    val inspectControl: (@Composable (Modifier) -> Unit)? =
+        if (model.inspectState == SmsInspectUiState.AVAILABLE) {
+            { controlModifier ->
+                OutlinedButton(
+                    onClick = { onInspect(target) },
+                    modifier = controlModifier
+                        .defaultMinSize(minHeight = 48.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        contentColor = M3_Primary
+                    ),
+                    border = BorderStroke(
+                        1.dp,
+                        M3_Primary.copy(alpha = 0.28f)
+                    )
+                ) {
+                    Text(model.inspectLabel, maxLines = 2)
+                    Spacer(modifier = Modifier.width(2.dp))
+                    Icon(
+                        imageVector = Icons.Rounded.ChevronRight,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
             }
+        } else {
+            null
         }
 
-        if (model.stopState != SmsStopUiState.HIDDEN && target != null) {
+    val stopControl: (@Composable (Modifier) -> Unit)? =
+        if (model.stopState != SmsStopUiState.HIDDEN) {
             val stopAvailable = model.stopState == SmsStopUiState.AVAILABLE
-            OutlinedButton(
-                onClick = { onStop(target) },
-                enabled = stopAvailable,
-                modifier = (if (fillWidth) Modifier.fillMaxWidth() else Modifier)
-                    .defaultMinSize(minHeight = 48.dp),
-                colors = ButtonDefaults.outlinedButtonColors(
-                    contentColor = M3_Error,
-                    disabledContentColor = M3_OnSurfaceVariant
-                ),
-                border = BorderStroke(
-                    1.dp,
-                    if (stopAvailable) {
-                        M3_Error.copy(alpha = 0.55f)
-                    } else {
-                        M3_OutlineVariant
-                    }
-                )
-            ) {
-                Icon(
-                    imageVector = if (stopAvailable) {
-                        Icons.Rounded.StopCircle
-                    } else {
-                        Icons.Rounded.HourglassTop
-                    },
-                    contentDescription = null,
-                    modifier = Modifier.size(18.dp)
-                )
-                Spacer(modifier = Modifier.width(6.dp))
-                Text(
-                    when (model.stopState) {
-                        SmsStopUiState.AVAILABLE -> "Stop"
-                        SmsStopUiState.STOPPING -> "Stopping safely…"
-                        SmsStopUiState.COMMIT_UNAVAILABLE -> "Finishing save…"
-                        SmsStopUiState.HIDDEN -> ""
-                    },
-                    maxLines = 2
-                )
+            { controlModifier ->
+                OutlinedButton(
+                    onClick = { onStop(target) },
+                    enabled = stopAvailable,
+                    modifier = controlModifier
+                        .defaultMinSize(minHeight = 48.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        contentColor = M3_Error,
+                        disabledContentColor = M3_OnSurfaceVariant
+                    ),
+                    border = BorderStroke(
+                        1.dp,
+                        if (stopAvailable) {
+                            M3_Error.copy(alpha = 0.55f)
+                        } else {
+                            M3_OutlineVariant
+                        }
+                    )
+                ) {
+                    Icon(
+                        imageVector = if (stopAvailable) {
+                            Icons.Rounded.StopCircle
+                        } else {
+                            Icons.Rounded.HourglassTop
+                        },
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        when (model.stopState) {
+                            SmsStopUiState.AVAILABLE -> "Stop"
+                            SmsStopUiState.STOPPING -> "Stopping safely…"
+                            SmsStopUiState.COMMIT_UNAVAILABLE -> "Finishing save…"
+                            SmsStopUiState.HIDDEN -> ""
+                        },
+                        maxLines = 2
+                    )
+                }
             }
+        } else {
+            null
+        }
+
+    if (stackControls) {
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalAlignment = Alignment.End
+        ) {
+            inspectControl?.invoke(Modifier.fillMaxWidth())
+            stopControl?.invoke(Modifier.fillMaxWidth())
+        }
+    } else {
+        Row(
+            modifier = if (fillWidth) Modifier.fillMaxWidth() else Modifier,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            inspectControl?.invoke(
+                if (fillWidth) Modifier.weight(1f) else Modifier
+            )
+            stopControl?.invoke(
+                if (fillWidth) Modifier.weight(1f) else Modifier
+            )
         }
     }
 }

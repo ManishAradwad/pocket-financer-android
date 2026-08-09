@@ -5,10 +5,12 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.hasClickAction
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.unit.Density
@@ -242,12 +244,122 @@ class SmsProcessingComposeUiTest {
             }
         }
 
-        composeRule.onNode(
+        val inspectBounds = composeRule.onNode(
             hasText("Inspect") and hasClickAction()
-        ).assertExists()
-        composeRule.onNode(
+        ).assertExists().fetchSemanticsNode().boundsInRoot
+        val stopBounds = composeRule.onNode(
             hasText("Stop") and hasClickAction()
-        ).assertExists()
+        ).assertExists().fetchSemanticsNode().boundsInRoot
+
+        assertTrue(inspectBounds.width > 0f)
+        assertTrue(stopBounds.width > 0f)
+        assertTrue(inspectBounds.bottom <= stopBounds.top)
+    }
+
+    @Test
+    fun activityCard_normalPhoneWidth_keepsActionsOnOneFooterRow() {
+        val model = mutableStateOf(
+            activeCardModel(
+                target = SmsProcessingTarget.ManualRecent(
+                    runId = "compact-footer-run",
+                    candidateKey = "compact-footer-candidate"
+                )
+            ).copy(stepValue = "Parsing")
+        )
+        composeRule.setContent {
+            val density = LocalDensity.current
+            CompositionLocalProvider(
+                LocalDensity provides Density(
+                    density = density.density,
+                    fontScale = 1f
+                )
+            ) {
+                PocketFinancerTheme {
+                    SmsPipelineActivityCard(
+                        model = model.value,
+                        onInspect = {},
+                        onStop = {},
+                        modifier = Modifier
+                            // Home/Transactions leave 328 dp after their
+                            // 16 dp side padding on a 360 dp screen.
+                            .width(328.dp)
+                            .testTag("compact-activity-card")
+                    )
+                }
+            }
+        }
+
+        val inspectBounds = composeRule.onNode(
+            hasText("Inspect") and hasClickAction()
+        ).fetchSemanticsNode().boundsInRoot
+        val stopBounds = composeRule.onNode(
+            hasText("Stop") and hasClickAction()
+        ).fetchSemanticsNode().boundsInRoot
+
+        assertTrue(inspectBounds.bottom > stopBounds.top)
+        assertTrue(stopBounds.bottom > inspectBounds.top)
+        assertTrue(inspectBounds.right <= stopBounds.left)
+
+        val twoActionHeight = composeRule.onNodeWithTag(
+            "compact-activity-card"
+        ).fetchSemanticsNode().boundsInRoot.height
+
+        composeRule.runOnUiThread {
+            model.value = model.value.copy(stopState = SmsStopUiState.HIDDEN)
+        }
+        composeRule.waitForIdle()
+
+        val oneActionHeight = composeRule.onNodeWithTag(
+            "compact-activity-card"
+        ).fetchSemanticsNode().boundsInRoot.height
+        assertTrue(twoActionHeight <= oneActionHeight + 1f)
+    }
+
+    @Test
+    fun activityCard_normalPhoneWidth_givesLongTransitionControlsTheirOwnRow() {
+        composeRule.setContent {
+            val density = LocalDensity.current
+            CompositionLocalProvider(
+                LocalDensity provides Density(
+                    density = density.density,
+                    fontScale = 1f
+                )
+            ) {
+                PocketFinancerTheme {
+                    SmsPipelineActivityCard(
+                        model = activeCardModel(
+                            target = SmsProcessingTarget.ManualRecent(
+                                runId = "stopping-footer-run",
+                                candidateKey = "stopping-footer-candidate"
+                            ),
+                            stopState = SmsStopUiState.STOPPING
+                        ).copy(
+                            phase = SmsPipelinePhase.STOPPING,
+                            inspectLabel = "Inspect stopping details"
+                        ),
+                        onInspect = {},
+                        onStop = {},
+                        modifier = Modifier.width(328.dp)
+                    )
+                }
+            }
+        }
+
+        val stepBounds = composeRule.onNodeWithText(
+            "Checking rendered message"
+        ).fetchSemanticsNode().boundsInRoot
+        val inspectBounds = composeRule.onNodeWithText(
+            "Inspect stopping details"
+        ).fetchSemanticsNode().boundsInRoot
+        val stopBounds = composeRule.onNodeWithText(
+            "Stopping safely",
+            substring = true
+        ).fetchSemanticsNode().boundsInRoot
+
+        assertTrue(stepBounds.bottom <= inspectBounds.top)
+        assertTrue(inspectBounds.bottom > stopBounds.top)
+        assertTrue(stopBounds.bottom > inspectBounds.top)
+        assertTrue(inspectBounds.right <= stopBounds.left)
     }
 
     @Test
