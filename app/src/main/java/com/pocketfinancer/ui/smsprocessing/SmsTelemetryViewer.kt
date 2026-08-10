@@ -444,20 +444,30 @@ private fun PipelineTimeline(
     val settledFacts = telemetrySettledFacts(model.status)
     val filtered = model.status == SmsTelemetryStatus.FILTERED_OUT
     val error = model.status == SmsTelemetryStatus.ERROR
+    val exactAutomaticFilter =
+        model.target is SmsProcessingTarget.Automatic
+    val automaticInferenceRejected =
+        model.wasFilteredAfterAutomaticInference()
 
     Column(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        val stage0Done = if (active) {
-            model.activeStageIndex > 0
-        } else {
-            settledFacts.upstreamCompleted || filtered || error
+        val stage0Done = when {
+            exactAutomaticFilter -> model.filterOutcome != null
+            active -> model.activeStageIndex > 0
+            else -> settledFacts.upstreamCompleted || filtered || error
         }
-        val stage0Active = active && model.activeStageIndex == 0
+        val stage0Active = active &&
+            model.activeStageIndex == 0 &&
+            (!exactAutomaticFilter || model.filterOutcome == null)
         TimelineStage(
             title = "Stage 1: SMS Pre-Filter Check",
             statusLabel = when {
+                model.filterOutcome == SmsTelemetryFilterOutcome.REJECTED ->
+                    "Not eligible"
+                model.filterOutcome == SmsTelemetryFilterOutcome.PASSED ->
+                    "Checked"
                 stage0Done -> "Checked"
                 stage0Active -> "Checking…"
                 settledFacts.upstreamUnavailable -> "Details unavailable"
@@ -505,7 +515,7 @@ private fun PipelineTimeline(
         val stage1Done = if (active) {
             model.activeStageIndex >= if (model.hasThinkingMode) 1 else 2
         } else {
-            settledFacts.upstreamCompleted
+            settledFacts.upstreamCompleted || automaticInferenceRejected
         }
         val stage1Active = active && model.activeStageIndex == 1 && !stage1Done
         TimelineStage(
@@ -545,7 +555,7 @@ private fun PipelineTimeline(
         val stage2Done = if (active) {
             model.activeStageIndex > 2
         } else {
-            settledFacts.upstreamCompleted
+            settledFacts.upstreamCompleted || automaticInferenceRejected
         }
         val stage2Active = active && model.activeStageIndex in 1..2
         TimelineStage(
@@ -630,6 +640,17 @@ private fun PipelineTimeline(
         }
     }
 }
+
+/**
+ * A filtered automatic result with a passed deterministic filter and runtime
+ * facts can only occur after PipelineService completed inference and rejected
+ * the extracted result. Keep that distinct from a phase-zero filter rejection.
+ */
+internal fun SmsTelemetryUiModel.wasFilteredAfterAutomaticInference(): Boolean =
+    target is SmsProcessingTarget.Automatic &&
+        status == SmsTelemetryStatus.FILTERED_OUT &&
+        filterOutcome == SmsTelemetryFilterOutcome.PASSED &&
+        runtimeFacts != null
 
 private fun stageColor(done: Boolean, active: Boolean, error: Boolean): Color =
     when {

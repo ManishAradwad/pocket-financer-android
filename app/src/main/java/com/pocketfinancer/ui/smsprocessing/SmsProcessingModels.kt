@@ -1,5 +1,7 @@
 package com.pocketfinancer.ui.smsprocessing
 
+import com.pocketfinancer.pipeline.AutomaticSmsProcessingActivity
+import com.pocketfinancer.pipeline.AutomaticSmsProcessingStage
 import com.pocketfinancer.ui.home.HomeSyncState
 import com.pocketfinancer.ui.home.SyncSmsItem
 import com.pocketfinancer.ui.home.hasDiagnosticSourceEvidence
@@ -14,6 +16,28 @@ import com.pocketfinancer.ui.onboarding.HistoricalSmsProcessingStage
 sealed interface SmsProcessingTarget {
     val runId: String?
     val candidateKey: String?
+
+    /**
+     * Exact ownership for one claimed automatic WorkManager attempt. The
+     * claim token is intentionally exposed through [runId] only so shared
+     * presentation code can key an inspect sheet without learning about
+     * WorkManager ids or gaining a stop capability.
+     */
+    data class Automatic(
+        val claimToken: String,
+        override val candidateKey: String
+    ) : SmsProcessingTarget {
+        override val runId: String = claimToken
+
+        init {
+            require(claimToken.isNotBlank()) {
+                "Automatic SMS claim token must not be blank"
+            }
+            require(candidateKey.isNotBlank()) {
+                "Automatic SMS candidate key must not be blank"
+            }
+        }
+    }
 
     data class ManualRecent(
         override val runId: String,
@@ -113,6 +137,12 @@ data class SmsPipelineCardUiModel(
 
 internal fun String.isLedgerVerifiedSuccess(): Boolean =
     this == "synced" || this == "already_saved"
+
+/** Exact claim check used by both the automatic card and telemetry sheet. */
+fun AutomaticSmsProcessingActivity.ownsAutomaticProcessingTarget(
+    target: SmsProcessingTarget.Automatic
+): Boolean = owner.claimToken == target.claimToken &&
+    owner.candidateKey == target.candidateKey
 
 /** The candidate that still owns the live manual pipeline, if any. */
 fun HomeSyncState.activeSmsPipelineItem(): SyncSmsItem? {
@@ -419,6 +449,121 @@ private fun manualStepLabel(stageIndex: Int?, hasThinkingMode: Boolean): String 
         3 -> "Saving transaction"
         else -> "Finishing"
     }
+
+/**
+ * Automatic work is inspect-only. Disabling future automatic intake does not
+ * cancel a candidate that already owns its durable claim, so this model never
+ * offers the manual/historical Stop action.
+ */
+fun AutomaticSmsProcessingActivity.toSmsPipelineCardUiModel():
+    SmsPipelineCardUiModel {
+    val target = SmsProcessingTarget.Automatic(
+        claimToken = owner.claimToken,
+        candidateKey = owner.candidateKey
+    )
+    val terminal = stage in setOf(
+        AutomaticSmsProcessingStage.RETRYING,
+        AutomaticSmsProcessingStage.FILTERED_OUT,
+        AutomaticSmsProcessingStage.SAVED,
+        AutomaticSmsProcessingStage.ALREADY_SAVED,
+        AutomaticSmsProcessingStage.ERROR
+    )
+    val title = when (stage) {
+        AutomaticSmsProcessingStage.RETRYING ->
+            "Automatic SMS processing will retry"
+        AutomaticSmsProcessingStage.FILTERED_OUT -> "Message checked"
+        AutomaticSmsProcessingStage.SAVED -> "Transaction saved"
+        AutomaticSmsProcessingStage.ALREADY_SAVED ->
+            "Transaction already saved"
+        AutomaticSmsProcessingStage.ERROR ->
+            "Automatic SMS processing could not finish"
+        else -> "Processing new SMS"
+    }
+    val step = when (stage) {
+        AutomaticSmsProcessingStage.PREPARING -> "Preparing secure processing"
+        AutomaticSmsProcessingStage.FILTERING -> "Checking message"
+        AutomaticSmsProcessingStage.LOADING_MODEL ->
+            "Preparing on-device model"
+        AutomaticSmsProcessingStage.THINKING -> "Reasoning on device"
+        AutomaticSmsProcessingStage.GENERATING -> "Extracting transaction"
+        AutomaticSmsProcessingStage.PERSISTING -> "Saving transaction"
+        AutomaticSmsProcessingStage.RETRYING -> "Retry scheduled"
+        AutomaticSmsProcessingStage.FILTERED_OUT ->
+            "No transaction was saved"
+        AutomaticSmsProcessingStage.SAVED -> "Saved to encrypted ledger"
+        AutomaticSmsProcessingStage.ALREADY_SAVED ->
+            "Verified in encrypted ledger"
+        AutomaticSmsProcessingStage.ERROR -> "No transaction was saved"
+    }
+    val hasSource = body.isNotBlank()
+    val sourceDetail = if (hasSource) {
+        "From ${sender.ifBlank { "Unknown sender" }}"
+    } else {
+        "Processing the claimed message on this device"
+    }
+    val terminalDetail = detail
+        ?.takeIf(String::isNotBlank)
+        ?: when (stage) {
+            AutomaticSmsProcessingStage.RETRYING ->
+                "The claimed message will be retried automatically."
+            AutomaticSmsProcessingStage.FILTERED_OUT ->
+                "This alert was not an eligible transaction."
+            AutomaticSmsProcessingStage.SAVED ->
+                "The transaction was saved locally."
+            AutomaticSmsProcessingStage.ALREADY_SAVED ->
+                "The encrypted ledger already contained this transaction."
+            AutomaticSmsProcessingStage.ERROR ->
+                "This alert could not be safely processed on device."
+            else -> sourceDetail
+        }
+    val phase = when (stage) {
+        AutomaticSmsProcessingStage.PERSISTING -> SmsPipelinePhase.FINISHING
+        AutomaticSmsProcessingStage.RETRYING,
+        AutomaticSmsProcessingStage.ERROR -> SmsPipelinePhase.ISSUE
+        AutomaticSmsProcessingStage.FILTERED_OUT,
+        AutomaticSmsProcessingStage.SAVED,
+        AutomaticSmsProcessingStage.ALREADY_SAVED -> SmsPipelinePhase.COMPLETE
+        else -> SmsPipelinePhase.PROCESSING
+    }
+    val tone = when (stage) {
+        AutomaticSmsProcessingStage.RETRYING,
+        AutomaticSmsProcessingStage.ERROR -> SmsPipelineTone.ISSUE
+        AutomaticSmsProcessingStage.FILTERED_OUT,
+        AutomaticSmsProcessingStage.SAVED,
+        AutomaticSmsProcessingStage.ALREADY_SAVED -> SmsPipelineTone.SUCCESS
+        else -> SmsPipelineTone.PROCESSING
+    }
+    val badge = when (stage) {
+        AutomaticSmsProcessingStage.RETRYING -> "RETRY"
+        AutomaticSmsProcessingStage.FILTERED_OUT -> "CHECKED"
+        AutomaticSmsProcessingStage.SAVED -> "SAVED"
+        AutomaticSmsProcessingStage.ALREADY_SAVED -> "VERIFIED"
+        AutomaticSmsProcessingStage.ERROR -> "ISSUE"
+        else -> "AUTO"
+    }
+    val cardDetail = if (terminal) terminalDetail else sourceDetail
+
+    return SmsPipelineCardUiModel(
+        target = target,
+        phase = phase,
+        tone = tone,
+        title = title,
+        detail = cardDetail,
+        badge = badge,
+        source = if (hasSource) {
+            SmsSourcePreview.Message(sender, body)
+        } else {
+            SmsSourcePreview.Hidden
+        },
+        stepLabel = if (terminal) "LATEST STATE" else "CURRENT STEP",
+        stepValue = step,
+        inspectState = SmsInspectUiState.AVAILABLE,
+        inspectLabel = "Inspect",
+        stopState = SmsStopUiState.HIDDEN,
+        accessibilityText =
+            "$title. Automatic processing. $cardDetail. $step."
+    )
+}
 
 fun HistoricalSmsProcessingActivity.toSmsPipelineCardUiModel(
     runId: String,

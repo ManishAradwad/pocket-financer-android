@@ -526,6 +526,173 @@ class SmsWorkSchedulerImplTest {
 
 class SmsParserWorkerPolicyTest {
     @Test
+    fun `stale terminal settlement neither posts nor cancels a successor`() =
+        runTest {
+            val ingestionRepository = mockk<SmsIngestionRepository>()
+            coEvery { ingestionRepository.get("opaque-key") } returns
+                queuedCandidate(SmsCandidateOrigin.AUTOMATIC).copy(
+                    claimToken = null
+                )
+            var skippedPosted = false
+            var notificationCancelled = false
+
+            applyExactTerminalNotification(
+                settledOwnedClaim = false,
+                onOwned = { skippedPosted = true },
+                onStale = {
+                    cancelStaleTerminalNotificationIfCandidateAbsent(
+                        ingestionRepository = ingestionRepository,
+                        candidateKey = "opaque-key"
+                    ) {
+                        notificationCancelled = true
+                    }
+                }
+            )
+
+            assertFalse(skippedPosted)
+            assertFalse(notificationCancelled)
+        }
+
+    @Test
+    fun `terminal stale cleanup cancels only after the row is absent`() =
+        runTest {
+            val ingestionRepository = mockk<SmsIngestionRepository>()
+            var notificationCancelled = false
+            coEvery { ingestionRepository.get("opaque-key") } returns
+                queuedCandidate(SmsCandidateOrigin.AUTOMATIC).copy(
+                    claimToken = "same-owner"
+                )
+
+            assertFalse(
+                cancelStaleTerminalNotificationIfCandidateAbsent(
+                    ingestionRepository = ingestionRepository,
+                    candidateKey = "opaque-key"
+                ) {
+                    notificationCancelled = true
+                }
+            )
+            assertFalse(notificationCancelled)
+
+            coEvery { ingestionRepository.get("opaque-key") } returns null
+            assertTrue(
+                cancelStaleTerminalNotificationIfCandidateAbsent(
+                    ingestionRepository = ingestionRepository,
+                    candidateKey = "opaque-key"
+                ) {
+                    notificationCancelled = true
+                }
+            )
+            assertTrue(notificationCancelled)
+        }
+
+    @Test
+    fun `retry settlement failure cleanup cancels a still-owned notification`() =
+        runTest {
+            val ingestionRepository = mockk<SmsIngestionRepository>()
+            coEvery { ingestionRepository.get("opaque-key") } returns
+                queuedCandidate(SmsCandidateOrigin.AUTOMATIC).copy(
+                    claimToken = "same-owner"
+                )
+            var notificationCancelled = false
+
+            assertTrue(
+                cancelNotificationAfterRetrySettlementFailure(
+                    ingestionRepository = ingestionRepository,
+                    candidateKey = "opaque-key",
+                    claimToken = "same-owner"
+                ) {
+                    notificationCancelled = true
+                }
+            )
+            assertTrue(notificationCancelled)
+
+            notificationCancelled = false
+            coEvery { ingestionRepository.get("opaque-key") } returns null
+            assertTrue(
+                cancelNotificationAfterRetrySettlementFailure(
+                    ingestionRepository = ingestionRepository,
+                    candidateKey = "opaque-key",
+                    claimToken = "same-owner"
+                ) {
+                    notificationCancelled = true
+                }
+            )
+            assertTrue(notificationCancelled)
+        }
+
+    @Test
+    fun `retry settlement failure cleanup preserves ambiguous and replacement rows`() =
+        runTest {
+            val ingestionRepository = mockk<SmsIngestionRepository>()
+            var notificationCancelled = false
+            coEvery { ingestionRepository.get("opaque-key") } returns
+                queuedCandidate(SmsCandidateOrigin.AUTOMATIC).copy(
+                    claimToken = null
+                )
+
+            assertFalse(
+                cancelNotificationAfterRetrySettlementFailure(
+                    ingestionRepository = ingestionRepository,
+                    candidateKey = "opaque-key",
+                    claimToken = "stale-owner"
+                ) {
+                    notificationCancelled = true
+                }
+            )
+
+            coEvery { ingestionRepository.get("opaque-key") } returns
+                queuedCandidate(SmsCandidateOrigin.AUTOMATIC).copy(
+                    claimToken = "replacement-owner"
+                )
+            assertFalse(
+                cancelNotificationAfterRetrySettlementFailure(
+                    ingestionRepository = ingestionRepository,
+                    candidateKey = "opaque-key",
+                    claimToken = "stale-owner"
+                ) {
+                    notificationCancelled = true
+                }
+            )
+            assertFalse(notificationCancelled)
+        }
+
+    @Test
+    fun `exhausted retry cleanup preserves the settlement failure`() =
+        runTest {
+            val settlementFailure = IllegalStateException("discard failed")
+            val cleanupFailure = IllegalArgumentException("cancel failed")
+            var cleanupRan = false
+
+            val thrown = assertFailsWith<IllegalStateException> {
+                withNotificationCleanupOnSettlementFailure(
+                    settle = { throw settlementFailure },
+                    cleanup = {
+                        cleanupRan = true
+                        throw cleanupFailure
+                    }
+                )
+            }
+
+            assertTrue(cleanupRan)
+            assertSame(settlementFailure, thrown)
+            val suppressed = assertIs<IllegalArgumentException>(
+                thrown.suppressed.single()
+            )
+            assertEquals("cancel failed", suppressed.message)
+        }
+
+    @Test
+    fun `missing candidate recovery cancels a possibly ongoing notification`() {
+        var notificationCancelled = false
+
+        cancelMissingCandidateNotification {
+            notificationCancelled = true
+        }
+
+        assertTrue(notificationCancelled)
+    }
+
+    @Test
     fun `automatic OFF that wins the boundary prevents claim`() =
         runTest {
             val ingestionRepository = mockk<SmsIngestionRepository>()

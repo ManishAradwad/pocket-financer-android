@@ -1,5 +1,11 @@
 package com.pocketfinancer.ui.smsprocessing
 
+import com.pocketfinancer.pipeline.AutomaticSmsFilterResult
+import com.pocketfinancer.pipeline.AutomaticSmsProcessingActivity
+import com.pocketfinancer.pipeline.AutomaticSmsProcessingOwner
+import com.pocketfinancer.pipeline.AutomaticSmsProcessingStage
+import com.pocketfinancer.pipeline.AutomaticSmsSlmCacheTelemetry
+import com.pocketfinancer.pipeline.AutomaticSmsSlmPerformance
 import com.pocketfinancer.ui.home.HomeSyncState
 import com.pocketfinancer.ui.home.SyncSmsItem
 import com.pocketfinancer.ui.onboarding.HistoricalSmsProcessingActivity
@@ -69,6 +75,192 @@ class SmsProcessingPresentationTest {
         assertEquals(SmsPipelinePhase.PROCESSING, model.phase)
         assertEquals(SmsStopUiState.AVAILABLE, model.stopState)
         assertEquals("Extracting transaction", model.stepValue)
+    }
+
+    @Test
+    fun `automatic preparation card is exact inspect only and keeps unknown sender body`() {
+        val activity = automaticActivity()
+        val model = activity.toSmsPipelineCardUiModel()
+
+        assertEquals(
+            SmsProcessingTarget.Automatic(
+                claimToken = "automatic-claim",
+                candidateKey = "automatic-candidate"
+            ),
+            model.target
+        )
+        assertEquals("Processing new SMS", model.title)
+        assertEquals("From Unknown sender", model.detail)
+        assertEquals(
+            SmsSourcePreview.Message("", activity.body),
+            model.source
+        )
+        assertEquals("Preparing secure processing", model.stepValue)
+        assertEquals(SmsInspectUiState.AVAILABLE, model.inspectState)
+        assertEquals(SmsStopUiState.HIDDEN, model.stopState)
+    }
+
+    @Test
+    fun `automatic terminal and retry cards report outcome without stop`() {
+        val cases = listOf(
+            Triple(
+                AutomaticSmsProcessingStage.RETRYING,
+                "Automatic SMS processing will retry",
+                "Retry scheduled"
+            ),
+            Triple(
+                AutomaticSmsProcessingStage.FILTERED_OUT,
+                "Message checked",
+                "No transaction was saved"
+            ),
+            Triple(
+                AutomaticSmsProcessingStage.SAVED,
+                "Transaction saved",
+                "Saved to encrypted ledger"
+            ),
+            Triple(
+                AutomaticSmsProcessingStage.ALREADY_SAVED,
+                "Transaction already saved",
+                "Verified in encrypted ledger"
+            ),
+            Triple(
+                AutomaticSmsProcessingStage.ERROR,
+                "Automatic SMS processing could not finish",
+                "No transaction was saved"
+            )
+        )
+
+        cases.forEach { (stage, title, step) ->
+            val model = automaticActivity().copy(
+                stage = stage,
+                detail = "Exact stage detail"
+            ).toSmsPipelineCardUiModel()
+            assertEquals(title, model.title)
+            assertEquals(step, model.stepValue)
+            assertEquals("Exact stage detail", model.detail)
+            assertEquals(SmsStopUiState.HIDDEN, model.stopState)
+        }
+    }
+
+    @Test
+    fun `automatic telemetry keeps exact runtime facts and never gains stop`() {
+        val activity = automaticActivity().copy(
+            stage = AutomaticSmsProcessingStage.GENERATING,
+            filterResult = AutomaticSmsFilterResult.PASSED,
+            hasThinkingMode = true,
+            modelName = "local-model.gguf",
+            grammarEnabled = false,
+            thinkingTokenBudget = 1024,
+            answerTokenBudget = 256,
+            thinkingOutput = "private reasoning",
+            jsonOutput = "{partial}",
+            performance = AutomaticSmsSlmPerformance(12, 2_000, 40),
+            cache = AutomaticSmsSlmCacheTelemetry(true, false, 300)
+        )
+        val target = SmsProcessingTarget.Automatic(
+            claimToken = activity.owner.claimToken,
+            candidateKey = activity.owner.candidateKey
+        )
+        val model = SmsTelemetryPresenter.automatic(
+            activity = activity,
+            filterLogs = listOf("eligible"),
+            slmPrompt = "prompt",
+            parseJson = { error("live partial JSON must not be parsed") },
+            target = target
+        )
+
+        assertEquals(target, model.target)
+        assertEquals(SmsStopUiState.HIDDEN, model.stopState)
+        assertEquals(SmsTelemetryStatus.ACTIVE, model.status)
+        assertEquals(SmsTelemetryFilterOutcome.PASSED, model.filterOutcome)
+        assertEquals(false, model.runtimeFacts?.grammarEnabled)
+        assertEquals(true, model.runtimeFacts?.cacheAttempted)
+        assertEquals(false, model.runtimeFacts?.cacheHit)
+        assertEquals("40 tokens • 20.00 tok/s", model.performanceText)
+        assertEquals("Waiting for complete JSON...", model.parsedOutput)
+        val source = (model.content as SmsTelemetryContent.Candidate).source
+        assertEquals(
+            SmsTelemetrySource.Available("", activity.body),
+            source
+        )
+    }
+
+    @Test
+    fun `automatic filtered telemetry distinguishes prefilter from inference rejection`() {
+        val target = SmsProcessingTarget.Automatic(
+            claimToken = "automatic-claim",
+            candidateKey = "automatic-candidate"
+        )
+        val deterministicReject = SmsTelemetryPresenter.automatic(
+            activity = automaticActivity().copy(
+                stage = AutomaticSmsProcessingStage.FILTERED_OUT,
+                filterResult = AutomaticSmsFilterResult.REJECTED
+            ),
+            filterLogs = listOf("not eligible"),
+            slmPrompt = "No prompt was supplied.",
+            parseJson = { it },
+            target = target
+        )
+        val inferenceReject = SmsTelemetryPresenter.automatic(
+            activity = automaticActivity().copy(
+                stage = AutomaticSmsProcessingStage.FILTERED_OUT,
+                filterResult = AutomaticSmsFilterResult.PASSED,
+                grammarEnabled = false,
+                modelName = "local-model.gguf"
+            ),
+            filterLogs = listOf("eligible"),
+            slmPrompt = "prompt",
+            parseJson = { it },
+            target = target
+        )
+
+        assertFalse(deterministicReject.wasFilteredAfterAutomaticInference())
+        assertTrue(inferenceReject.wasFilteredAfterAutomaticInference())
+    }
+
+    @Test
+    fun `stale automatic claim cannot rebind to successor telemetry`() {
+        val successor = automaticActivity().copy(
+            thinkingOutput = "successor private reasoning",
+            jsonOutput = "successor private json"
+        )
+        val staleTarget = SmsProcessingTarget.Automatic(
+            claimToken = "stale-claim",
+            candidateKey = successor.owner.candidateKey
+        )
+        val model = SmsTelemetryPresenter.automatic(
+            activity = successor,
+            filterLogs = listOf("private filter logs"),
+            slmPrompt = "private prompt",
+            parseJson = { error("stale target must not parse successor output") },
+            target = staleTarget
+        )
+
+        assertEquals(staleTarget, model.target)
+        assertTrue(model.content is SmsTelemetryContent.Gap)
+        assertEquals("", model.thinkingOutput)
+        assertEquals("", model.jsonOutput)
+        assertEquals("", model.slmPrompt)
+        assertTrue(model.filterLogs.isEmpty())
+        assertTrue(model.cacheLogs.isEmpty())
+        assertEquals(SmsStopUiState.HIDDEN, model.stopState)
+
+        val differentCandidate = SmsTelemetryPresenter.automatic(
+            activity = successor.copy(
+                owner = successor.owner.copy(
+                    candidateKey = "successor-candidate"
+                )
+            ),
+            filterLogs = listOf("successor private filter logs"),
+            slmPrompt = "successor private prompt",
+            parseJson = {
+                error("stale target must not parse a different candidate")
+            },
+            target = staleTarget
+        )
+        assertTrue(differentCandidate.content is SmsTelemetryContent.Gap)
+        assertEquals("", differentCandidate.thinkingOutput)
+        assertEquals("", differentCandidate.jsonOutput)
     }
 
     @Test
@@ -452,5 +644,16 @@ class SmsProcessingPresentationTest {
         total = 8,
         stage = HistoricalSmsProcessingStage.GENERATING,
         hasThinkingMode = true
+    )
+
+    private fun automaticActivity() = AutomaticSmsProcessingActivity(
+        owner = AutomaticSmsProcessingOwner(
+            candidateKey = "automatic-candidate",
+            claimToken = "automatic-claim"
+        ),
+        sender = "",
+        body = "Account ending 6254 was debited.",
+        date = 0L,
+        stage = AutomaticSmsProcessingStage.PREPARING
     )
 }
