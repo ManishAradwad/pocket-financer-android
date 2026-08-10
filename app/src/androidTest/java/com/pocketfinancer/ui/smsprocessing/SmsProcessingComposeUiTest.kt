@@ -219,6 +219,30 @@ class SmsProcessingComposeUiTest {
     }
 
     @Test
+    fun telemetryViewer_blankSender_keepsBodyAndLabelsUnknownSender() {
+        val body = "Account ending 6254 was debited."
+        composeRule.setContent {
+            PocketFinancerTheme {
+                TelemetryLogsViewer(
+                    model = candidateTelemetryModel(
+                        target = SmsProcessingTarget.ManualRecent(
+                            runId = "unknown-sender-run",
+                            candidateKey = "unknown-sender-candidate"
+                        ),
+                        sender = "",
+                        body = body
+                    ),
+                    onStop = {},
+                    onClose = {}
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("Unknown sender").assertExists()
+        composeRule.onNodeWithText(body).assertExists()
+    }
+
+    @Test
     fun activityCard_narrowWidthAndLargeFont_controlsRemainDiscoverable() {
         composeRule.setContent {
             val density = LocalDensity.current
@@ -482,8 +506,10 @@ class SmsProcessingComposeUiTest {
         target = target,
         content = SmsTelemetryContent.Candidate(
             candidateKey = requireNotNull(target.candidateKey),
-            sender = sender,
-            body = body
+            source = SmsTelemetrySource.Available(
+                sender = sender,
+                body = body
+            )
         ),
         phase = SmsPipelinePhase.PROCESSING,
         status = SmsTelemetryStatus.ACTIVE,

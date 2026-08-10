@@ -145,6 +145,10 @@ fun HomeScreen(
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val selectedPeriod by viewModel.selectedPeriod.collectAsStateWithLifecycle()
+    val aggregateManualSyncState by
+        viewModel.manualSyncUiState.collectAsStateWithLifecycle()
+    val manualSyncPresentation by
+        viewModel.manualSyncPresentation.collectSensitiveManualState()
     val activeHistoricalSmsCard by
         viewModel.activeHistoricalSmsCard.collectSensitiveHistoricalState()
     val context = LocalContext.current
@@ -152,8 +156,10 @@ fun HomeScreen(
     val coroutineScope = rememberCoroutineScope()
 
     val pData = state.periodData[selectedPeriod] ?: PeriodData()
+    val renderedManualSyncState =
+        manualSyncPresentation ?: aggregateManualSyncState
     val pipelineCard = homePipelineCardModel(
-        manualState = state.syncState,
+        manualState = renderedManualSyncState,
         manualStartPending = state.manualOperationStartPending,
         historicalRunId = state.historicalImportRunId,
         historicalActivity = activeHistoricalSmsCard,
@@ -387,12 +393,12 @@ fun HomeScreen(
                 }
 
                 if (
-                    state.syncState.status in setOf(
+                    renderedManualSyncState.status in setOf(
                         HomeSyncState.Status.SCANNING,
                         HomeSyncState.Status.SYNCING,
                         HomeSyncState.Status.CANCELLING
                     ) &&
-                    state.syncState.queue.isNotEmpty() &&
+                    renderedManualSyncState.queue.isNotEmpty() &&
                     !state.historicalImportRunning
                 ) {
                     item(key = "manual-sms-queue-action") {
@@ -558,9 +564,9 @@ fun HomeScreen(
                 if (
                     (
                         pipelineCard == null ||
-                            state.syncState.status == HomeSyncState.Status.DONE
+                            renderedManualSyncState.status == HomeSyncState.Status.DONE
                         ) &&
-                    state.syncState.status in setOf(
+                    renderedManualSyncState.status in setOf(
                         HomeSyncState.Status.IDLE,
                         HomeSyncState.Status.DONE
                     ) &&
@@ -575,7 +581,7 @@ fun HomeScreen(
                 ) {
                     item {
                         RecentSmsScanLauncher(
-                            syncState = state.syncState,
+                            syncState = renderedManualSyncState,
                             onStartSync = {
                                 requestNotificationThenRun {
                                     viewModel.startSync()
@@ -828,12 +834,12 @@ fun HomeScreen(
                     contentColor = M3_OnSurface
                 ) {
                     SmsQueueContent(
-                        syncState = state.syncState,
+                        syncState = renderedManualSyncState,
                         onClose = { sheetTarget = null },
                         onItemClick = { item ->
                             sheetTarget = HomeSheetTarget.Manual(
                                 manualQueueItemTarget(
-                                    state = state.syncState,
+                                    state = renderedManualSyncState,
                                     item = item
                                 ),
                                 returnToQueue = true
@@ -1010,12 +1016,30 @@ private fun HomeManualTelemetrySheet(
     }
 
     val model = if (candidate != null) {
+        val filterLogs = remember(
+            candidate.id,
+            candidate.sender,
+            candidate.body,
+            candidate.status
+        ) { viewModel.getFilterLogs(candidate) }
+        val cacheLogs = remember(
+            candidate.id,
+            candidate.sender,
+            candidate.body,
+            candidate.status
+        ) { viewModel.getKvCacheLogs(candidate) }
+        val slmPrompt = remember(
+            candidate.id,
+            candidate.sender,
+            candidate.body,
+            candidate.status
+        ) { viewModel.getSlmPrompt(candidate) }
         SmsTelemetryPresenter.manual(
             state = currentState,
             sms = candidate,
-            filterLogs = viewModel.getFilterLogs(candidate),
-            cacheLogs = viewModel.getKvCacheLogs(candidate),
-            slmPrompt = viewModel.getSlmPrompt(candidate),
+            filterLogs = filterLogs,
+            cacheLogs = cacheLogs,
+            slmPrompt = slmPrompt,
             parseJson = viewModel::getParsedOutput,
             target = requestedTarget
         )
@@ -1169,7 +1193,7 @@ internal fun <T> Flow<T?>.collectSensitiveHistoricalState(): State<T?> {
 }
 
 @Composable
-internal fun <T : Any> StateFlow<T>.collectSensitiveManualState(): State<T?> {
+internal fun <T : Any> Flow<T>.collectSensitiveManualState(): State<T?> {
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     return produceState<T?>(
         initialValue = null,

@@ -17,6 +17,7 @@ import com.pocketfinancer.ui.smsprocessing.toSmsTelemetryRuntimeFacts
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
@@ -68,7 +69,7 @@ class HistoricalSmsHomePresentationTest {
 
     @OptIn(ExperimentalCoroutinesApi::class)
     @Test
-    fun `sensitive activity is scrubbed while home has no collector`() = runTest {
+    fun `historical card projection is cold and suppresses token-only updates`() = runTest {
         val activity = activity()
         val source = MutableStateFlow(
             OnboardingSyncManager.OnboardingSyncState(
@@ -77,11 +78,14 @@ class HistoricalSmsHomePresentationTest {
                 activeHistoricalSms = activity
             )
         )
-        val exposed = historicalSmsCardState(source, backgroundScope)
+        val exposed = historicalSmsCardState(source)
+        val emissions = mutableListOf<HistoricalSmsProcessingActivity?>()
+        val collection = backgroundScope.launch {
+            exposed.collect(emissions::add)
+        }
         runCurrent()
-        assertEquals(activity.cardSnapshot(), exposed.value)
+        assertEquals(listOf(activity.cardSnapshot()), emissions)
 
-        val cardBeforeTokenUpdate = exposed.value
         source.value = source.value.copy(
             activeHistoricalSms = activity.copy(
                 thinkingOutput = "private reasoning",
@@ -89,7 +93,21 @@ class HistoricalSmsHomePresentationTest {
             )
         )
         runCurrent()
-        assertSame(cardBeforeTokenUpdate, exposed.value)
+        assertEquals(1, emissions.size)
+
+        source.value = source.value.copy(
+            activeHistoricalSms = activity.copy(
+                stage = HistoricalSmsProcessingStage.PERSISTING
+            )
+        )
+        runCurrent()
+        assertEquals(2, emissions.size)
+        assertEquals(
+            HistoricalSmsProcessingStage.PERSISTING,
+            emissions.last()?.stage
+        )
+
+        collection.cancel()
 
         source.value = source.value.copy(
             isRunning = false,
@@ -97,7 +115,7 @@ class HistoricalSmsHomePresentationTest {
         )
         runCurrent()
 
-        assertNull(exposed.value)
+        assertNull(exposed.first())
     }
 
     @OptIn(ExperimentalCoroutinesApi::class)
@@ -134,6 +152,53 @@ class HistoricalSmsHomePresentationTest {
             assertNull(displayed)
 
             owner.registry.currentState = Lifecycle.State.STARTED
+            runCurrent()
+            assertNull(displayed)
+
+            owner.registry.currentState = Lifecycle.State.DESTROYED
+        } finally {
+            collection.cancel()
+            Dispatchers.resetMain()
+        }
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun `stopped screen immediately drops manual source and telemetry`() = runTest {
+        val dispatcher = UnconfinedTestDispatcher(testScheduler)
+        Dispatchers.setMain(dispatcher)
+        val sensitiveState = HomeSyncState(
+            status = HomeSyncState.Status.SYNCING,
+            activeRunId = "manual-sensitive-run",
+            queue = listOf(
+                SyncSmsItem(
+                    id = "manual-sensitive-candidate",
+                    sender = "PRIVATE-BANK",
+                    body = "Account ending 6254 was debited.",
+                    date = 0L,
+                    status = "syncing"
+                )
+            ),
+            thinkingOutput = "private reasoning",
+            jsonOutput = "private output"
+        )
+        val source = MutableStateFlow(sensitiveState)
+        val owner = TestLifecycleOwner()
+        var displayed: HomeSyncState? = null
+        val collection = backgroundScope.launch(dispatcher) {
+            collectSensitiveStateWhileStarted(
+                lifecycle = owner.lifecycle,
+                source = source,
+                publish = { displayed = it }
+            )
+        }
+
+        try {
+            owner.registry.currentState = Lifecycle.State.STARTED
+            runCurrent()
+            assertSame(sensitiveState, displayed)
+
+            owner.registry.currentState = Lifecycle.State.CREATED
             runCurrent()
             assertNull(displayed)
 

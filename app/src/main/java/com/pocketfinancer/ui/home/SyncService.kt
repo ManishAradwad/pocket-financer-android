@@ -11,6 +11,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
+import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import com.pocketfinancer.SlmAppFlowCoordinator
 import com.pocketfinancer.SlmAppFlowLease
@@ -18,6 +19,7 @@ import com.pocketfinancer.inference.SlmRuntimeOwner
 import com.pocketfinancer.pipeline.SmsNotificationHelper
 import com.pocketfinancer.ui.onboarding.OnboardingRunGenerationStore
 import com.pocketfinancer.ui.smsprocessing.SmsProcessingTarget
+import com.pocketfinancer.ui.smsprocessing.ownsManualProcessingTarget
 import dagger.hilt.android.AndroidEntryPoint
 import java.util.UUID
 import kotlinx.coroutines.*
@@ -158,6 +160,12 @@ class SyncService : Service() {
                 )
             } else {
                 syncManager.requestServiceStop(requestedRunId)
+            }
+            manualSyncStopRejectionMessage(
+                requiresCandidateMatch = requiresCandidateMatch,
+                stopAccepted = matchesActiveRun
+            )?.let { message ->
+                showManualSyncStopRejectionFeedback(this, message)
             }
             if (matchesActiveRun) {
                 userStopRequestedRunId = requestedRunId
@@ -789,6 +797,39 @@ internal fun manualSyncStartAllowed(
 internal fun shouldKeepManualSyncDraining(
     jobIsPresent: Boolean
 ): Boolean = jobIsPresent
+
+internal fun manualSyncStopRejectionMessage(
+    requiresCandidateMatch: Boolean,
+    stopAccepted: Boolean
+): String? = if (requiresCandidateMatch && !stopAccepted) {
+    "Stop wasn't applied because this processing step is no longer active. " +
+        "No other SMS processing was stopped."
+} else {
+    null
+}
+
+internal fun manualSyncPreDispatchRejectionMessage(
+    state: HomeSyncState,
+    target: SmsProcessingTarget.ManualRecent
+): String? = manualSyncStopRejectionMessage(
+    requiresCandidateMatch = true,
+    stopAccepted = state.ownsManualProcessingTarget(target)
+)
+
+internal fun showManualSyncStopRejectionFeedback(
+    context: Context,
+    message: String
+) {
+    runCatching {
+        Toast.makeText(
+            context.applicationContext,
+            message,
+            Toast.LENGTH_LONG
+        ).show()
+    }.onFailure { error ->
+        Log.w("ManualSyncStop", "Stop rejection feedback was unavailable", error)
+    }
+}
 
 internal data class ManualSyncStoppedCopy(
     val title: String,

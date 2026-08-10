@@ -38,10 +38,12 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.pocketfinancer.data.model.Transaction
 import com.pocketfinancer.data.model.TransactionType
 import com.pocketfinancer.data.model.Account
 import com.pocketfinancer.ui.home.HomeSyncState
+import com.pocketfinancer.ui.home.collectSensitiveManualState
 import com.pocketfinancer.ui.smsprocessing.SmsPipelineActivityCard
 import com.pocketfinancer.ui.smsprocessing.SmsPipelinePhase
 import com.pocketfinancer.ui.smsprocessing.SmsProcessingTarget
@@ -55,6 +57,7 @@ import com.pocketfinancer.ui.smsprocessing.toSmsPipelineCardUiModel
 import com.pocketfinancer.ui.theme.*
 import java.text.SimpleDateFormat
 import java.util.*
+import kotlinx.coroutines.flow.StateFlow
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -62,7 +65,13 @@ fun TransactionsScreen(
     onNavigateToTab: (String) -> Unit = {},
     viewModel: TransactionsViewModel = hiltViewModel()
 ) {
-    val state by viewModel.uiState.collectAsState()
+    val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val aggregateManualSyncState by
+        viewModel.manualSyncUiState.collectAsStateWithLifecycle()
+    val manualSyncPresentation by
+        viewModel.manualSyncPresentation.collectSensitiveManualState()
+    val renderedManualSyncState =
+        manualSyncPresentation ?: aggregateManualSyncState
     var selectedProcessingTarget by remember {
         mutableStateOf<SmsProcessingTarget?>(null)
     }
@@ -369,11 +378,11 @@ fun TransactionsScreen(
                 state.transactions.groupBy { formatDateKey(it.date) }
             }
 
-            val pipelineCard = state.syncState.toSmsPipelineCardUiModel()
+            val pipelineCard = renderedManualSyncState.toSmsPipelineCardUiModel()
             val showEmptyState = shouldShowTransactionsEmptyState(
                 hasTransactions = state.transactions.isNotEmpty(),
                 hasSyncCard = pipelineCard != null,
-                syncStatus = state.syncState.status
+                syncStatus = renderedManualSyncState.status
             )
 
             if (showEmptyState) {
@@ -1038,79 +1047,18 @@ fun TransactionsScreen(
 
         // ── Shared telemetry details bottom sheet ──
         val processingTarget = selectedProcessingTarget
-        val telemetryModel = remember(state.syncState, processingTarget) {
-            when (processingTarget) {
-                null,
-                is SmsProcessingTarget.Historical -> null
-
-                is SmsProcessingTarget.ManualRecent -> {
-                    if (!state.syncState.ownsManualProcessingTarget(processingTarget)) {
-                        null
-                    } else if (processingTarget.candidateKey != null) {
-                        val candidate = state.syncState.activeSmsPipelineItem()
-                        if (candidate != null) {
-                            SmsTelemetryPresenter.manual(
-                                state = state.syncState,
-                                sms = candidate,
-                                filterLogs = viewModel.getFilterLogs(candidate),
-                                cacheLogs = viewModel.getKvCacheLogs(candidate),
-                                slmPrompt = viewModel.getSlmPrompt(candidate),
-                                parseJson = viewModel::getParsedOutput,
-                                target = processingTarget
-                            )
-                        } else {
-                            null
-                        }
-                    } else {
-                        val stopping = state.syncState.status ==
-                            HomeSyncState.Status.CANCELLING
-                        SmsTelemetryPresenter.gap(
-                            target = processingTarget,
-                            phase = when {
-                                stopping -> SmsPipelinePhase.STOPPING
-                                state.syncState.status == HomeSyncState.Status.SCANNING ->
-                                    SmsPipelinePhase.SCANNING
-                                else -> SmsPipelinePhase.PROCESSING
-                            },
-                            stopState = if (stopping) {
-                                SmsStopUiState.STOPPING
-                            } else {
-                                SmsStopUiState.AVAILABLE
-                            }
-                        )
-                    }
-                }
-
-                is SmsProcessingTarget.ManualResult -> {
-                    state.syncState.queue
-                        .firstOrNull {
-                            it.id == processingTarget.candidateKey &&
-                                it.status != "syncing"
-                        }
-                        ?.let { candidate ->
-                            SmsTelemetryPresenter.manual(
-                                state = state.syncState,
-                                sms = candidate,
-                                filterLogs = viewModel.getFilterLogs(candidate),
-                                cacheLogs = viewModel.getKvCacheLogs(candidate),
-                                slmPrompt = viewModel.getSlmPrompt(candidate),
-                                parseJson = viewModel::getParsedOutput,
-                                target = processingTarget
-                            )
-                        }
+        when (processingTarget) {
+            null -> Unit
+            is SmsProcessingTarget.Historical -> {
+                LaunchedEffect(processingTarget) {
+                    selectedProcessingTarget = null
                 }
             }
-        }
-
-        LaunchedEffect(processingTarget, telemetryModel) {
-            if (processingTarget != null && telemetryModel == null) {
-                selectedProcessingTarget = null
-            }
-        }
-
-        telemetryModel?.let { model ->
-            SmsTelemetryBottomSheet(
-                model = model,
+            else -> TransactionsManualTelemetrySheet(
+                requestedTarget = processingTarget,
+                stateFlow = viewModel.manualSyncTelemetry,
+                viewModel = viewModel,
+                onTargetExpired = { selectedProcessingTarget = null },
                 onStop = { target ->
                     if (target is SmsProcessingTarget.ManualRecent) {
                         viewModel.stopManualSync(target)
@@ -1124,6 +1072,120 @@ fun TransactionsScreen(
         }
     }
 }
+}
+
+@Composable
+private fun TransactionsManualTelemetrySheet(
+    requestedTarget: SmsProcessingTarget,
+    stateFlow: StateFlow<HomeSyncState>,
+    viewModel: TransactionsViewModel,
+    onTargetExpired: () -> Unit,
+    onStop: (SmsProcessingTarget) -> Unit,
+    onClose: () -> Unit
+) {
+    val syncState by stateFlow.collectSensitiveManualState()
+    val currentState = syncState ?: return
+
+    val targetIsCurrent = when (requestedTarget) {
+        is SmsProcessingTarget.ManualRecent ->
+            currentState.ownsManualProcessingTarget(requestedTarget)
+        is SmsProcessingTarget.ManualResult ->
+            currentState.queue.any {
+                it.id == requestedTarget.candidateKey && it.status != "syncing"
+            }
+        is SmsProcessingTarget.Historical -> false
+    }
+    LaunchedEffect(
+        requestedTarget,
+        currentState.activeRunId,
+        currentState.status,
+        currentState.queue
+    ) {
+        if (!targetIsCurrent) onTargetExpired()
+    }
+    if (!targetIsCurrent) return
+
+    val candidate = when (requestedTarget) {
+        is SmsProcessingTarget.ManualRecent ->
+            currentState.activeSmsPipelineItem()?.takeIf {
+                it.id == requestedTarget.candidateKey
+            }
+        is SmsProcessingTarget.ManualResult ->
+            currentState.queue.firstOrNull {
+                it.id == requestedTarget.candidateKey
+            }
+        is SmsProcessingTarget.Historical -> null
+    }
+
+    val model = if (candidate != null) {
+        val filterLogs = remember(
+            candidate.id,
+            candidate.sender,
+            candidate.body,
+            candidate.status
+        ) { viewModel.getFilterLogs(candidate) }
+        val cacheLogs = remember(
+            candidate.id,
+            candidate.sender,
+            candidate.body,
+            candidate.status
+        ) { viewModel.getKvCacheLogs(candidate) }
+        val slmPrompt = remember(
+            candidate.id,
+            candidate.sender,
+            candidate.body,
+            candidate.status
+        ) { viewModel.getSlmPrompt(candidate) }
+        SmsTelemetryPresenter.manual(
+            state = currentState,
+            sms = candidate,
+            filterLogs = filterLogs,
+            cacheLogs = cacheLogs,
+            slmPrompt = slmPrompt,
+            parseJson = viewModel::getParsedOutput,
+            target = requestedTarget
+        )
+    } else {
+        val target = requestedTarget as? SmsProcessingTarget.ManualRecent
+            ?: return
+        val gapTarget = SmsProcessingTarget.ManualRecent(
+            runId = target.runId,
+            candidateKey = null
+        )
+        val phase = when (currentState.status) {
+            HomeSyncState.Status.SCANNING -> SmsPipelinePhase.SCANNING
+            HomeSyncState.Status.CANCELLING -> SmsPipelinePhase.STOPPING
+            else -> SmsPipelinePhase.PROCESSING
+        }
+        val stopState = when {
+            currentState.activeRunId != target.runId -> SmsStopUiState.HIDDEN
+            currentState.status == HomeSyncState.Status.CANCELLING ->
+                SmsStopUiState.STOPPING
+            currentState.status in setOf(
+                HomeSyncState.Status.SCANNING,
+                HomeSyncState.Status.SYNCING
+            ) -> SmsStopUiState.AVAILABLE
+            else -> SmsStopUiState.HIDDEN
+        }
+        SmsTelemetryPresenter.gap(
+            target = gapTarget,
+            phase = phase,
+            stopState = stopState,
+            title = if (phase == SmsPipelinePhase.SCANNING) {
+                "Scanning recent messages"
+            } else {
+                "Preparing next message"
+            }
+        )
+    }
+
+    key(model.target.candidateKey ?: "manual-gap") {
+        SmsTelemetryBottomSheet(
+            model = model,
+            onStop = onStop,
+            onClose = onClose
+        )
+    }
 }
 
 internal fun shouldShowTransactionsEmptyState(

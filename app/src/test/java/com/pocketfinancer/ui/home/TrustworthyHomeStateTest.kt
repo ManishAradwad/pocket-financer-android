@@ -12,8 +12,16 @@ import com.pocketfinancer.ui.smsprocessing.SmsProcessingTarget
 import com.pocketfinancer.ui.smsprocessing.SmsPipelinePhase
 import com.pocketfinancer.ui.smsprocessing.ownsManualProcessingTarget
 import com.pocketfinancer.ui.smsprocessing.toSmsPipelineCardUiModel
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotSame
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -950,10 +958,19 @@ class TrustworthyHomeStateTest {
     }
 
     @Test
-    fun `home aggregate state excludes live manual token output`() {
+    fun `home aggregate state excludes manual source evidence and telemetry`() {
         val source = HomeSyncState(
             status = HomeSyncState.Status.SYNCING,
             activeRunId = "manual-run",
+            queue = listOf(
+                SyncSmsItem(
+                    id = "candidate-private",
+                    sender = "PRIVATE-BANK",
+                    body = "Account ending 6254 was debited.",
+                    date = 0L,
+                    status = "syncing"
+                )
+            ),
             thinkingOutput = "private reasoning",
             jsonOutput = "private JSON",
             activeSmsPerformance = "12 tok/s",
@@ -966,9 +983,129 @@ class TrustworthyHomeStateTest {
         assertEquals("", scrubbed.jsonOutput)
         assertEquals(null, scrubbed.activeSmsPerformance)
         assertEquals(null, scrubbed.activeModelName)
+        assertEquals("", scrubbed.queue.single().sender)
+        assertEquals("", scrubbed.queue.single().body)
+        assertEquals(source.queue.single().id, scrubbed.queue.single().id)
+        assertEquals(source.queue.single().status, scrubbed.queue.single().status)
         assertEquals(source.activeRunId, scrubbed.activeRunId)
         assertEquals(source.status, scrubbed.status)
     }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun `sanitized manual projection suppresses token and source-only churn`() =
+        runTest {
+            val candidate = SyncSmsItem(
+                id = "candidate-eager",
+                sender = "PRIVATE-BANK",
+                body = "Account ending 6254 was debited.",
+                date = 0L,
+                status = "syncing"
+            )
+            val source = MutableStateFlow(
+                HomeSyncState(
+                    status = HomeSyncState.Status.SYNCING,
+                    activeRunId = "manual-eager-run",
+                    queue = listOf(candidate),
+                    thinkingOutput = "private reasoning"
+                )
+            )
+            val projection = sanitizedManualSyncState(
+                source = source,
+                scope = backgroundScope
+            )
+            runCurrent()
+
+            val initialProjection = projection.value
+            assertEquals("", projection.value.queue.single().sender)
+            assertEquals("", projection.value.thinkingOutput)
+
+            source.value = source.value.copy(
+                thinkingOutput = "private reasoning plus one token",
+                jsonOutput = "{partial}",
+                activeSmsPerformance = "12 tok/s",
+                activeModelName = "local-model.gguf"
+            )
+            runCurrent()
+            assertSame(initialProjection, projection.value)
+
+            source.value = source.value.copy(
+                queue = listOf(candidate.copy(sender = "RENAMED-BANK"))
+            )
+            runCurrent()
+            assertSame(initialProjection, projection.value)
+
+            source.value = source.value.copy(currentStageIndex = 2)
+            runCurrent()
+            assertNotSame(initialProjection, projection.value)
+            assertSame(initialProjection.queue, projection.value.queue)
+
+            source.value = HomeSyncState(
+                status = HomeSyncState.Status.DONE,
+                queue = listOf(candidate.withPrivacySafeStatus("synced"))
+            )
+            runCurrent()
+
+            assertEquals(HomeSyncState.Status.DONE, projection.value.status)
+            assertNotSame(initialProjection.queue, projection.value.queue)
+            assertEquals("", projection.value.queue.single().sender)
+            assertEquals("", projection.value.queue.single().body)
+        }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun `manual presentation retains source but suppresses token-only churn`() =
+        runTest {
+            val candidate = SyncSmsItem(
+                id = "candidate-presentation",
+                sender = "PRIVATE-BANK",
+                body = "Account ending 6254 was debited.",
+                date = 0L,
+                status = "syncing"
+            )
+            val source = MutableStateFlow(
+                HomeSyncState(
+                    status = HomeSyncState.Status.SYNCING,
+                    activeRunId = "manual-presentation-run",
+                    queue = listOf(candidate),
+                    thinkingOutput = "private reasoning"
+                )
+            )
+            val projection = manualSyncPresentationState(source).stateIn(
+                scope = backgroundScope,
+                started = SharingStarted.Eagerly,
+                initialValue = source.value.withoutManualLiveTelemetry()
+            )
+            runCurrent()
+
+            val initialProjection = projection.value
+            assertEquals("PRIVATE-BANK", initialProjection.queue.single().sender)
+            assertEquals(candidate.body, initialProjection.queue.single().body)
+            assertEquals("", initialProjection.thinkingOutput)
+
+            source.value = source.value.copy(
+                thinkingOutput = "private reasoning plus one token",
+                jsonOutput = "{partial}",
+                activeSmsPerformance = "12 tok/s",
+                activeModelName = "local-model.gguf"
+            )
+            runCurrent()
+            assertSame(initialProjection, projection.value)
+
+            source.value = source.value.copy(
+                queue = listOf(candidate.copy(sender = "UPDATED-BANK"))
+            )
+            runCurrent()
+            assertNotSame(initialProjection, projection.value)
+            assertEquals("UPDATED-BANK", projection.value.queue.single().sender)
+            assertEquals("", projection.value.jsonOutput)
+
+            val sourceUpdatedProjection = projection.value
+            source.value = source.value.copy(currentStageIndex = 2)
+            runCurrent()
+            assertNotSame(sourceUpdatedProjection, projection.value)
+            assertEquals(2, projection.value.currentStageIndex)
+        }
 
     @Test
     fun `fatal manual processing failure is never presented as success`() {
@@ -1141,6 +1278,10 @@ class TrustworthyHomeStateTest {
             assertEquals(status, transitioned.status)
             assertTrue(transitioned.hasDiagnosticSourceEvidence())
         }
+
+        assertTrue(
+            source.copy(sender = "").hasDiagnosticSourceEvidence()
+        )
     }
 
     private fun readyNoHistory(reason: SetupEmptyReason) =

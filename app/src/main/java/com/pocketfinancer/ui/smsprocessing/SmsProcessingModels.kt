@@ -2,6 +2,7 @@ package com.pocketfinancer.ui.smsprocessing
 
 import com.pocketfinancer.ui.home.HomeSyncState
 import com.pocketfinancer.ui.home.SyncSmsItem
+import com.pocketfinancer.ui.home.hasDiagnosticSourceEvidence
 import com.pocketfinancer.ui.onboarding.HistoricalSmsProcessingActivity
 import com.pocketfinancer.ui.onboarding.HistoricalSmsProcessingStage
 
@@ -71,6 +72,9 @@ enum class SmsPipelineTone {
 
 sealed interface SmsSourcePreview {
     object Hidden : SmsSourcePreview
+
+    /** A settled candidate whose raw source was deliberately scrubbed. */
+    object Cleared : SmsSourcePreview
 
     data class Message(
         val sender: String,
@@ -283,7 +287,12 @@ fun HomeSyncState.toSmsPipelineCardUiModel(
         total == 1 -> "Processing message"
         else -> "Processing message $position of $total"
     }
-    val detail = "From ${activeItem.sender.ifBlank { "Unknown sender" }}"
+    val hasSourceEvidence = activeItem.hasDiagnosticSourceEvidence()
+    val detail = if (hasSourceEvidence) {
+        "From ${activeItem.sender.ifBlank { "Unknown sender" }}"
+    } else {
+        "Processing the current message on this device"
+    }
 
     return SmsPipelineCardUiModel(
         target = target,
@@ -296,7 +305,11 @@ fun HomeSyncState.toSmsPipelineCardUiModel(
         title = title,
         detail = detail,
         badge = if (isStopping) "STOPPING" else "LIVE",
-        source = SmsSourcePreview.Message(activeItem.sender, activeItem.body),
+        source = if (hasSourceEvidence) {
+            SmsSourcePreview.Message(activeItem.sender, activeItem.body)
+        } else {
+            SmsSourcePreview.Hidden
+        },
         stepLabel = "CURRENT STEP",
         stepValue = step,
         inspectState = SmsInspectUiState.AVAILABLE,
@@ -384,10 +397,10 @@ private fun HomeSyncState.completedManualCardModel(
         title = title,
         detail = detail,
         badge = if (hasIssues) "REVIEW" else "DONE",
-        source = if (item.sender.isBlank() && item.body.isBlank()) {
-            SmsSourcePreview.Hidden
-        } else {
+        source = if (item.hasDiagnosticSourceEvidence()) {
             SmsSourcePreview.Message(item.sender, item.body)
+        } else {
+            SmsSourcePreview.Cleared
         },
         stepLabel = "LATEST RESULT",
         stepValue = result,

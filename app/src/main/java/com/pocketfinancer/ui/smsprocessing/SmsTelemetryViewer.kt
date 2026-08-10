@@ -162,6 +162,7 @@ private fun TelemetryGap(
         modifier = modifier
             .fillMaxWidth()
             .navigationBarsPadding()
+            .verticalScroll(rememberScrollState())
             .padding(horizontal = 24.dp, vertical = 16.dp),
         verticalArrangement = Arrangement.spacedBy(18.dp)
     ) {
@@ -469,13 +470,32 @@ private fun PipelineTimeline(
                 onExpandedStageChange(if (expandedStage == 0) null else 0)
             }
         ) {
-            Text(
-                text = "ORIGINAL RAW MESSAGE BODY",
-                color = M3_OnSurfaceVariant,
-                style = AppTypography.eyebrow
-            )
-            OutputBox(title = "Sender", content = candidate.sender)
-            OutputBox(title = "Message", content = candidate.body)
+            when (val source = candidate.source) {
+                is SmsTelemetrySource.Available -> {
+                    Text(
+                        text = "ORIGINAL RAW MESSAGE BODY",
+                        color = M3_OnSurfaceVariant,
+                        style = AppTypography.eyebrow
+                    )
+                    OutputBox(
+                        title = "Sender",
+                        content = source.sender.ifBlank { "Unknown sender" }
+                    )
+                    OutputBox(title = "Message", content = source.body)
+                }
+
+                is SmsTelemetrySource.Unavailable -> {
+                    Text(
+                        text = "SOURCE MESSAGE UNAVAILABLE",
+                        color = M3_OnSurfaceVariant,
+                        style = AppTypography.eyebrow
+                    )
+                    OutputBox(
+                        title = "Source status",
+                        content = source.detail
+                    )
+                }
+            }
             OutputBox(
                 title = "SMS Filter Pipeline Logs",
                 content = model.filterLogs.joinToString("\n")

@@ -106,7 +106,6 @@ internal fun SyncSmsItem.withPrivacySafeStatus(status: String): SyncSmsItem =
 
 internal fun SyncSmsItem.hasDiagnosticSourceEvidence(): Boolean =
     status !in SOURCE_EVIDENCE_DISCARDED_STATUSES &&
-        sender.isNotBlank() &&
         body.isNotBlank()
 
 /**

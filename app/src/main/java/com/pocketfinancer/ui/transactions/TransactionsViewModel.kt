@@ -10,11 +10,14 @@ import com.pocketfinancer.data.repository.TransactionRepository
 import com.pocketfinancer.data.repository.AccountRepository
 import com.pocketfinancer.ui.home.HomeSyncManager
 import com.pocketfinancer.ui.smsprocessing.SmsProcessingTarget
-import com.pocketfinancer.ui.smsprocessing.ownsManualProcessingTarget
 import com.pocketfinancer.ui.home.HomeSyncState
 import com.pocketfinancer.ui.home.SyncService
 import com.pocketfinancer.ui.home.SyncSmsItem
 import com.pocketfinancer.ui.home.hasDiagnosticSourceEvidence
+import com.pocketfinancer.ui.home.manualSyncPreDispatchRejectionMessage
+import com.pocketfinancer.ui.home.manualSyncPresentationState
+import com.pocketfinancer.ui.home.sanitizedManualSyncState
+import com.pocketfinancer.ui.home.showManualSyncStopRejectionFeedback
 import com.pocketfinancer.pipeline.SmsFilterPipeline
 import com.pocketfinancer.pipeline.PromptBuilder
 import com.pocketfinancer.pipeline.ExtractionParser
@@ -80,13 +83,26 @@ class TransactionsViewModel @Inject constructor(
     private val _sortOption = MutableStateFlow(SortOption.DATE_DESC)
     val sortOption: StateFlow<SortOption> = _sortOption.asStateFlow()
 
+    /** Full evidence is collected only by an open telemetry sheet. */
+    val manualSyncTelemetry: StateFlow<HomeSyncState> = syncManager.syncState
+
+    /** Source-preserving, telemetry-free state for the visible screen. */
+    val manualSyncPresentation = manualSyncPresentationState(
+        syncManager.syncState
+    )
+
+    val manualSyncUiState = sanitizedManualSyncState(
+        source = syncManager.syncState,
+        scope = viewModelScope
+    )
+
     val uiState: StateFlow<TransactionsUiState> = combine(
         transactionRepository.getAllByDateDesc(),
         _activeSegment,
         _selectedTransaction,
         accountRepository.getAll(),
         _selectedAccountId,
-        syncManager.syncState,
+        manualSyncUiState,
         _searchQuery,
         _sortOption
     ) { flowsArray ->
@@ -169,7 +185,16 @@ class TransactionsViewModel @Inject constructor(
     }
 
     fun stopManualSync(target: SmsProcessingTarget.ManualRecent) {
-        if (!syncManager.syncState.value.ownsManualProcessingTarget(target)) return
+        manualSyncPreDispatchRejectionMessage(
+            state = syncManager.syncState.value,
+            target = target
+        )?.let { message ->
+            showManualSyncStopRejectionFeedback(
+                context = context,
+                message = message
+            )
+            return
+        }
         val commandAccepted = try {
             SyncService.requestStop(context, target)
         } catch (_: RuntimeException) {

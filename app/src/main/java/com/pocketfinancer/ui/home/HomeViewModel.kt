@@ -35,7 +35,6 @@ import com.pocketfinancer.ui.onboarding.OnboardingSyncManager
 import com.pocketfinancer.ui.onboarding.HistoricalSmsProcessingActivity
 import com.pocketfinancer.ui.onboarding.withoutHistoricalSmsActivity
 import com.pocketfinancer.ui.smsprocessing.SmsProcessingTarget
-import com.pocketfinancer.ui.smsprocessing.ownsManualProcessingTarget
 import java.util.Calendar
 import javax.inject.Inject
 
@@ -122,36 +121,167 @@ internal fun HistoricalSmsProcessingActivity.cardSnapshot(): HistoricalSmsProces
     )
 
 /**
- * The Home aggregate state needs stage and queue ownership, but not live model
- * output. Keeping token buffers out of its replay cache also avoids rebuilding
- * the entire dashboard for every coalesced token update.
+ * The Home aggregate state needs stage and queue ownership, but not source
+ * evidence or live model output. Sensitive fields are collected separately by
+ * the visible screen and cleared from its Compose holder when the lifecycle
+ * stops. Keeping them out of this replay cache prevents an off-screen Home
+ * destination from retaining or briefly replaying a completed candidate.
  */
 internal fun HomeSyncState.withoutManualSmsTelemetry(): HomeSyncState = copy(
+    queue = queue.map { item ->
+        item.copy(
+            sender = "",
+            body = ""
+        )
+    },
     thinkingOutput = "",
     jsonOutput = "",
     activeSmsPerformance = null,
     activeModelName = null
 )
 
-/**
- * Sensitive per-SMS evidence is deliberately kept out of [HomeUiState], whose
- * while-subscribed replay cache may stop observing while Home is off screen.
- * This small eager projection continues observing the process owner so a
- * terminal clear is always reflected even when there is no UI collector.
- */
-internal fun historicalSmsCardState(
-    source: StateFlow<OnboardingSyncManager.OnboardingSyncState>,
-    scope: CoroutineScope
-): StateFlow<HistoricalSmsProcessingActivity?> =
-    source
-        .map { state -> activeHistoricalSmsForHome(state)?.cardSnapshot() }
-        .distinctUntilChanged()
-        .stateIn(
-            scope = scope,
-            started = SharingStarted.Eagerly,
-            initialValue = activeHistoricalSmsForHome(source.value)
-                ?.cardSnapshot()
+/** Keeps source evidence for a visible card/queue but omits live model output. */
+internal fun HomeSyncState.withoutManualLiveTelemetry(): HomeSyncState = copy(
+    thinkingOutput = "",
+    jsonOutput = "",
+    activeSmsPerformance = null,
+    activeModelName = null
+)
+
+private fun sameManualStateOutsideQueueAndTelemetry(
+    first: HomeSyncState,
+    second: HomeSyncState
+): Boolean =
+    first.status == second.status &&
+        first.activeRunId == second.activeRunId &&
+        first.cancellationRequested == second.cancellationRequested &&
+        first.currentIndex == second.currentIndex &&
+        first.currentStageIndex == second.currentStageIndex &&
+        first.hasThinkingMode == second.hasThinkingMode &&
+        first.recentScanOutcome == second.recentScanOutcome &&
+        first.recentScanWindowDays == second.recentScanWindowDays &&
+        first.lastSuccessfulScanMillis == second.lastSuccessfulScanMillis &&
+        first.scanError == second.scanError &&
+        first.syncError == second.syncError
+
+private fun sameAggregateQueue(
+    first: List<SyncSmsItem>,
+    second: List<SyncSmsItem>
+): Boolean {
+    if (first === second) return true
+    if (first.size != second.size) return false
+    var index = 0
+    while (index < first.size) {
+        val firstItem = first[index]
+        val secondItem = second[index]
+        val sameItem = firstItem === secondItem ||
+            (
+                firstItem.id == secondItem.id &&
+                    firstItem.date == secondItem.date &&
+                    firstItem.messageType == secondItem.messageType &&
+                    firstItem.sourceIdentity == secondItem.sourceIdentity &&
+                    firstItem.status == secondItem.status &&
+                    firstItem.parsedAmount == secondItem.parsedAmount &&
+                    firstItem.parsedMerchant == secondItem.parsedMerchant
+                )
+        if (!sameItem) return false
+        index += 1
+    }
+    return true
+}
+
+internal fun sameManualAggregateState(
+    first: HomeSyncState,
+    second: HomeSyncState
+): Boolean = first === second ||
+    (
+        sameManualStateOutsideQueueAndTelemetry(first, second) &&
+            sameAggregateQueue(first.queue, second.queue)
         )
+
+internal fun sameManualPresentationState(
+    first: HomeSyncState,
+    second: HomeSyncState
+): Boolean = first === second ||
+    (
+        sameManualStateOutsideQueueAndTelemetry(first, second) &&
+            (
+                first.queue === second.queue ||
+                    first.queue == second.queue
+                )
+        )
+
+/** Visible cards/queues retain source evidence but never observe token churn. */
+internal fun manualSyncPresentationState(
+    source: StateFlow<HomeSyncState>
+): Flow<HomeSyncState> = source
+    .distinctUntilChanged(::sameManualPresentationState)
+    .map(HomeSyncState::withoutManualLiveTelemetry)
+
+/**
+ * Keeps only the scrubbed manual projection hot so off-screen terminal
+ * transitions replace an obsolete LIVE snapshot without retaining evidence.
+ */
+internal fun sanitizedManualSyncState(
+    source: StateFlow<HomeSyncState>,
+    scope: CoroutineScope
+): StateFlow<HomeSyncState> {
+    val initialSource = source.value
+    val initialValue = initialSource.withoutManualSmsTelemetry()
+    var lastSourceQueue = initialSource.queue
+    var sanitizedQueue = initialValue.queue
+    return source
+        .distinctUntilChanged(::sameManualAggregateState)
+        .map { state ->
+            if (!sameAggregateQueue(lastSourceQueue, state.queue)) {
+                sanitizedQueue = state.queue.map { item ->
+                    item.copy(sender = "", body = "")
+                }
+            }
+            lastSourceQueue = state.queue
+            state.copy(
+                queue = sanitizedQueue,
+                thinkingOutput = "",
+                jsonOutput = "",
+                activeSmsPerformance = null,
+                activeModelName = null
+            )
+        }
+        .stateIn(
+        scope = scope,
+        started = SharingStarted.Eagerly,
+        initialValue = initialValue
+    )
+}
+
+/** Ignores telemetry-only activity changes before creating a card snapshot. */
+private fun sameHistoricalCardActivity(
+    first: HistoricalSmsProcessingActivity?,
+    second: HistoricalSmsProcessingActivity?
+): Boolean {
+    if (first === second) return true
+    if (first == null || second == null) return false
+    return first.candidateKey == second.candidateKey &&
+        first.sender == second.sender &&
+        first.body == second.body &&
+        first.date == second.date &&
+        first.position == second.position &&
+        first.total == second.total &&
+        first.stage == second.stage &&
+        first.hasThinkingMode == second.hasThinkingMode
+}
+
+/** Source-preserving historical card state exists only while Home collects it. */
+internal fun historicalSmsCardState(
+    source: StateFlow<OnboardingSyncManager.OnboardingSyncState>
+): Flow<HistoricalSmsProcessingActivity?> = source
+    .distinctUntilChanged { first, second ->
+        sameHistoricalCardActivity(
+            activeHistoricalSmsForHome(first),
+            activeHistoricalSmsForHome(second)
+        )
+    }
+    .map { state -> activeHistoricalSmsForHome(state)?.cardSnapshot() }
 
 /**
  * Covers both an accepted service run and the short Android service-start
@@ -201,27 +331,29 @@ class HomeViewModel @Inject constructor(
     val activeHistoricalSms: Flow<HistoricalSmsProcessingActivity?> =
         onboardingSyncManager.syncState.map(::activeHistoricalSmsForHome)
 
-    /** Collected only by the visible telemetry sheet. */
+    /** Full evidence collected only by an open telemetry sheet. */
     val manualSyncTelemetry: StateFlow<HomeSyncState> = syncManager.syncState
 
-    val activeHistoricalSmsCard: StateFlow<HistoricalSmsProcessingActivity?> =
-        historicalSmsCardState(
-            source = onboardingSyncManager.syncState,
-            scope = viewModelScope
-        )
+    /** Source-preserving, telemetry-free state for the visible Home surface. */
+    val manualSyncPresentation: Flow<HomeSyncState> =
+        manualSyncPresentationState(syncManager.syncState)
+
+    val activeHistoricalSmsCard: Flow<HistoricalSmsProcessingActivity?> =
+        historicalSmsCardState(onboardingSyncManager.syncState)
 
     private val onboardingUiState = onboardingSyncManager.syncState
         .map { it.withoutHistoricalSmsActivity() }
         .distinctUntilChanged()
 
-    private val homeSyncUiState = syncManager.syncState
-        .map(HomeSyncState::withoutManualSmsTelemetry)
-        .distinctUntilChanged()
+    val manualSyncUiState = sanitizedManualSyncState(
+        source = syncManager.syncState,
+        scope = viewModelScope
+    )
 
     val uiState: StateFlow<HomeUiState> = combine(
         transactionRepository.getAllByDateDesc(),
         _selectedPeriod,
-        homeSyncUiState,
+        manualSyncUiState,
         modelDownloader.state,
         onboardingUiState,
         modelUpgradeSessionDismissalStore.dismissedTierIds,
@@ -490,11 +622,20 @@ class HomeViewModel @Inject constructor(
         showFailureToast: Boolean
     ): Boolean {
         val state = syncManager.syncState.value
-        if (
-            expectedTarget != null &&
-            !state.ownsManualProcessingTarget(expectedTarget)
-        ) {
-            return false
+        if (expectedTarget != null) {
+            val rejectionMessage = manualSyncPreDispatchRejectionMessage(
+                state = state,
+                target = expectedTarget
+            )
+            if (rejectionMessage != null) {
+                if (showFailureToast) {
+                    showManualSyncStopRejectionFeedback(
+                        context = context,
+                        message = rejectionMessage
+                    )
+                }
+                return false
+            }
         }
         val runId = state.activeRunId ?: return false
         val commandAccepted = try {

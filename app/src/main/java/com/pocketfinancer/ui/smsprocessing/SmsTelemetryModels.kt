@@ -2,6 +2,7 @@ package com.pocketfinancer.ui.smsprocessing
 
 import com.pocketfinancer.ui.home.HomeSyncState
 import com.pocketfinancer.ui.home.SyncSmsItem
+import com.pocketfinancer.ui.home.hasDiagnosticSourceEvidence
 import com.pocketfinancer.ui.onboarding.HistoricalSmsProcessingActivity
 import java.util.Locale
 
@@ -25,12 +26,24 @@ enum class SmsTelemetryStatus {
     }
 }
 
-sealed interface SmsTelemetryContent {
-    /** Sensitive candidate evidence. Never place this in saveable UI state. */
-    data class Candidate(
-        val candidateKey: String,
+sealed interface SmsTelemetrySource {
+    /** Sensitive evidence. Never place this value in saveable UI state. */
+    data class Available(
         val sender: String,
         val body: String
+    ) : SmsTelemetrySource
+
+    /** The candidate remains inspectable, but its source is absent here. */
+    data class Unavailable(
+        val detail: String
+    ) : SmsTelemetrySource
+}
+
+sealed interface SmsTelemetryContent {
+    /** Candidate-scoped details; [source] may contain sensitive evidence. */
+    data class Candidate(
+        val candidateKey: String,
+        val source: SmsTelemetrySource
     ) : SmsTelemetryContent {
         init {
             require(candidateKey.isNotBlank()) {
@@ -167,8 +180,7 @@ object SmsTelemetryPresenter {
             target = requestedTarget,
             content = SmsTelemetryContent.Candidate(
                 candidateKey = sms.id,
-                sender = sms.sender,
-                body = sms.body
+                source = sms.telemetrySource()
             ),
             phase = phase,
             status = status,
@@ -208,8 +220,10 @@ object SmsTelemetryPresenter {
         target = SmsProcessingTarget.Historical(runId, activity.candidateKey),
         content = SmsTelemetryContent.Candidate(
             candidateKey = activity.candidateKey,
-            sender = activity.sender,
-            body = activity.body
+            source = SmsTelemetrySource.Available(
+                sender = activity.sender,
+                body = activity.body
+            )
         ),
         phase = when (stopState) {
             SmsStopUiState.STOPPING -> SmsPipelinePhase.STOPPING
@@ -268,6 +282,24 @@ object SmsTelemetryPresenter {
         )
     }
 }
+
+private fun SyncSmsItem.telemetrySource(): SmsTelemetrySource =
+    if (hasDiagnosticSourceEvidence()) {
+        SmsTelemetrySource.Available(
+            sender = sender,
+            body = body
+        )
+    } else {
+        SmsTelemetrySource.Unavailable(
+            detail = if (
+                status in setOf("synced", "already_saved", "filtered_out")
+            ) {
+                "Source evidence was cleared from this processing log after the result settled."
+            } else {
+                "Source evidence is unavailable for this processing result."
+            }
+        )
+    }
 
 private fun expiredManualTelemetry(
     target: SmsProcessingTarget.ManualRecent

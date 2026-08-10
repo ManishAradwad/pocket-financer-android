@@ -72,6 +72,68 @@ class SmsProcessingPresentationTest {
     }
 
     @Test
+    fun `blank sender retains real body as unknown-sender evidence`() {
+        val sms = SyncSmsItem(
+            id = "candidate-unknown-sender",
+            sender = "",
+            body = "Account ending 6254 was debited.",
+            date = 0L,
+            status = "syncing"
+        )
+        val state = HomeSyncState(
+            status = HomeSyncState.Status.SYNCING,
+            activeRunId = "manual-run-unknown-sender",
+            queue = listOf(sms),
+            currentIndex = 0
+        )
+        val card = state.toSmsPipelineCardUiModel()
+
+        requireNotNull(card)
+        assertEquals("From Unknown sender", card.detail)
+        assertEquals(SmsSourcePreview.Message("", sms.body), card.source)
+
+        val telemetry = SmsTelemetryPresenter.manual(
+            state = state,
+            sms = sms,
+            filterLogs = listOf("checked"),
+            cacheLogs = emptyList(),
+            slmPrompt = "prompt",
+            parseJson = { "" },
+            target = SmsProcessingTarget.ManualRecent(
+                "manual-run-unknown-sender",
+                "candidate-unknown-sender"
+            )
+        )
+        val source =
+            (telemetry.content as SmsTelemetryContent.Candidate).source
+        assertEquals(SmsTelemetrySource.Available("", sms.body), source)
+    }
+
+    @Test
+    fun `manual processing card hides source omitted from aggregate state`() {
+        val sms = SyncSmsItem(
+            id = "candidate-sanitized",
+            sender = "",
+            body = "",
+            date = 0L,
+            status = "syncing"
+        )
+        val model = HomeSyncState(
+            status = HomeSyncState.Status.SYNCING,
+            activeRunId = "manual-run-sanitized",
+            queue = listOf(sms),
+            currentIndex = 0
+        ).toSmsPipelineCardUiModel()
+
+        requireNotNull(model)
+        assertEquals(SmsSourcePreview.Hidden, model.source)
+        assertEquals(
+            "Processing the current message on this device",
+            model.detail
+        )
+    }
+
+    @Test
     fun `manual handoff after a settled item clears prior source`() {
         val prior = sms(id = "prior", sender = "PRIVATE-BANK", status = "error")
         val model = HomeSyncState(
@@ -127,6 +189,7 @@ class SmsProcessingPresentationTest {
         assertEquals(SmsProcessingTarget.ManualResult("settled-9"), model.target)
         assertEquals(SmsPipelinePhase.COMPLETE, model.phase)
         assertEquals(SmsStopUiState.HIDDEN, model.stopState)
+        assertEquals(SmsSourcePreview.Cleared, model.source)
     }
 
     @Test
@@ -213,6 +276,15 @@ class SmsProcessingPresentationTest {
         assertEquals(SmsTelemetryStatus.ALREADY_SAVED, settled.status)
         assertEquals(SmsStopUiState.HIDDEN, settled.stopState)
         assertFalse(settled.isActiveCandidate)
+        val settledCandidate =
+            settled.content as SmsTelemetryContent.Candidate
+        assertTrue(
+            settledCandidate.source is SmsTelemetrySource.Unavailable
+        )
+        assertFalse(
+            (settledCandidate.source as SmsTelemetrySource.Unavailable)
+                .detail.contains("Already in ledger")
+        )
     }
 
     @Test
