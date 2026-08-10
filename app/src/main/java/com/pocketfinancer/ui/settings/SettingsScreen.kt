@@ -155,19 +155,19 @@ private fun SmsAndUpdatesCard(
 ) {
     SectionCard(title = "SMS & UPDATES") {
         SettingSwitchRow(
-            title = "Automatic updates",
+            title = "Automatic SMS processing",
             description = if (state.processIncomingSms) {
-                "Pocket Financer will process new eligible alerts automatically."
+                "New eligible SMS alerts are processed automatically."
             } else {
-                "Automatic work is paused. Manual scans remain available."
+                "New SMS alerts wait for a manual scan."
             },
             checked = state.processIncomingSms,
             enabled = !state.automaticProcessingChangeRunning,
             onCheckedChange = onAutomaticProcessingChange
         )
         Text(
-            text = "Turning this off lets an alert already being processed finish, prevents " +
-                "new or pending automatic work, and does not disable manual scans.",
+            text = "Turning this off discards pending automatic work. An SMS already " +
+                "claimed for processing may finish, and manual scans remain available.",
             color = M3_OnSurfaceVariant,
             style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.padding(top = 8.dp)

@@ -52,6 +52,7 @@ import com.pocketfinancer.ui.home.SyncService
 import com.pocketfinancer.ui.onboarding.OnboardingRunGenerationStore
 import com.pocketfinancer.ui.onboarding.OnboardingService
 import com.pocketfinancer.ui.onboarding.OnboardingSyncManager
+import com.pocketfinancer.ui.onboarding.withoutHistoricalSmsActivity
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
@@ -106,7 +107,7 @@ data class SettingsUiState(
     val filterLogs: List<String>? = null,
     val sessionCacheLogs: List<String>? = null,
     val slmPrompt: String? = null,
-    val processIncomingSms: Boolean = true,
+    val processIncomingSms: Boolean = AutomaticProcessingPreferences.DEFAULT_ENABLED,
     val automaticProcessingChangeRunning: Boolean = false,
     val automaticProcessingError: String? = null,
     val gbnfGrammarEnabled: Boolean = false,
@@ -200,6 +201,9 @@ class SettingsViewModel @Inject constructor(
     private var modelActionJob: Job? = null
     private var downloadJob: Job? = null
     private var resetJob: Job? = null
+    private val onboardingFlowState = onboardingSyncManager.syncState
+        .map { it.withoutHistoricalSmsActivity() }
+        .distinctUntilChanged()
 
     init {
         assessDevice()
@@ -237,7 +241,7 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch {
             combine(
                 homeSyncManager.syncState,
-                onboardingSyncManager.syncState,
+                onboardingFlowState,
                 appFlowCoordinator.state,
                 modelDownloader.state,
                 homeSyncManager.manualOperationReservation
@@ -940,14 +944,14 @@ class SettingsViewModel @Inject constructor(
                 _state.value = _state.value.copy(
                     automaticProcessingError = when {
                         !enabled && automaticUpdatesStillEnabled ->
-                            "Automatic updates are still on because turning them off " +
+                            "Automatic SMS processing is still on because turning it off " +
                                 "could not be saved: " +
                                 (error.message ?: "unknown error")
                         !enabled ->
-                            "Automatic updates are off, but pending-work cleanup failed: " +
+                            "Automatic SMS processing is off, but pending-work cleanup failed: " +
                                 (error.message ?: "unknown error")
                         else ->
-                            "Automatic updates remain off because the change could not " +
+                            "Automatic SMS processing remains off because the change could not " +
                                 "be completed: " +
                                 (error.message ?: "unknown error")
                     }

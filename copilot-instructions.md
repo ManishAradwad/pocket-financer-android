@@ -43,7 +43,7 @@ pocket-financer-android/
    - **Passphrase protection**: A random SQLCipher key is wrapped by Android Keystore-backed encrypted preferences in [`db/AppDatabase.kt`](file:///d:/Personal_Projects/pocket-financer-android/data/src/main/java/com/pocketfinancer/data/db/AppDatabase.kt). Initialization fails closed if that protection is unavailable; legacy plaintext-fallback keys are migrated and erased.
 
 5. **[`:sms`](file:///d:/Personal_Projects/pocket-financer-android/sms)**
-   - **Real-time broadcast**: [`SmsReceiver.kt`](file:///d:/Personal_Projects/pocket-financer-android/sms/src/main/java/com/pocketfinancer/sms/SmsReceiver.kt) uses `goAsync` to durably admit raw evidence to the SQLCipher-backed candidate outbox. WorkManager receives only an opaque candidate key, and startup reconciles pending candidates after process death.
+   - **Real-time broadcast**: Automatic SMS processing defaults off. After explicit opt-in, [`SmsReceiver.kt`](file:///d:/Personal_Projects/pocket-financer-android/sms/src/main/java/com/pocketfinancer/sms/SmsReceiver.kt) uses `goAsync` to durably admit raw evidence to the SQLCipher-backed candidate outbox. WorkManager receives only an opaque candidate key, and startup reconciles pending candidates after process death while the preference remains enabled.
    - **ContentProvider scraper**: [`SmsReader.kt`](file:///d:/Personal_Projects/pocket-financer-android/sms/src/main/java/com/pocketfinancer/sms/SmsReader.kt) reads historical messages from the device inbox.
 
 6. **[`:hardware`](file:///d:/Personal_Projects/pocket-financer-android/hardware)**
@@ -129,5 +129,5 @@ Check model storage paths and read device warning or crash logs:
    - Build out the primary tabs (`Home`, `Insights`) inside [`ui/PocketFinancerRoot.kt`](file:///d:/Personal_Projects/pocket-financer-android/app/src/main/java/com/pocketfinancer/ui/PocketFinancerRoot.kt) (the `Transactions` tab is now fully implemented with date-grouped lists, daily subtotals, credit/debit filters, and an SLM details bottom sheet).
    - Ensure you use Material 3 dark components that fit the defined color tokens.
 2. **Background processing (Implemented)**:
-   - `SmsReceiver` delegates incoming alerts to a unique WorkManager chain. Automatic processing defaults on and is owned by `AutomaticProcessingPreferences`; disabling it blocks new/pending automatic work while allowing already claimed processing to finish. Manual scans remain available.
+   - `SmsReceiver` delegates incoming alerts to a unique WorkManager chain. Automatic SMS processing defaults off and is owned by `AutomaticProcessingPreferences`; users must explicitly opt in. Disabling it discards pending automatic work while allowing an already claimed SMS to finish. Manual scans remain available and can discover messages received while automatic processing was off.
    - Saved transactions retain the source SMS sender/body in SQLCipher-backed Room storage. Rejected messages may exist only as encrypted retry candidates and must be removed after terminal rejection or evidence handoff.

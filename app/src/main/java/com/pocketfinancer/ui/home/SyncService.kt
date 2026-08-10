@@ -11,12 +11,15 @@ import android.net.Uri
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
+import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import com.pocketfinancer.SlmAppFlowCoordinator
 import com.pocketfinancer.SlmAppFlowLease
 import com.pocketfinancer.inference.SlmRuntimeOwner
 import com.pocketfinancer.pipeline.SmsNotificationHelper
 import com.pocketfinancer.ui.onboarding.OnboardingRunGenerationStore
+import com.pocketfinancer.ui.smsprocessing.SmsProcessingTarget
+import com.pocketfinancer.ui.smsprocessing.ownsManualProcessingTarget
 import dagger.hilt.android.AndroidEntryPoint
 import java.util.UUID
 import kotlinx.coroutines.*
@@ -52,6 +55,10 @@ class SyncService : Service() {
             "com.pocketfinancer.action.STOP_MANUAL_SMS_SYNC"
         internal const val EXTRA_RUN_ID =
             "com.pocketfinancer.extra.MANUAL_SMS_SYNC_RUN_ID"
+        internal const val EXTRA_EXPECTED_CANDIDATE_KEY =
+            "com.pocketfinancer.extra.MANUAL_SMS_SYNC_CANDIDATE_KEY"
+        internal const val EXTRA_REQUIRE_CANDIDATE_MATCH =
+            "com.pocketfinancer.extra.MANUAL_SMS_SYNC_EXACT_TARGET"
 
         fun start(
             context: Context,
@@ -84,6 +91,12 @@ class SyncService : Service() {
             return context.startService(stopIntent(context, runId)) != null
         }
 
+        fun requestStop(
+            context: Context,
+            target: SmsProcessingTarget.ManualRecent
+        ): Boolean =
+            context.startService(stopIntent(context, target)) != null
+
         internal fun stopIntent(context: Context, runId: String): Intent =
             Intent(context, SyncService::class.java).apply {
                 action = ACTION_STOP
@@ -93,6 +106,16 @@ class SyncService : Service() {
                 )
                 putExtra(EXTRA_RUN_ID, runId)
             }
+
+        internal fun stopIntent(
+            context: Context,
+            target: SmsProcessingTarget.ManualRecent
+        ): Intent = stopIntent(context, target.runId).apply {
+            putExtra(EXTRA_REQUIRE_CANDIDATE_MATCH, true)
+            target.candidateKey?.let {
+                putExtra(EXTRA_EXPECTED_CANDIDATE_KEY, it)
+            }
+        }
 
         internal fun requestedRunId(intent: Intent?): String? =
             intent?.getStringExtra(EXTRA_RUN_ID)
@@ -124,8 +147,26 @@ class SyncService : Service() {
         // active when its PendingIntent is eventually delivered.
         if (intent?.action == ACTION_STOP) {
             val requestedRunId = requestedRunId(intent)
-            val matchesActiveRun =
+            val requiresCandidateMatch = intent.getBooleanExtra(
+                EXTRA_REQUIRE_CANDIDATE_MATCH,
+                false
+            )
+            val matchesActiveRun = if (requiresCandidateMatch) {
+                syncManager.requestServiceStop(
+                    runId = requestedRunId,
+                    expectedCandidateKey = intent.getStringExtra(
+                        EXTRA_EXPECTED_CANDIDATE_KEY
+                    )
+                )
+            } else {
                 syncManager.requestServiceStop(requestedRunId)
+            }
+            manualSyncStopRejectionMessage(
+                requiresCandidateMatch = requiresCandidateMatch,
+                stopAccepted = matchesActiveRun
+            )?.let { message ->
+                showManualSyncStopRejectionFeedback(this, message)
+            }
             if (matchesActiveRun) {
                 userStopRequestedRunId = requestedRunId
                 val activeJob = jobSnapshotRecordingStart(startId)
@@ -756,6 +797,39 @@ internal fun manualSyncStartAllowed(
 internal fun shouldKeepManualSyncDraining(
     jobIsPresent: Boolean
 ): Boolean = jobIsPresent
+
+internal fun manualSyncStopRejectionMessage(
+    requiresCandidateMatch: Boolean,
+    stopAccepted: Boolean
+): String? = if (requiresCandidateMatch && !stopAccepted) {
+    "Stop wasn't applied because this processing step is no longer active. " +
+        "No other SMS processing was stopped."
+} else {
+    null
+}
+
+internal fun manualSyncPreDispatchRejectionMessage(
+    state: HomeSyncState,
+    target: SmsProcessingTarget.ManualRecent
+): String? = manualSyncStopRejectionMessage(
+    requiresCandidateMatch = true,
+    stopAccepted = state.ownsManualProcessingTarget(target)
+)
+
+internal fun showManualSyncStopRejectionFeedback(
+    context: Context,
+    message: String
+) {
+    runCatching {
+        Toast.makeText(
+            context.applicationContext,
+            message,
+            Toast.LENGTH_LONG
+        ).show()
+    }.onFailure { error ->
+        Log.w("ManualSyncStop", "Stop rejection feedback was unavailable", error)
+    }
+}
 
 internal data class ManualSyncStoppedCopy(
     val title: String,

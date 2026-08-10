@@ -1,0 +1,423 @@
+package com.pocketfinancer.ui.smsprocessing
+
+import com.pocketfinancer.ui.home.HomeSyncState
+import com.pocketfinancer.ui.home.SyncSmsItem
+import com.pocketfinancer.ui.home.hasDiagnosticSourceEvidence
+import com.pocketfinancer.ui.onboarding.HistoricalSmsProcessingActivity
+import java.util.Locale
+
+enum class SmsTelemetryStatus {
+    PENDING,
+    ACTIVE,
+    SAVED,
+    ALREADY_SAVED,
+    FILTERED_OUT,
+    ERROR;
+
+    companion object {
+        fun fromStorageStatus(status: String): SmsTelemetryStatus = when (status) {
+            "syncing" -> ACTIVE
+            "synced" -> SAVED
+            "already_saved" -> ALREADY_SAVED
+            "filtered_out" -> FILTERED_OUT
+            "error" -> ERROR
+            else -> PENDING
+        }
+    }
+}
+
+sealed interface SmsTelemetrySource {
+    /** Sensitive evidence. Never place this value in saveable UI state. */
+    data class Available(
+        val sender: String,
+        val body: String
+    ) : SmsTelemetrySource
+
+    /** The candidate remains inspectable, but its source is absent here. */
+    data class Unavailable(
+        val detail: String
+    ) : SmsTelemetrySource
+}
+
+sealed interface SmsTelemetryContent {
+    /** Candidate-scoped details; [source] may contain sensitive evidence. */
+    data class Candidate(
+        val candidateKey: String,
+        val source: SmsTelemetrySource
+    ) : SmsTelemetryContent {
+        init {
+            require(candidateKey.isNotBlank()) {
+                "Telemetry candidate key must not be blank"
+            }
+        }
+    }
+
+    /** Source-free state shown while an existing run is between candidates. */
+    data class Gap(
+        val title: String,
+        val detail: String
+    ) : SmsTelemetryContent
+}
+
+data class SmsTelemetryRuntimeFacts(
+    val grammarEnabled: Boolean,
+    val thinkingTokenBudget: Int,
+    val answerTokenBudget: Int,
+    val promptEvalMs: Long? = null,
+    val evalMs: Long? = null,
+    val generatedTokens: Int? = null,
+    val cacheAttempted: Boolean? = null,
+    val cacheHit: Boolean? = null,
+    val cachePrefixTokens: Int? = null
+)
+
+data class SmsTelemetryUiModel(
+    val target: SmsProcessingTarget,
+    val content: SmsTelemetryContent,
+    val phase: SmsPipelinePhase,
+    val status: SmsTelemetryStatus,
+    val hasThinkingMode: Boolean,
+    val activeStageIndex: Int,
+    val thinkingOutput: String,
+    val jsonOutput: String,
+    val filterLogs: List<String>,
+    val cacheLogs: List<String>,
+    val slmPrompt: String,
+    val parsedOutput: String,
+    val performanceText: String?,
+    val activeModelName: String?,
+    val runtimeFacts: SmsTelemetryRuntimeFacts? = null,
+    val thinkingOutputTruncated: Boolean = false,
+    val jsonOutputTruncated: Boolean = false,
+    val stopState: SmsStopUiState = SmsStopUiState.HIDDEN
+) {
+    val isActiveCandidate: Boolean
+        get() = content is SmsTelemetryContent.Candidate &&
+            phase in setOf(
+                SmsPipelinePhase.PROCESSING,
+                SmsPipelinePhase.STOPPING,
+                SmsPipelinePhase.FINISHING
+            )
+}
+
+fun telemetrySettledPersistenceLabel(status: SmsTelemetryStatus): String? =
+    when (status) {
+        SmsTelemetryStatus.SAVED -> "Saved to encrypted ledger"
+        SmsTelemetryStatus.ALREADY_SAVED -> "Verified in encrypted ledger"
+        else -> null
+    }
+
+data class SmsTelemetrySettledFacts(
+    val upstreamCompleted: Boolean,
+    val upstreamUnavailable: Boolean,
+    val ledgerVerified: Boolean
+)
+
+/**
+ * An already-saved result can be produced by source-identity preflight. Its
+ * upstream stages are unknown, even though ledger ownership is verified.
+ */
+fun telemetrySettledFacts(
+    status: SmsTelemetryStatus
+): SmsTelemetrySettledFacts = SmsTelemetrySettledFacts(
+    upstreamCompleted = status == SmsTelemetryStatus.SAVED,
+    upstreamUnavailable = status == SmsTelemetryStatus.ALREADY_SAVED,
+    ledgerVerified = status == SmsTelemetryStatus.SAVED ||
+        status == SmsTelemetryStatus.ALREADY_SAVED
+)
+
+fun String.withLiveOutputTruncationNotice(truncated: Boolean): String =
+    if (truncated) "$this\n\n[Live output truncated for display.]" else this
+
+/** Consolidates manual and historical telemetry formatting for every screen. */
+object SmsTelemetryPresenter {
+    fun manual(
+        state: HomeSyncState,
+        sms: SyncSmsItem,
+        filterLogs: List<String>,
+        cacheLogs: List<String>,
+        slmPrompt: String,
+        parseJson: (String) -> String,
+        target: SmsProcessingTarget
+    ): SmsTelemetryUiModel {
+        val requestedTarget = target
+        require(requestedTarget !is SmsProcessingTarget.Historical) {
+            "Manual telemetry cannot use a historical target"
+        }
+        require(requestedTarget.candidateKey == sms.id) {
+            "Manual telemetry target must identify the rendered candidate"
+        }
+        if (
+            requestedTarget is SmsProcessingTarget.ManualRecent &&
+            !state.ownsManualProcessingTarget(requestedTarget)
+        ) {
+            return expiredManualTelemetry(requestedTarget)
+        }
+        val isActive = requestedTarget is SmsProcessingTarget.ManualRecent &&
+            state.ownsManualProcessingTarget(requestedTarget) &&
+            state.activeSmsPipelineItem()?.id == sms.id
+        val activeStageIndex = when {
+            isActive -> state.currentStageIndex ?: 0
+            sms.status in setOf("synced", "already_saved", "filtered_out") -> 4
+            else -> 0
+        }
+        val status = if (isActive) {
+            SmsTelemetryStatus.ACTIVE
+        } else {
+            SmsTelemetryStatus.fromStorageStatus(sms.status)
+        }
+        val phase = when {
+            isActive && state.status == HomeSyncState.Status.CANCELLING ->
+                SmsPipelinePhase.STOPPING
+            isActive -> SmsPipelinePhase.PROCESSING
+            status == SmsTelemetryStatus.ERROR ||
+                status == SmsTelemetryStatus.PENDING ||
+                status == SmsTelemetryStatus.ACTIVE -> SmsPipelinePhase.ISSUE
+            else -> SmsPipelinePhase.COMPLETE
+        }
+
+        return SmsTelemetryUiModel(
+            target = requestedTarget,
+            content = SmsTelemetryContent.Candidate(
+                candidateKey = sms.id,
+                source = sms.telemetrySource()
+            ),
+            phase = phase,
+            status = status,
+            hasThinkingMode = state.hasThinkingMode,
+            activeStageIndex = activeStageIndex,
+            thinkingOutput = if (isActive) state.thinkingOutput else "",
+            jsonOutput = manualJsonOutput(state, sms, isActive),
+            filterLogs = filterLogs,
+            cacheLogs = cacheLogs,
+            slmPrompt = slmPrompt,
+            parsedOutput = manualParsedOutput(
+                state = state,
+                sms = sms,
+                isActive = isActive,
+                activeStageIndex = activeStageIndex,
+                parseJson = parseJson
+            ),
+            performanceText = state.activeSmsPerformance.takeIf { isActive },
+            activeModelName = state.activeModelName,
+            stopState = when {
+                !isActive || state.activeRunId == null -> SmsStopUiState.HIDDEN
+                state.status == HomeSyncState.Status.CANCELLING ->
+                    SmsStopUiState.STOPPING
+                else -> SmsStopUiState.AVAILABLE
+            }
+        )
+    }
+
+    fun historical(
+        activity: HistoricalSmsProcessingActivity,
+        runId: String,
+        filterLogs: List<String>,
+        slmPrompt: String,
+        parseJson: (String) -> String,
+        stopState: SmsStopUiState
+    ): SmsTelemetryUiModel = SmsTelemetryUiModel(
+        target = SmsProcessingTarget.Historical(runId, activity.candidateKey),
+        content = SmsTelemetryContent.Candidate(
+            candidateKey = activity.candidateKey,
+            source = SmsTelemetrySource.Available(
+                sender = activity.sender,
+                body = activity.body
+            )
+        ),
+        phase = when (stopState) {
+            SmsStopUiState.STOPPING -> SmsPipelinePhase.STOPPING
+            SmsStopUiState.COMMIT_UNAVAILABLE -> SmsPipelinePhase.FINISHING
+            else -> SmsPipelinePhase.PROCESSING
+        },
+        status = SmsTelemetryStatus.ACTIVE,
+        hasThinkingMode = activity.hasThinkingMode,
+        activeStageIndex = activity.stageIndex,
+        thinkingOutput = activity.thinkingOutput,
+        jsonOutput = activity.jsonOutput,
+        filterLogs = filterLogs,
+        cacheLogs = activity.historicalCacheLogs(),
+        slmPrompt = slmPrompt,
+        parsedOutput = historicalParsedOutput(activity, parseJson),
+        performanceText = activity.historicalPerformanceText(),
+        activeModelName = activity.modelName,
+        runtimeFacts = activity.toSmsTelemetryRuntimeFacts(),
+        thinkingOutputTruncated = activity.thinkingOutputTruncated,
+        jsonOutputTruncated = activity.jsonOutputTruncated,
+        stopState = stopState
+    )
+
+    fun gap(
+        target: SmsProcessingTarget,
+        phase: SmsPipelinePhase,
+        stopState: SmsStopUiState,
+        title: String = when (phase) {
+            SmsPipelinePhase.STOPPING -> "Stopping SMS processing"
+            SmsPipelinePhase.FINISHING -> "Finishing history import"
+            SmsPipelinePhase.SCANNING -> "Scanning recent messages"
+            else -> "Preparing next eligible message"
+        },
+        detail: String =
+            "The previous message's details were cleared from this live view."
+    ): SmsTelemetryUiModel {
+        require(target.candidateKey == null) {
+            "A telemetry gap target must not identify a candidate"
+        }
+        return SmsTelemetryUiModel(
+            target = target,
+            content = SmsTelemetryContent.Gap(title, detail),
+            phase = phase,
+            status = SmsTelemetryStatus.ACTIVE,
+            hasThinkingMode = false,
+            activeStageIndex = 0,
+            thinkingOutput = "",
+            jsonOutput = "",
+            filterLogs = emptyList(),
+            cacheLogs = emptyList(),
+            slmPrompt = "",
+            parsedOutput = "",
+            performanceText = null,
+            activeModelName = null,
+            stopState = stopState
+        )
+    }
+}
+
+private fun SyncSmsItem.telemetrySource(): SmsTelemetrySource =
+    if (hasDiagnosticSourceEvidence()) {
+        SmsTelemetrySource.Available(
+            sender = sender,
+            body = body
+        )
+    } else {
+        SmsTelemetrySource.Unavailable(
+            detail = if (
+                status in setOf("synced", "already_saved", "filtered_out")
+            ) {
+                "Source evidence was cleared from this processing log after the result settled."
+            } else {
+                "Source evidence is unavailable for this processing result."
+            }
+        )
+    }
+
+private fun expiredManualTelemetry(
+    target: SmsProcessingTarget.ManualRecent
+): SmsTelemetryUiModel = SmsTelemetryUiModel(
+    target = target,
+    content = SmsTelemetryContent.Gap(
+        title = "Processing details expired",
+        detail = "A newer SMS run owns the live processing details."
+    ),
+    phase = SmsPipelinePhase.ISSUE,
+    status = SmsTelemetryStatus.PENDING,
+    hasThinkingMode = false,
+    activeStageIndex = 0,
+    thinkingOutput = "",
+    jsonOutput = "",
+    filterLogs = emptyList(),
+    cacheLogs = emptyList(),
+    slmPrompt = "",
+    parsedOutput = "",
+    performanceText = null,
+    activeModelName = null,
+    stopState = SmsStopUiState.HIDDEN
+)
+
+private fun manualJsonOutput(
+    state: HomeSyncState,
+    sms: SyncSmsItem,
+    isActive: Boolean
+): String = when {
+    isActive -> state.jsonOutput
+    sms.status == "synced" -> "Raw JSON output was not retained after sync."
+    sms.status == "already_saved" ->
+        "Raw JSON output was not retained for an existing transaction."
+    sms.status == "filtered_out" ->
+        "No transaction JSON was retained for this message."
+    sms.status == "error" ->
+        "Output is unavailable because processing did not finish."
+    else -> ""
+}
+
+private fun manualParsedOutput(
+    state: HomeSyncState,
+    sms: SyncSmsItem,
+    isActive: Boolean,
+    activeStageIndex: Int,
+    parseJson: (String) -> String
+): String = when {
+    isActive && state.jsonOutput.isNotEmpty() -> {
+        val parsed = parseJson(state.jsonOutput)
+        if (
+            parsed == "Parsed: null (non-financial)" &&
+            activeStageIndex < 3
+        ) {
+            "Waiting for complete JSON..."
+        } else {
+            parsed
+        }
+    }
+
+    isActive -> ""
+    sms.status == "synced" ->
+        "Saved transaction: amount=${sms.parsedAmount ?: "-"}, " +
+            "counterparty=${sms.parsedMerchant ?: "-"}"
+    sms.status == "already_saved" ->
+        "The encrypted ledger already owns this source evidence."
+    sms.status == "filtered_out" ->
+        "No transaction was saved for this message."
+    sms.status == "error" ->
+        "The message could not be saved. The failed stage was not retained."
+    else -> ""
+}
+
+fun historicalParsedOutput(
+    activity: HistoricalSmsProcessingActivity,
+    parseJson: (String) -> String
+): String = when {
+    activity.jsonOutput.isEmpty() -> ""
+    activity.stageIndex < 3 && activity.jsonOutputTruncated ->
+        "Live JSON preview truncated; waiting for inference to finish."
+    activity.stageIndex < 3 -> "Waiting for complete JSON..."
+    activity.jsonOutputTruncated ->
+        "Parsed successfully; full JSON was omitted from the live display."
+    else -> parseJson(activity.jsonOutput)
+}
+
+fun HistoricalSmsProcessingActivity.toSmsTelemetryRuntimeFacts():
+    SmsTelemetryRuntimeFacts? {
+    val grammar = grammarEnabled ?: return null
+    return SmsTelemetryRuntimeFacts(
+        grammarEnabled = grammar,
+        thinkingTokenBudget = thinkingTokenBudget,
+        answerTokenBudget = answerTokenBudget,
+        promptEvalMs = performance?.promptEvalMs,
+        evalMs = performance?.evalMs,
+        generatedTokens = performance?.generatedTokens,
+        cacheAttempted = cache?.attempted,
+        cacheHit = cache?.hit,
+        cachePrefixTokens = cache?.prefixTokens
+    )
+}
+
+fun HistoricalSmsProcessingActivity.historicalPerformanceText(): String? =
+    performance?.let { value ->
+        String.format(
+            Locale.US,
+            "%d tokens • %.2f tok/s",
+            value.generatedTokens,
+            value.tokensPerSecond
+        )
+    }
+
+fun HistoricalSmsProcessingActivity.historicalCacheLogs(): List<String> =
+    cache?.let { value ->
+        listOf(
+            "Prefix cache attempted: ${value.attempted}",
+            "Prefix cache hit: ${value.hit}",
+            "Cached prefix tokens: ${value.prefixTokens}"
+        )
+    } ?: listOf(
+        "Exact prefix-cache telemetry will appear after inference completes."
+    )

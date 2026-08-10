@@ -25,24 +25,33 @@ import kotlinx.coroutines.test.runTest
 class AutomaticProcessingPreferencesTest {
 
     @Test
-    fun `missing preference defaults on and explicit changes survive recreation`() =
+    fun `fresh and legacy-unset preferences default off`() =
         runTest {
-        val fixture = Fixture()
-        val preferences = fixture.preferences
-        assertTrue(preferences.enabled.value)
+            val fixture = Fixture()
 
-        preferences.disableAndCleanupPending { 0 }
-        assertFalse(preferences.enabled.value)
-        assertFalse(fixture.recreate().enabled.value)
+            assertFalse(fixture.preferences.enabled.value)
+            assertFalse(fixture.recreate().enabled.value)
+        }
 
-        preferences.enableAfterCleanupPending { 0 }
-        assertTrue(fixture.recreate().enabled.value)
-    }
+    @Test
+    fun `explicit on and off choices survive recreation`() =
+        runTest {
+            val fixture = Fixture()
+            val preferences = fixture.preferences
+
+            preferences.enableAfterCleanupPending { 0 }
+            assertTrue(preferences.enabled.value)
+            assertTrue(fixture.recreate().enabled.value)
+
+            preferences.disableAndCleanupPending { 0 }
+            assertFalse(preferences.enabled.value)
+            assertFalse(fixture.recreate().enabled.value)
+        }
 
     @Test
     fun `claim that wins boundary finishes before disable removes pending work`() =
         runTest {
-            val fixture = Fixture()
+            val fixture = Fixture(storedValue = true)
             val claimStarted = CompletableDeferred<Unit>()
             val allowClaimToFinish = CompletableDeferred<Unit>()
             var claimFinished = false
@@ -78,7 +87,7 @@ class AutomaticProcessingPreferencesTest {
     @Test
     fun `disable that wins boundary prevents a later automatic claim`() =
         runTest {
-            val fixture = Fixture()
+            val fixture = Fixture(storedValue = true)
             val cleanupStarted = CompletableDeferred<Unit>()
             val allowCleanupToFinish = CompletableDeferred<Unit>()
             var claimRan = false
@@ -110,7 +119,7 @@ class AutomaticProcessingPreferencesTest {
     @Test
     fun `retry release that wins boundary is visible to following OFF cleanup`() =
         runTest {
-            val fixture = Fixture()
+            val fixture = Fixture(storedValue = true)
             val ingestionRepository = mockk<SmsIngestionRepository>()
             val retryNotificationStarted = CompletableDeferred<Unit>()
             val allowRetryNotification = CompletableDeferred<Unit>()
@@ -170,7 +179,7 @@ class AutomaticProcessingPreferencesTest {
     @Test
     fun `OFF that wins boundary deletes claimed automatic retry instead of releasing it`() =
         runTest {
-            val fixture = Fixture()
+            val fixture = Fixture(storedValue = true)
             val ingestionRepository = mockk<SmsIngestionRepository>()
             val cleanupStarted = CompletableDeferred<Unit>()
             val allowCleanup = CompletableDeferred<Unit>()
@@ -221,7 +230,7 @@ class AutomaticProcessingPreferencesTest {
     @Test
     fun `only running automatic candidate finishes while OFF removes the waiter`() =
         runTest {
-            val fixture = Fixture()
+            val fixture = Fixture(storedValue = true)
             val operationGate = AutomaticSmsOperationGate()
             val runningStarted = CompletableDeferred<Unit>()
             val allowRunningToFinish = CompletableDeferred<Unit>()
