@@ -10,12 +10,16 @@ import com.pocketfinancer.data.model.TransactionType
 import com.pocketfinancer.data.repository.TransactionRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import com.pocketfinancer.pipeline.SmsFilterPipeline
 import com.pocketfinancer.pipeline.PromptBuilder
+import com.pocketfinancer.pipeline.PipelineService
 import com.pocketfinancer.pipeline.ExtractionParser
 import com.pocketfinancer.pipeline.AutomaticProcessingPreferences
+import com.pocketfinancer.pipeline.AutomaticSmsProcessingActivity
+import com.pocketfinancer.pipeline.AutomaticSmsProcessingActivityStore
 import com.pocketfinancer.hardware.DeviceCapabilities
 import com.pocketfinancer.hardware.SlmTier
 import com.pocketfinancer.hardware.isPublishedModelArtifact
@@ -30,6 +34,9 @@ import com.pocketfinancer.setup.reconcileSetupModelAvailability
 import com.pocketfinancer.sms.SmsRepository
 import com.pocketfinancer.ui.onboarding.OnboardingStep
 import com.pocketfinancer.ui.onboarding.OnboardingSyncManager
+import com.pocketfinancer.ui.onboarding.HistoricalSmsProcessingActivity
+import com.pocketfinancer.ui.onboarding.withoutHistoricalSmsActivity
+import com.pocketfinancer.ui.smsprocessing.SmsProcessingTarget
 import java.util.Calendar
 import javax.inject.Inject
 
@@ -69,6 +76,7 @@ data class HomeUiState(
     val historicalImportCancelling: Boolean = false,
     val historicalImportCancellationAllowed: Boolean = false,
     val historicalImportRunning: Boolean = false,
+    val historicalImportRunId: String? = null,
     val historicalImportFinishing: Boolean = false,
     val historicalImportPreparingModel: Boolean = false,
     val manualSmsOperationRunning: Boolean = false,
@@ -95,6 +103,267 @@ internal fun historicalImportIsRunning(
     state.runPurpose == OnboardingSyncManager.RunPurpose.INITIAL_SETUP &&
         state.isRunning
 
+internal fun activeHistoricalSmsForHome(
+    state: OnboardingSyncManager.OnboardingSyncState
+): HistoricalSmsProcessingActivity? =
+    state.activeHistoricalSms.takeIf { historicalImportIsRunning(state) }
+
+internal fun HistoricalSmsProcessingActivity.cardSnapshot(): HistoricalSmsProcessingActivity =
+    copy(
+        modelName = null,
+        grammarEnabled = null,
+        thinkingTokenBudget = 0,
+        answerTokenBudget = 0,
+        thinkingOutput = "",
+        jsonOutput = "",
+        thinkingOutputTruncated = false,
+        jsonOutputTruncated = false,
+        performance = null,
+        cache = null
+    )
+
+/**
+ * Source evidence needed by the visible automatic card is retained, while
+ * high-frequency and runtime-only telemetry remains available only to an open
+ * details sheet.
+ */
+internal fun AutomaticSmsProcessingActivity.cardSnapshot():
+    AutomaticSmsProcessingActivity = copy(
+        modelName = null,
+        grammarEnabled = null,
+        thinkingTokenBudget = 0,
+        answerTokenBudget = 0,
+        thinkingOutput = "",
+        jsonOutput = "",
+        thinkingOutputTruncated = false,
+        jsonOutputTruncated = false,
+        performance = null,
+        cache = null
+    )
+
+/**
+ * The Home aggregate state needs stage and queue ownership, but not source
+ * evidence or live model output. Sensitive fields are collected separately by
+ * the visible screen and cleared from its Compose holder when the lifecycle
+ * stops. Keeping them out of this replay cache prevents an off-screen Home
+ * destination from retaining or briefly replaying a completed candidate.
+ */
+internal fun HomeSyncState.withoutManualSmsTelemetry(): HomeSyncState = copy(
+    queue = queue.map { item ->
+        item.copy(
+            sender = "",
+            body = ""
+        )
+    },
+    thinkingOutput = "",
+    jsonOutput = "",
+    activeSmsPerformance = null,
+    activeModelName = null
+)
+
+/** Keeps source evidence for a visible card/queue but omits live model output. */
+internal fun HomeSyncState.withoutManualLiveTelemetry(): HomeSyncState = copy(
+    thinkingOutput = "",
+    jsonOutput = "",
+    activeSmsPerformance = null,
+    activeModelName = null
+)
+
+private fun sameManualStateOutsideQueueAndTelemetry(
+    first: HomeSyncState,
+    second: HomeSyncState
+): Boolean =
+    first.status == second.status &&
+        first.activeRunId == second.activeRunId &&
+        first.cancellationRequested == second.cancellationRequested &&
+        first.currentIndex == second.currentIndex &&
+        first.currentStageIndex == second.currentStageIndex &&
+        first.hasThinkingMode == second.hasThinkingMode &&
+        first.recentScanOutcome == second.recentScanOutcome &&
+        first.recentScanWindowDays == second.recentScanWindowDays &&
+        first.lastSuccessfulScanMillis == second.lastSuccessfulScanMillis &&
+        first.scanError == second.scanError &&
+        first.syncError == second.syncError
+
+private fun sameAggregateQueue(
+    first: List<SyncSmsItem>,
+    second: List<SyncSmsItem>
+): Boolean {
+    if (first === second) return true
+    if (first.size != second.size) return false
+    var index = 0
+    while (index < first.size) {
+        val firstItem = first[index]
+        val secondItem = second[index]
+        val sameItem = firstItem === secondItem ||
+            (
+                firstItem.id == secondItem.id &&
+                    firstItem.date == secondItem.date &&
+                    firstItem.messageType == secondItem.messageType &&
+                    firstItem.sourceIdentity == secondItem.sourceIdentity &&
+                    firstItem.status == secondItem.status &&
+                    firstItem.parsedAmount == secondItem.parsedAmount &&
+                    firstItem.parsedMerchant == secondItem.parsedMerchant
+                )
+        if (!sameItem) return false
+        index += 1
+    }
+    return true
+}
+
+internal fun sameManualAggregateState(
+    first: HomeSyncState,
+    second: HomeSyncState
+): Boolean = first === second ||
+    (
+        sameManualStateOutsideQueueAndTelemetry(first, second) &&
+            sameAggregateQueue(first.queue, second.queue)
+        )
+
+internal fun sameManualPresentationState(
+    first: HomeSyncState,
+    second: HomeSyncState
+): Boolean = first === second ||
+    (
+        sameManualStateOutsideQueueAndTelemetry(first, second) &&
+            (
+                first.queue === second.queue ||
+                    first.queue == second.queue
+                )
+        )
+
+/** Visible cards/queues retain source evidence but never observe token churn. */
+internal fun manualSyncPresentationState(
+    source: StateFlow<HomeSyncState>
+): Flow<HomeSyncState> = flow {
+    var previousSnapshot: HomeSyncState? = null
+    source.collect { state ->
+        val previous = previousSnapshot
+        if (
+            previous == null ||
+            !sameManualPresentationState(previous, state)
+        ) {
+            val snapshot = state.withoutManualLiveTelemetry()
+            previousSnapshot = snapshot
+            emit(snapshot)
+        }
+    }
+}
+
+/**
+ * Keeps only the scrubbed manual projection hot so off-screen terminal
+ * transitions replace an obsolete LIVE snapshot without retaining evidence.
+ */
+internal fun sanitizedManualSyncState(
+    source: StateFlow<HomeSyncState>,
+    scope: CoroutineScope
+): StateFlow<HomeSyncState> {
+    val initialSource = source.value
+    val initialValue = initialSource.withoutManualSmsTelemetry()
+    return flow {
+        var previousSnapshot = initialValue
+        source.collect { state ->
+            if (!sameManualAggregateState(previousSnapshot, state)) {
+                val sanitizedQueue = if (
+                    sameAggregateQueue(previousSnapshot.queue, state.queue)
+                ) {
+                    previousSnapshot.queue
+                } else {
+                    state.queue.map { item ->
+                        item.copy(sender = "", body = "")
+                    }
+                }
+                val snapshot = state.copy(
+                    queue = sanitizedQueue,
+                    thinkingOutput = "",
+                    jsonOutput = "",
+                    activeSmsPerformance = null,
+                    activeModelName = null
+                )
+                previousSnapshot = snapshot
+                emit(snapshot)
+            }
+        }
+    }
+        .stateIn(
+        scope = scope,
+        started = SharingStarted.Eagerly,
+        initialValue = initialValue
+    )
+}
+
+/** Ignores telemetry-only activity changes before creating a card snapshot. */
+private fun sameHistoricalCardActivity(
+    first: HistoricalSmsProcessingActivity?,
+    second: HistoricalSmsProcessingActivity?
+): Boolean {
+    if (first === second) return true
+    if (first == null || second == null) return false
+    return first.candidateKey == second.candidateKey &&
+        first.sender == second.sender &&
+        first.body == second.body &&
+        first.date == second.date &&
+        first.position == second.position &&
+        first.total == second.total &&
+        first.stage == second.stage &&
+        first.hasThinkingMode == second.hasThinkingMode
+}
+
+/** Source-preserving historical card state exists only while Home collects it. */
+internal fun historicalSmsCardState(
+    source: StateFlow<OnboardingSyncManager.OnboardingSyncState>
+): Flow<HistoricalSmsProcessingActivity?> = flow {
+    var initialized = false
+    var previousSnapshot: HistoricalSmsProcessingActivity? = null
+    source.collect { state ->
+        val activity = activeHistoricalSmsForHome(state)
+        if (
+            !initialized ||
+            !sameHistoricalCardActivity(previousSnapshot, activity)
+        ) {
+            val snapshot = activity?.cardSnapshot()
+            initialized = true
+            previousSnapshot = snapshot
+            emit(snapshot)
+        }
+    }
+}
+
+/** Ignores automatic token/runtime churn before allocating a card snapshot. */
+private fun sameAutomaticCardActivity(
+    first: AutomaticSmsProcessingActivity?,
+    second: AutomaticSmsProcessingActivity?
+): Boolean {
+    if (first === second) return true
+    if (first == null || second == null) return false
+    return first.owner == second.owner &&
+        first.sender == second.sender &&
+        first.body == second.body &&
+        first.date == second.date &&
+        first.stage == second.stage &&
+        first.hasThinkingMode == second.hasThinkingMode &&
+        first.detail == second.detail
+}
+
+/** Source-preserving automatic card state exists only while Home collects it. */
+internal fun automaticSmsCardState(
+    source: StateFlow<AutomaticSmsProcessingActivity?>
+): Flow<AutomaticSmsProcessingActivity?> = flow {
+    var initialized = false
+    var previousSnapshot: AutomaticSmsProcessingActivity? = null
+    source.collect { activity ->
+        if (
+            !initialized ||
+            !sameAutomaticCardActivity(previousSnapshot, activity)
+        ) {
+            val snapshot = activity?.cardSnapshot()
+            initialized = true
+            previousSnapshot = snapshot
+            emit(snapshot)
+        }
+    }
+}
+
 /**
  * Covers both an accepted service run and the short Android service-start
  * handoff before [HomeSyncManager] can publish its run id.
@@ -111,25 +380,9 @@ internal fun manualSmsOperationIsRunning(
             HomeSyncState.Status.CANCELLING
         )
 
-internal enum class SmsProcessingStopTarget {
-    HISTORICAL,
-    MANUAL,
-    NONE
-}
-
-internal fun smsProcessingStopTarget(
-    onboardingState: OnboardingSyncManager.OnboardingSyncState,
-    manualState: HomeSyncState
-): SmsProcessingStopTarget = when {
-    historicalImportIsRunning(onboardingState) ->
-        SmsProcessingStopTarget.HISTORICAL
-    manualState.activeRunId != null &&
-        manualState.status in setOf(
-            HomeSyncState.Status.SCANNING,
-            HomeSyncState.Status.SYNCING
-        ) -> SmsProcessingStopTarget.MANUAL
-    else -> SmsProcessingStopTarget.NONE
-}
+internal fun HomeSyncState.ownsManualStopTarget(
+    expectedRunId: String
+): Boolean = expectedRunId.isNotBlank() && activeRunId == expectedRunId
 
 @HiltViewModel
 class HomeViewModel @Inject constructor(
@@ -149,19 +402,51 @@ class HomeViewModel @Inject constructor(
     private val setupImportStore: SetupImportStore,
     private val modelUpgradeSessionDismissalStore: ModelUpgradeSessionDismissalStore,
     private val automaticProcessingPreferences:
-        AutomaticProcessingPreferences
+        AutomaticProcessingPreferences,
+    private val automaticSmsProcessingActivityStore:
+        AutomaticSmsProcessingActivityStore
 ) : ViewModel() {
 
     private val _selectedPeriod = MutableStateFlow("Day")
     val selectedPeriod: StateFlow<String> = _selectedPeriod.asStateFlow()
     private var requestedManualServiceRunId: String? = null
 
+    val activeHistoricalSms: Flow<HistoricalSmsProcessingActivity?> =
+        onboardingSyncManager.syncState.map(::activeHistoricalSmsForHome)
+
+    /** Full evidence collected only by an open telemetry sheet. */
+    val manualSyncTelemetry: StateFlow<HomeSyncState> = syncManager.syncState
+
+    /** Source-preserving, telemetry-free state for the visible Home surface. */
+    val manualSyncPresentation: Flow<HomeSyncState> =
+        manualSyncPresentationState(syncManager.syncState)
+
+    val activeHistoricalSmsCard: Flow<HistoricalSmsProcessingActivity?> =
+        historicalSmsCardState(onboardingSyncManager.syncState)
+
+    /** Full automatic evidence is collected only by an open telemetry sheet. */
+    val automaticSmsTelemetry: StateFlow<AutomaticSmsProcessingActivity?> =
+        automaticSmsProcessingActivityStore.activity
+
+    /** Visible-card projection: source-preserving, cold, and token-scrubbed. */
+    val automaticSmsPresentation: Flow<AutomaticSmsProcessingActivity?> =
+        automaticSmsCardState(automaticSmsProcessingActivityStore.activity)
+
+    private val onboardingUiState = onboardingSyncManager.syncState
+        .map { it.withoutHistoricalSmsActivity() }
+        .distinctUntilChanged()
+
+    val manualSyncUiState = sanitizedManualSyncState(
+        source = syncManager.syncState,
+        scope = viewModelScope
+    )
+
     val uiState: StateFlow<HomeUiState> = combine(
         transactionRepository.getAllByDateDesc(),
         _selectedPeriod,
-        syncManager.syncState,
+        manualSyncUiState,
         modelDownloader.state,
-        onboardingSyncManager.syncState,
+        onboardingUiState,
         modelUpgradeSessionDismissalStore.dismissedTierIds,
         setupImportStore.state,
         automaticProcessingPreferences.enabled,
@@ -259,16 +544,6 @@ class HomeViewModel @Inject constructor(
             onboardingSyncState.runPurpose ==
                 OnboardingSyncManager.RunPurpose.INITIAL_SETUP &&
                 onboardingSyncState.isRunning
-        val permissionCardVisible =
-            setupImportState.status == SetupImportStatus.PERMISSION_NEEDED
-        val manualRunCanStop =
-            syncState.activeRunId != null &&
-                syncState.status in setOf(
-                    HomeSyncState.Status.SCANNING,
-                    HomeSyncState.Status.SYNCING
-                )
-        val manualRunIsStopping =
-            syncState.status == HomeSyncState.Status.CANCELLING
         val manualSmsOperationRunning = manualSmsOperationIsRunning(
             state = syncState,
             startPending = manualOperationStartPending
@@ -282,16 +557,14 @@ class HomeViewModel @Inject constructor(
             upgradeRecommendation = upgradeRec,
             setupImportState = setupImportState,
             historicalImportCancelling =
-                (isHistoricalRun && onboardingSyncState.isCancelling) ||
-                    (permissionCardVisible && manualRunIsStopping),
+                isHistoricalRun && onboardingSyncState.isCancelling,
             historicalImportCancellationAllowed =
-                (
-                    isHistoricalRun &&
-                        onboardingSyncState.isCancellationAllowed &&
-                        !onboardingSyncState.isCancelling
-                    ) ||
-                    (permissionCardVisible && manualRunCanStop),
+                isHistoricalRun &&
+                    onboardingSyncState.isCancellationAllowed &&
+                    !onboardingSyncState.isCancelling,
             historicalImportRunning = isHistoricalRun,
+            historicalImportRunId = onboardingSyncState.runId
+                .takeIf { isHistoricalRun },
             historicalImportFinishing =
                 historicalImportIsFinishing(onboardingSyncState),
             historicalImportPreparingModel =
@@ -428,33 +701,40 @@ class HomeViewModel @Inject constructor(
         ).show()
     }
 
-    fun stopManualSync() {
-        requestManualSyncStop(showFailureToast = true)
-    }
-
-    fun stopSmsProcessing() {
-        // Match the operation represented by the setup card. If legacy state
-        // ever contains both runs, the visible historical Stop must never
-        // silently cancel the hidden manual run instead.
-        when (
-            smsProcessingStopTarget(
-                onboardingState = onboardingSyncManager.syncState.value,
-                manualState = syncManager.syncState.value
-            )
-        ) {
-            SmsProcessingStopTarget.HISTORICAL -> stopHistoricalImport()
-            SmsProcessingStopTarget.MANUAL ->
-                requestManualSyncStop(showFailureToast = true)
-            SmsProcessingStopTarget.NONE -> Unit
-        }
+    fun stopManualSync(target: SmsProcessingTarget.ManualRecent) {
+        requestManualSyncStop(
+            expectedTarget = target,
+            showFailureToast = true
+        )
     }
 
     private fun requestManualSyncStop(
+        expectedTarget: SmsProcessingTarget.ManualRecent? = null,
         showFailureToast: Boolean
     ): Boolean {
-        val runId = syncManager.syncState.value.activeRunId ?: return false
+        val state = syncManager.syncState.value
+        if (expectedTarget != null) {
+            val rejectionMessage = manualSyncPreDispatchRejectionMessage(
+                state = state,
+                target = expectedTarget
+            )
+            if (rejectionMessage != null) {
+                if (showFailureToast) {
+                    showManualSyncStopRejectionFeedback(
+                        context = context,
+                        message = rejectionMessage
+                    )
+                }
+                return false
+            }
+        }
+        val runId = state.activeRunId ?: return false
         val commandAccepted = try {
-            SyncService.requestStop(context, runId)
+            if (expectedTarget != null) {
+                SyncService.requestStop(context, expectedTarget)
+            } else {
+                SyncService.requestStop(context, runId)
+            }
         } catch (_: RuntimeException) {
             false
         }
@@ -467,17 +747,30 @@ class HomeViewModel @Inject constructor(
             return false
         }
         if (!commandAccepted) return false
+        if (expectedTarget != null) {
+            // The service performs the exact run/candidate CAS when Android
+            // delivers this command. A local run-only update here would let a
+            // delayed action cancel the next candidate in the same run.
+            return true
+        }
         // Publish only after Android accepts the run-scoped command. The UI
         // still changes immediately, without creating a rollback window in
         // which the worker can observe a stop that was never dispatched.
         return syncManager.requestServiceStop(runId)
     }
 
-    fun stopHistoricalImport() {
+    fun stopHistoricalImport(target: SmsProcessingTarget.Historical) {
         val requested =
-            onboardingSyncManager.requestHistoricalImportCancellation(context)
+            onboardingSyncManager.requestHistoricalImportCancellation(
+                context = context,
+                expectedRunId = target.runId,
+                expectedCandidateKey = target.candidateKey
+            )
         if (
             !requested &&
+            onboardingSyncManager.syncState.value.runId == target.runId &&
+            onboardingSyncManager.syncState.value.activeHistoricalSms
+                ?.candidateKey == target.candidateKey &&
             onboardingSyncManager.syncState.value.isCancellationAllowed
         ) {
             android.widget.Toast.makeText(
@@ -779,6 +1072,53 @@ class HomeViewModel @Inject constructor(
             return listOf(SOURCE_EVIDENCE_UNAVAILABLE)
         }
         return smsFilterPipeline.filterWithDetails(item.sender, item.body).logs
+    }
+
+    fun getHistoricalFilterLogs(
+        activity: HistoricalSmsProcessingActivity
+    ): List<String> = smsFilterPipeline
+        .filterWithDetails(activity.sender, activity.body)
+        .logs
+
+    fun getAutomaticFilterLogs(
+        activity: AutomaticSmsProcessingActivity
+    ): List<String> = smsFilterPipeline
+        .filterWithDetails(activity.sender, activity.body)
+        .logs
+
+    /**
+     * Returns both chat messages passed to the extraction request. Model-
+     * specific chat-template rendering happens inside the local runtime and is
+     * deliberately not reconstructed or claimed here.
+     */
+    fun getHistoricalPromptContent(
+        activity: HistoricalSmsProcessingActivity
+    ): String = buildString {
+        appendLine("system:")
+        appendLine(PipelineService.EXTRACTION_SYSTEM_MESSAGE)
+        appendLine()
+        appendLine("user:")
+        append(
+            promptBuilder.buildExtractionPrompt(
+                activity.sender,
+                activity.body
+            )
+        )
+    }
+
+    fun getAutomaticPromptContent(
+        activity: AutomaticSmsProcessingActivity
+    ): String = buildString {
+        appendLine("system:")
+        appendLine(PipelineService.EXTRACTION_SYSTEM_MESSAGE)
+        appendLine()
+        appendLine("user:")
+        append(
+            promptBuilder.buildExtractionPrompt(
+                activity.sender,
+                activity.body
+            )
+        )
     }
 
     fun getKvCacheLogs(item: SyncSmsItem): List<String> {

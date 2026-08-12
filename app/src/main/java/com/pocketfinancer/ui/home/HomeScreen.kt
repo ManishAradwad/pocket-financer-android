@@ -5,10 +5,8 @@ import android.os.Build
 import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.*
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -26,13 +24,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
@@ -46,13 +40,126 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import com.pocketfinancer.data.model.Transaction
 import com.pocketfinancer.data.model.TransactionType
+import com.pocketfinancer.pipeline.AutomaticProcessingPreferences
+import com.pocketfinancer.pipeline.AutomaticSmsFilterResult
+import com.pocketfinancer.pipeline.AutomaticSmsProcessingActivity
+import com.pocketfinancer.pipeline.AutomaticSmsProcessingOwner
+import com.pocketfinancer.pipeline.AutomaticSmsProcessingStage
 import com.pocketfinancer.setup.SetupImportStatus
 import com.pocketfinancer.ui.theme.*
-import com.pocketfinancer.ui.transactions.TelemetryLogsViewer
+import com.pocketfinancer.ui.onboarding.HistoricalSmsProcessingActivity
+import com.pocketfinancer.ui.smsprocessing.SmsPipelineActivityCard
+import com.pocketfinancer.ui.smsprocessing.SmsPipelineCardUiModel
+import com.pocketfinancer.ui.smsprocessing.SmsPipelinePhase
+import com.pocketfinancer.ui.smsprocessing.SmsProcessingTarget
+import com.pocketfinancer.ui.smsprocessing.SmsStopUiState
+import com.pocketfinancer.ui.smsprocessing.SmsTelemetryBottomSheet
+import com.pocketfinancer.ui.smsprocessing.SmsTelemetryPresenter
+import com.pocketfinancer.ui.smsprocessing.activeSmsPipelineItem
+import com.pocketfinancer.ui.smsprocessing.historicalSmsPipelineGapUiModel
+import com.pocketfinancer.ui.smsprocessing.ownsManualProcessingTarget
+import com.pocketfinancer.ui.smsprocessing.ownsAutomaticProcessingTarget
+import com.pocketfinancer.ui.smsprocessing.smsPipelineCardItem
+import com.pocketfinancer.ui.smsprocessing.toSmsPipelineCardUiModel
 import java.text.SimpleDateFormat
 import java.util.*
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.StateFlow
+
+internal sealed interface HomeSheetTarget {
+    data object Queue : HomeSheetTarget
+
+    data class Manual(
+        val processingTarget: SmsProcessingTarget,
+        val returnToQueue: Boolean = false
+    ) : HomeSheetTarget
+
+    data class Historical(
+        val processingTarget: SmsProcessingTarget.Historical
+    ) : HomeSheetTarget
+
+    data class Automatic(
+        val processingTarget: SmsProcessingTarget.Automatic
+    ) : HomeSheetTarget
+}
+
+internal fun SmsProcessingTarget.toHomeSheetTarget(): HomeSheetTarget = when (this) {
+    is SmsProcessingTarget.Automatic -> HomeSheetTarget.Automatic(this)
+    is SmsProcessingTarget.Historical -> HomeSheetTarget.Historical(this)
+    is SmsProcessingTarget.ManualRecent,
+    is SmsProcessingTarget.ManualResult -> HomeSheetTarget.Manual(this)
+}
+
+internal fun homePipelineCardModel(
+    manualState: HomeSyncState,
+    manualStartPending: Boolean,
+    historicalRunId: String?,
+    historicalActivity: HistoricalSmsProcessingActivity?,
+    historicalCancelling: Boolean,
+    historicalFinishing: Boolean,
+    historicalPreparingModel: Boolean
+): SmsPipelineCardUiModel? {
+    if (historicalRunId != null && !historicalPreparingModel) {
+        return historicalActivity?.toSmsPipelineCardUiModel(
+            runId = historicalRunId,
+            isCancelling = historicalCancelling,
+            isFinishing = historicalFinishing
+        ) ?: historicalSmsPipelineGapUiModel(
+            runId = historicalRunId,
+            isCancelling = historicalCancelling,
+            isFinishing = historicalFinishing
+        )
+    }
+    return manualState.toSmsPipelineCardUiModel(
+        startPending = manualStartPending
+    )
+}
+
+/**
+ * Automatic processing may legitimately overlap a manual or historical flow.
+ * Keep it as a second card instead of applying single-card priority that would
+ * hide either live operation.
+ */
+internal fun homePipelineCardModels(
+    userInitiatedCard: SmsPipelineCardUiModel?,
+    automaticActivity: AutomaticSmsProcessingActivity?
+): List<SmsPipelineCardUiModel> = buildList {
+    userInitiatedCard?.let(::add)
+    automaticActivity?.toSmsPipelineCardUiModel()?.let(::add)
+}
+
+internal fun manualQueueItemTarget(
+    state: HomeSyncState,
+    item: SyncSmsItem
+): SmsProcessingTarget = if (
+    state.activeRunId != null &&
+    state.activeSmsPipelineItem()?.id == item.id &&
+    state.status in setOf(
+        HomeSyncState.Status.SYNCING,
+        HomeSyncState.Status.CANCELLING
+    )
+) {
+    SmsProcessingTarget.ManualRecent(state.activeRunId, item.id)
+} else {
+    SmsProcessingTarget.ManualResult(item.id)
+}
+
+private fun HomeViewModel.stopRenderedSmsTarget(
+    target: SmsProcessingTarget
+) {
+    when (target) {
+        is SmsProcessingTarget.Automatic -> Unit
+        is SmsProcessingTarget.Historical ->
+            stopHistoricalImport(target)
+        is SmsProcessingTarget.ManualRecent ->
+            stopManualSync(target)
+        is SmsProcessingTarget.ManualResult -> Unit
+    }
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -60,19 +167,51 @@ fun HomeScreen(
     onNavigateToTab: (String) -> Unit,
     viewModel: HomeViewModel = hiltViewModel()
 ) {
-    val state by viewModel.uiState.collectAsState()
-    val selectedPeriod by viewModel.selectedPeriod.collectAsState()
+    val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val selectedPeriod by viewModel.selectedPeriod.collectAsStateWithLifecycle()
+    val aggregateManualSyncState by
+        viewModel.manualSyncUiState.collectAsStateWithLifecycle()
+    val manualSyncPresentation by
+        viewModel.manualSyncPresentation.collectSensitiveManualState()
+    val activeHistoricalSmsCard by
+        viewModel.activeHistoricalSmsCard.collectSensitiveNullableState()
+    val activeAutomaticSmsCard by
+        viewModel.automaticSmsPresentation.collectSensitiveNullableState()
     val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
     val coroutineScope = rememberCoroutineScope()
 
     val pData = state.periodData[selectedPeriod] ?: PeriodData()
-    var showDrawer by remember { mutableStateOf(false) }
-    var selectedTelemetrySmsId by remember { mutableStateOf<String?>(null) }
+    val renderedManualSyncState =
+        manualSyncPresentation ?: aggregateManualSyncState
+    val userInitiatedPipelineCard = homePipelineCardModel(
+        manualState = renderedManualSyncState,
+        manualStartPending = state.manualOperationStartPending,
+        historicalRunId = state.historicalImportRunId,
+        historicalActivity = activeHistoricalSmsCard,
+        historicalCancelling = state.historicalImportCancelling,
+        historicalFinishing = state.historicalImportFinishing,
+        historicalPreparingModel = state.historicalImportPreparingModel
+    )
+    val pipelineCards = homePipelineCardModels(
+        userInitiatedCard = userInitiatedPipelineCard,
+        automaticActivity = activeAutomaticSmsCard
+    )
+    var sheetTarget by remember { mutableStateOf<HomeSheetTarget?>(null) }
     var showModelDownloadConfirmation by remember { mutableStateOf(false) }
     var showHowThisWorks by remember { mutableStateOf(false) }
     var pendingBackgroundAction by remember {
         mutableStateOf<(() -> Unit)?>(null)
+    }
+
+    LaunchedEffect(state.historicalImportRunId) {
+        val target = sheetTarget
+        if (
+            target is HomeSheetTarget.Historical &&
+            target.processingTarget.runId != state.historicalImportRunId
+        ) {
+            sheetTarget = null
+        }
     }
 
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -92,8 +231,6 @@ fun HomeScreen(
                 viewModel.scanOlderMessages()
             SetupCardActionTarget.RETRY_RECENT_SYNC ->
                 viewModel.checkForUnsynced()
-            SetupCardActionTarget.STOP_SMS_PROCESSING ->
-                viewModel.stopSmsProcessing()
             SetupCardActionTarget.START_SETUP ->
                 viewModel.startSetupOrResume()
             SetupCardActionTarget.RESTORE_PERMISSION -> Unit
@@ -141,8 +278,6 @@ fun HomeScreen(
 
     val onSetupAction: (SetupCardAction) -> Unit = { action ->
         when (action) {
-            SetupCardAction.STOP_SMS_PROCESSING ->
-                runSetupAction(action)
             SetupCardAction.RESTORE_PERMISSION -> {
                 smsPermissionLauncher.launch(
                     arrayOf(
@@ -259,20 +394,68 @@ fun HomeScreen(
                         state = state.setupImportState,
                         downloadState = state.modelDownloadState,
                         isCancelling = state.historicalImportCancelling,
-                        canStopSmsProcessing =
-                            state.historicalImportCancellationAllowed,
                         isFinishing = state.historicalImportFinishing,
                         isPreparingModel =
                             state.historicalImportPreparingModel,
-                        manualSmsOperationRunning =
-                            state.manualSmsOperationRunning,
                         modelUpgradeRunning =
                             state.upgradeRecommendation.isRunning,
                         automaticProcessingEnabled =
                             state.automaticProcessingEnabled,
+                        setupActionsEnabled =
+                            !state.manualSmsOperationRunning &&
+                                !state.manualOperationStartPending,
                         onAction = onSetupAction,
                         onHowThisWorks = { showHowThisWorks = true }
                     )
+                }
+
+                pipelineCards.forEach { model ->
+                    val renderedTarget = model.target
+                    val automatic =
+                        renderedTarget is SmsProcessingTarget.Automatic
+                    item(
+                        key = if (automatic) {
+                            "automatic-sms-pipeline:" +
+                                "${renderedTarget.runId}:${renderedTarget.candidateKey}"
+                        } else {
+                            "active-sms-pipeline"
+                        }
+                    ) {
+                        SmsPipelineActivityCard(
+                            model = model,
+                            modifier = Modifier.padding(horizontal = 16.dp),
+                            onInspect = { target ->
+                                sheetTarget = target.toHomeSheetTarget()
+                            },
+                            onStop = if (automatic) {
+                                {}
+                            } else {
+                                viewModel::stopRenderedSmsTarget
+                            }
+                        )
+                    }
+                }
+
+                if (
+                    renderedManualSyncState.status in setOf(
+                        HomeSyncState.Status.SCANNING,
+                        HomeSyncState.Status.SYNCING,
+                        HomeSyncState.Status.CANCELLING
+                    ) &&
+                    renderedManualSyncState.queue.isNotEmpty() &&
+                    !state.historicalImportRunning
+                ) {
+                    item(key = "manual-sms-queue-action") {
+                        OutlinedButton(
+                            onClick = { sheetTarget = HomeSheetTarget.Queue },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp)
+                                .heightIn(min = 48.dp)
+                        ) {
+                            Text("Review recent scan queue")
+                        }
+                    }
                 }
 
                 // ── Hero Card ──
@@ -424,39 +607,36 @@ fun HomeScreen(
                 // ── Sync Banner ──
                 if (
                     (
-                        state.setupImportState.modelPrepared &&
-                            manualRecentSyncAvailable(
-                                state.setupImportState.status
-                            ) &&
-                            !state.historicalImportRunning &&
-                            !state.upgradeRecommendation.isRunning
-                        ) ||
-                    state.manualSmsOperationRunning
+                        userInitiatedPipelineCard == null ||
+                            renderedManualSyncState.status == HomeSyncState.Status.DONE
+                        ) &&
+                    renderedManualSyncState.status in setOf(
+                        HomeSyncState.Status.IDLE,
+                        HomeSyncState.Status.DONE
+                    ) &&
+                    !state.manualSmsOperationRunning &&
+                    !state.manualOperationStartPending &&
+                    state.setupImportState.modelPrepared &&
+                    manualRecentSyncAvailable(
+                        state.setupImportState.status
+                    ) &&
+                    !state.historicalImportRunning &&
+                    !state.upgradeRecommendation.isRunning
                 ) {
                     item {
-                        SyncStrip(
-                            syncState = if (
-                                state.manualOperationStartPending &&
-                                state.syncState.status ==
-                                    HomeSyncState.Status.IDLE
-                            ) {
-                                state.syncState.copy(
-                                    status = HomeSyncState.Status.SCANNING
-                                )
-                            } else {
-                                state.syncState
-                            },
-                            startPending =
-                                state.manualOperationStartPending,
+                        RecentSmsScanLauncher(
+                            syncState = renderedManualSyncState,
                             onStartSync = {
                                 requestNotificationThenRun {
                                     viewModel.startSync()
                                 }
                             },
-                            onStopSync = viewModel::stopManualSync,
-                            onInspectSync = { showDrawer = true },
+                            onOpenQueue = {
+                                sheetTarget = HomeSheetTarget.Queue
+                            },
                             onCheckForUnsynced = {
                                 requestNotificationThenRun {
+                                    viewModel.resetSyncState()
                                     viewModel.checkForUnsynced()
                                 }
                             }
@@ -687,154 +867,86 @@ fun HomeScreen(
                 .padding(16.dp)
         )
 
-        if (showDrawer) {
-            ModalBottomSheet(
-                onDismissRequest = { showDrawer = false },
-                sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-                containerColor = M3_SurfaceContainer,
-                contentColor = M3_OnSurface,
-                dragHandle = {
-                    Box(
-                        modifier = Modifier
-                            .padding(vertical = 12.dp)
-                            .width(48.dp)
-                            .height(4.dp)
-                            .background(M3_OutlineVariant.copy(alpha = 0.4f), RoundedCornerShape(2.dp))
+        when (val target = sheetTarget) {
+            HomeSheetTarget.Queue -> {
+                ModalBottomSheet(
+                    onDismissRequest = { sheetTarget = null },
+                    sheetState = rememberModalBottomSheetState(
+                        skipPartiallyExpanded = true
+                    ),
+                    containerColor = M3_SurfaceContainer,
+                    contentColor = M3_OnSurface
+                ) {
+                    SmsQueueContent(
+                        syncState = renderedManualSyncState,
+                        onClose = { sheetTarget = null },
+                        onItemClick = { item ->
+                            sheetTarget = HomeSheetTarget.Manual(
+                                manualQueueItemTarget(
+                                    state = renderedManualSyncState,
+                                    item = item
+                                ),
+                                returnToQueue = true
+                            )
+                        }
                     )
                 }
-            ) {
-                DrawerContent(
-                    syncState = state.syncState,
-                    onNavigate = { route ->
-                        showDrawer = false
-                        onNavigateToTab(route)
+            }
+
+            is HomeSheetTarget.Manual -> {
+                HomeManualTelemetrySheet(
+                    requestedTarget = target.processingTarget,
+                    stateFlow = viewModel.manualSyncTelemetry,
+                    viewModel = viewModel,
+                    onStop = viewModel::stopRenderedSmsTarget,
+                    onTargetExpired = {
+                        sheetTarget = if (target.returnToQueue) {
+                            HomeSheetTarget.Queue
+                        } else {
+                            null
+                        }
                     },
-                    onDismiss = { showDrawer = false },
-                    onResetSync = { viewModel.resetSyncState() },
-                    onStopSync = viewModel::stopManualSync,
-                    onItemClick = { item ->
-                        selectedTelemetrySmsId = item.id
+                    onClose = {
+                        if (target.returnToQueue) {
+                            sheetTarget = HomeSheetTarget.Queue
+                        } else {
+                            // Preserve the terminal acknowledgement boundary
+                            // from the old log drawer. The state owner ignores
+                            // resets until the manual operation has settled.
+                            viewModel.resetSyncState()
+                            sheetTarget = null
+                        }
                     }
                 )
             }
-        }
 
-        // ── Telemetry Logs Sheet ──
-        // Keep only an opaque row id in Compose state and resolve the row from
-        // the latest queue snapshot. The manager replaces terminal rows with
-        // privacy-safe copies after processing.
-        val telemetrySms = selectedTelemetrySmsId?.let { selectedId ->
-            state.syncState.queue.firstOrNull { it.id == selectedId }
-        }
-        if (telemetrySms != null) {
-            val currentIndex = state.syncState.currentIndex
-            val isActive = state.syncState.status in setOf(
-                HomeSyncState.Status.SYNCING,
-                HomeSyncState.Status.CANCELLING
-            ) &&
-                    currentIndex != null &&
-                    currentIndex < state.syncState.queue.size &&
-                    state.syncState.queue[currentIndex].id == telemetrySms.id
-
-            val activeStageIndex = if (isActive) {
-                state.syncState.currentStageIndex ?: 0
-            } else if (
-                telemetrySms.status == "synced" ||
-                telemetrySms.status == "already_saved" ||
-                telemetrySms.status == "filtered_out"
-            ) {
-                4
-            } else {
-                0
-            }
-
-            val finalThinkingOutput = if (isActive) {
-                state.syncState.thinkingOutput
-            } else {
-                ""
-            }
-
-            val finalJsonOutput = if (isActive) {
-                state.syncState.jsonOutput
-            } else if (telemetrySms.status == "synced") {
-                "Raw JSON output was not retained after sync."
-            } else if (telemetrySms.status == "already_saved") {
-                "Raw JSON output was not retained for an existing transaction."
-            } else if (telemetrySms.status == "filtered_out") {
-                "No transaction JSON was retained for this message."
-            } else if (telemetrySms.status == "error") {
-                "Output is unavailable because processing did not finish."
-            } else {
-                ""
-            }
-
-            val finalParsedOutput = if (isActive) {
-                if (state.syncState.jsonOutput.isNotEmpty()) {
-                    val parsed = viewModel.getParsedOutput(state.syncState.jsonOutput)
-                    if (parsed == "Parsed: null (non-financial)" && activeStageIndex < 3) {
-                        "Waiting for complete JSON..."
-                    } else {
-                        parsed
-                    }
-                } else {
-                    ""
-                }
-            } else if (telemetrySms.status == "synced") {
-                "Saved transaction: amount=${telemetrySms.parsedAmount ?: "-"}, counterparty=${telemetrySms.parsedMerchant ?: "-"}"
-            } else if (telemetrySms.status == "already_saved") {
-                "The encrypted ledger already owns this source evidence."
-            } else if (telemetrySms.status == "filtered_out") {
-                "No transaction was saved for this message."
-            } else if (telemetrySms.status == "error") {
-                "The message could not be saved. The failed stage was not retained."
-            } else {
-                ""
-            }
-
-            ModalBottomSheet(
-                onDismissRequest = { selectedTelemetrySmsId = null },
-                sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-                containerColor = M3_SurfaceContainerLow,
-                contentColor = M3_OnSurface,
-                dragHandle = {
-                    Box(
-                        modifier = Modifier
-                            .padding(vertical = 12.dp)
-                            .width(48.dp)
-                            .height(6.dp)
-                            .background(M3_OutlineVariant.copy(alpha = 0.6f), RoundedCornerShape(3.dp))
-                    )
-                }
-            ) {
-                val hasThinking = state.syncState.hasThinkingMode
-                val performanceText = if (isActive) {
-                    state.syncState.activeSmsPerformance
-                } else {
-                    null
-                }
-
-                TelemetryLogsViewer(
-                    sender = telemetrySms.sender,
-                    body = telemetrySms.body,
-                    status = telemetrySms.status,
-                    hasThinkingMode = hasThinking,
-                    isActive = isActive,
-                    activeStageIndex = activeStageIndex,
-                    thinkingOutput = finalThinkingOutput,
-                    jsonOutput = finalJsonOutput,
-                    filterLogs = viewModel.getFilterLogs(telemetrySms),
-                    kvLogs = viewModel.getKvCacheLogs(telemetrySms),
-                    slmPrompt = viewModel.getSlmPrompt(telemetrySms),
-                    parsedOutput = finalParsedOutput,
-                    performanceText = performanceText,
-                    activeModelName = state.syncState.activeModelName,
-                    isStopping =
-                        state.syncState.status ==
-                            HomeSyncState.Status.CANCELLING,
-                    onStop = viewModel::stopManualSync,
-                    onClose = { selectedTelemetrySmsId = null }
+            is HomeSheetTarget.Historical -> {
+                HomeHistoricalTelemetrySheet(
+                    requestedTarget = target.processingTarget,
+                    currentRunId = state.historicalImportRunId,
+                    currentCandidateKey = activeHistoricalSmsCard?.candidateKey,
+                    activityFlow = viewModel.activeHistoricalSms,
+                    viewModel = viewModel,
+                    isStopping = state.historicalImportCancelling,
+                    canStop = state.historicalImportCancellationAllowed,
+                    isFinishing = state.historicalImportFinishing,
+                    onStop = viewModel::stopRenderedSmsTarget,
+                    onClose = { sheetTarget = null }
                 )
             }
+
+
+            is HomeSheetTarget.Automatic -> {
+                HomeAutomaticTelemetrySheet(
+                    requestedTarget = target.processingTarget,
+                    currentOwner = activeAutomaticSmsCard?.owner,
+                    activityFlow = viewModel.automaticSmsTelemetry,
+                    viewModel = viewModel,
+                    onClose = { sheetTarget = null }
+                )
+            }
+
+            null -> Unit
         }
     }
 
@@ -901,16 +1013,374 @@ fun HomeScreen(
     }
 }
 
+internal fun historicalTelemetryTargetIsCurrent(
+    requestedTarget: SmsProcessingTarget.Historical,
+    currentRunId: String?,
+    currentCandidateKey: String?
+): Boolean =
+    requestedTarget.runId == currentRunId &&
+        requestedTarget.candidateKey == currentCandidateKey
+
+internal fun manualTelemetryTargetIsCurrent(
+    target: SmsProcessingTarget,
+    state: HomeSyncState
+): Boolean = when (target) {
+    is SmsProcessingTarget.Automatic -> false
+    is SmsProcessingTarget.ManualRecent ->
+        state.ownsManualProcessingTarget(target)
+    is SmsProcessingTarget.ManualResult ->
+        state.queue.any {
+            it.id == target.candidateKey && it.status != "syncing"
+        }
+    is SmsProcessingTarget.Historical -> false
+}
+
+@Composable
+private fun HomeManualTelemetrySheet(
+    requestedTarget: SmsProcessingTarget,
+    stateFlow: StateFlow<HomeSyncState>,
+    viewModel: HomeViewModel,
+    onStop: (SmsProcessingTarget) -> Unit,
+    onTargetExpired: () -> Unit,
+    onClose: () -> Unit
+) {
+    val syncState by stateFlow.collectSensitiveManualState()
+    val currentState = syncState ?: return
+
+    LaunchedEffect(
+        requestedTarget,
+        currentState.activeRunId,
+        currentState.status,
+        currentState.queue
+    ) {
+        if (!manualTelemetryTargetIsCurrent(requestedTarget, currentState)) {
+            onTargetExpired()
+        }
+    }
+    if (!manualTelemetryTargetIsCurrent(requestedTarget, currentState)) return
+
+    val candidate = when (requestedTarget) {
+        is SmsProcessingTarget.Automatic -> null
+        is SmsProcessingTarget.ManualRecent ->
+            currentState.activeSmsPipelineItem()?.takeIf {
+                it.id == requestedTarget.candidateKey
+            }
+        is SmsProcessingTarget.ManualResult ->
+            currentState.queue.firstOrNull {
+                it.id == requestedTarget.candidateKey
+            }
+        is SmsProcessingTarget.Historical -> null
+    }
+
+    val model = if (candidate != null) {
+        val filterLogs = remember(
+            candidate.id,
+            candidate.sender,
+            candidate.body,
+            candidate.status
+        ) { viewModel.getFilterLogs(candidate) }
+        val cacheLogs = remember(
+            candidate.id,
+            candidate.sender,
+            candidate.body,
+            candidate.status
+        ) { viewModel.getKvCacheLogs(candidate) }
+        val slmPrompt = remember(
+            candidate.id,
+            candidate.sender,
+            candidate.body,
+            candidate.status
+        ) { viewModel.getSlmPrompt(candidate) }
+        SmsTelemetryPresenter.manual(
+            state = currentState,
+            sms = candidate,
+            filterLogs = filterLogs,
+            cacheLogs = cacheLogs,
+            slmPrompt = slmPrompt,
+            parseJson = viewModel::getParsedOutput,
+            target = requestedTarget
+        )
+    } else {
+        val target = requestedTarget as? SmsProcessingTarget.ManualRecent
+            ?: return
+        val gapTarget = SmsProcessingTarget.ManualRecent(
+            runId = target.runId,
+            candidateKey = null
+        )
+        val phase = when (currentState.status) {
+            HomeSyncState.Status.SCANNING -> SmsPipelinePhase.SCANNING
+            HomeSyncState.Status.CANCELLING -> SmsPipelinePhase.STOPPING
+            else -> SmsPipelinePhase.PROCESSING
+        }
+        val stopState = when {
+            currentState.activeRunId != target.runId ->
+                SmsStopUiState.HIDDEN
+            currentState.status == HomeSyncState.Status.CANCELLING ->
+                SmsStopUiState.STOPPING
+            currentState.status in setOf(
+                HomeSyncState.Status.SCANNING,
+                HomeSyncState.Status.SYNCING
+            ) -> SmsStopUiState.AVAILABLE
+            else -> SmsStopUiState.HIDDEN
+        }
+        SmsTelemetryPresenter.gap(
+            target = gapTarget,
+            phase = phase,
+            stopState = stopState,
+            title = if (phase == SmsPipelinePhase.SCANNING) {
+                "Scanning recent messages"
+            } else {
+                "Preparing next message"
+            }
+        )
+    }
+
+    key(model.target.candidateKey ?: "manual-gap") {
+        SmsTelemetryBottomSheet(
+            model = model,
+            onStop = onStop,
+            onClose = onClose
+        )
+    }
+}
+
+internal fun automaticTelemetryTargetIsCurrent(
+    requestedTarget: SmsProcessingTarget.Automatic,
+    currentOwner: AutomaticSmsProcessingOwner?
+): Boolean = currentOwner?.candidateKey == requestedTarget.candidateKey &&
+    currentOwner.claimToken == requestedTarget.claimToken
+
+@Composable
+private fun HomeAutomaticTelemetrySheet(
+    requestedTarget: SmsProcessingTarget.Automatic,
+    currentOwner: AutomaticSmsProcessingOwner?,
+    activityFlow: Flow<AutomaticSmsProcessingActivity?>,
+    viewModel: HomeViewModel,
+    onClose: () -> Unit
+) {
+    val rawActivity by activityFlow.collectSensitiveNullableState()
+    val targetIsCurrent = automaticTelemetryTargetIsCurrent(
+        requestedTarget = requestedTarget,
+        currentOwner = currentOwner
+    )
+    LaunchedEffect(requestedTarget, currentOwner) {
+        if (!targetIsCurrent) onClose()
+    }
+    if (!targetIsCurrent) return
+
+    val activity = rawActivity?.takeIf {
+        it.ownsAutomaticProcessingTarget(requestedTarget)
+    } ?: return
+    val filterLogs = remember(
+        activity.owner,
+        activity.sender,
+        activity.body,
+        activity.filterResult
+    ) {
+        when (activity.filterResult) {
+            AutomaticSmsFilterResult.PASSED,
+            AutomaticSmsFilterResult.REJECTED ->
+                viewModel.getAutomaticFilterLogs(activity)
+            null -> listOf(
+                if (activity.stage == AutomaticSmsProcessingStage.FILTERING) {
+                    "The deterministic SMS filter is running."
+                } else {
+                    "The deterministic SMS filter has not completed yet."
+                }
+            )
+        }
+    }
+    val promptAvailable = activity.grammarEnabled != null
+    val slmPrompt = remember(
+        activity.owner,
+        activity.sender,
+        activity.body,
+        promptAvailable,
+        activity.filterResult
+    ) {
+        when {
+            promptAvailable -> viewModel.getAutomaticPromptContent(activity)
+            activity.filterResult == AutomaticSmsFilterResult.REJECTED ->
+                "No prompt was supplied because local filtering rejected this message."
+            else ->
+                "The extraction prompt has not been supplied to the runtime yet."
+        }
+    }
+    val model = SmsTelemetryPresenter.automatic(
+        activity = activity,
+        filterLogs = filterLogs,
+        slmPrompt = slmPrompt,
+        parseJson = viewModel::getParsedOutput,
+        target = requestedTarget
+    )
+
+    key("${requestedTarget.claimToken}:${requestedTarget.candidateKey}") {
+        SmsTelemetryBottomSheet(
+            model = model,
+            onStop = {},
+            onClose = onClose
+        )
+    }
+}
+
+@Composable
+private fun HomeHistoricalTelemetrySheet(
+    requestedTarget: SmsProcessingTarget.Historical,
+    currentRunId: String?,
+    currentCandidateKey: String?,
+    activityFlow: Flow<HistoricalSmsProcessingActivity?>,
+    viewModel: HomeViewModel,
+    isStopping: Boolean,
+    canStop: Boolean,
+    isFinishing: Boolean,
+    onStop: (SmsProcessingTarget) -> Unit,
+    onClose: () -> Unit
+) {
+    val historicalActivity by
+        activityFlow.collectSensitiveNullableState()
+
+    val targetIsCurrent = historicalTelemetryTargetIsCurrent(
+        requestedTarget = requestedTarget,
+        currentRunId = currentRunId,
+        currentCandidateKey = currentCandidateKey
+    )
+    LaunchedEffect(
+        requestedTarget,
+        currentRunId,
+        currentCandidateKey
+    ) {
+        if (!targetIsCurrent) onClose()
+    }
+    if (!targetIsCurrent) return
+
+    val stopState = when {
+        isStopping -> SmsStopUiState.STOPPING
+        isFinishing -> SmsStopUiState.COMMIT_UNAVAILABLE
+        canStop -> SmsStopUiState.AVAILABLE
+        else -> SmsStopUiState.HIDDEN
+    }
+    val activity = historicalActivity?.takeIf {
+        it.candidateKey == requestedTarget.candidateKey
+    }
+    val model = if (requestedTarget.candidateKey != null) {
+        activity ?: return
+        val historicalFilterLogs = remember(
+            activity.candidateKey,
+            activity.sender,
+            activity.body
+        ) {
+            viewModel.getHistoricalFilterLogs(activity)
+        }
+        val historicalPrompt = remember(
+            activity.candidateKey,
+            activity.sender,
+            activity.body
+        ) {
+            viewModel.getHistoricalPromptContent(activity)
+        }
+        SmsTelemetryPresenter.historical(
+            activity = activity,
+            runId = requestedTarget.runId,
+            filterLogs = historicalFilterLogs,
+            slmPrompt = historicalPrompt,
+            parseJson = viewModel::getParsedOutput,
+            stopState = stopState
+        )
+    } else {
+        SmsTelemetryPresenter.gap(
+            target = requestedTarget,
+            phase = when {
+                isStopping -> SmsPipelinePhase.STOPPING
+                isFinishing -> SmsPipelinePhase.FINISHING
+                else -> SmsPipelinePhase.PROCESSING
+            },
+            stopState = stopState
+        )
+    }
+
+    key(model.target.candidateKey ?: "historical-gap") {
+        SmsTelemetryBottomSheet(
+            model = model,
+            onStop = onStop,
+            onClose = onClose
+        )
+    }
+}
+
+/**
+ * Stops high-frequency telemetry collection with the UI lifecycle and clears
+ * the Compose holder immediately on STOP so raw SMS/model output is not kept
+ * by an inactive composition.
+ */
+@Composable
+internal fun <T> Flow<T?>.collectSensitiveNullableState(): State<T?> {
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    return produceState<T?>(
+        initialValue = null,
+        this,
+        lifecycle
+    ) {
+        collectNullableStateWhileStarted(
+            lifecycle = lifecycle,
+            source = this@collectSensitiveNullableState,
+            publish = { value = it }
+        )
+    }
+}
+
+@Composable
+internal fun <T : Any> Flow<T>.collectSensitiveManualState(): State<T?> {
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    return produceState<T?>(
+        initialValue = null,
+        this,
+        lifecycle
+    ) {
+        collectSensitiveStateWhileStarted(
+            lifecycle = lifecycle,
+            source = this@collectSensitiveManualState,
+            publish = { value = it }
+        )
+    }
+}
+
+internal suspend fun <T> collectNullableStateWhileStarted(
+    lifecycle: Lifecycle,
+    source: Flow<T?>,
+    publish: (T?) -> Unit
+) {
+    lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+        try {
+            source.collect { publish(it) }
+        } finally {
+            publish(null)
+        }
+    }
+}
+
+internal suspend fun <T : Any> collectSensitiveStateWhileStarted(
+    lifecycle: Lifecycle,
+    source: Flow<T>,
+    publish: (T?) -> Unit
+) {
+    lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+        try {
+            source.collect { publish(it) }
+        } finally {
+            publish(null)
+        }
+    }
+}
+
 @Composable
 private fun SetupImportCard(
     state: com.pocketfinancer.setup.SetupImportState,
     isCancelling: Boolean,
-    canStopSmsProcessing: Boolean,
     isFinishing: Boolean,
     isPreparingModel: Boolean,
-    manualSmsOperationRunning: Boolean,
     modelUpgradeRunning: Boolean,
     automaticProcessingEnabled: Boolean,
+    setupActionsEnabled: Boolean,
     downloadState: ModelDownloader.DownloadState,
     onAction: (SetupCardAction) -> Unit,
     onHowThisWorks: () -> Unit
@@ -919,10 +1389,8 @@ private fun SetupImportCard(
         state = state,
         automaticProcessingEnabled = automaticProcessingEnabled,
         isCancelling = isCancelling,
-        canStopSmsProcessing = canStopSmsProcessing,
         isFinishing = isFinishing,
         isPreparingModel = isPreparingModel,
-        manualSmsOperationRunning = manualSmsOperationRunning,
         modelUpgradeRunning = modelUpgradeRunning
     )
     Card(
@@ -1025,35 +1493,13 @@ private fun SetupImportCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 model.primaryAction?.let { action ->
-                    if (action == SetupCardAction.STOP_SMS_PROCESSING) {
-                        OutlinedButton(
-                            onClick = { onAction(action) },
-                            modifier = Modifier.weight(1f),
-                            shape = RoundedCornerShape(12.dp),
-                            colors = ButtonDefaults.outlinedButtonColors(
-                                contentColor = M3_Error
-                            ),
-                            border = BorderStroke(
-                                1.dp,
-                                M3_Error.copy(alpha = 0.55f)
-                            )
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.StopCircle,
-                                contentDescription = null,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(Modifier.width(8.dp))
-                            Text(model.primaryLabel.orEmpty())
-                        }
-                    } else {
-                        Button(
-                            onClick = { onAction(action) },
-                            modifier = Modifier.weight(1f),
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Text(model.primaryLabel.orEmpty())
-                        }
+                    Button(
+                        onClick = { onAction(action) },
+                        enabled = setupActionsEnabled,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Text(model.primaryLabel.orEmpty())
                     }
                 }
                 TextButton(
@@ -1072,512 +1518,134 @@ private fun SetupImportCard(
 }
 
 @Composable
-fun SyncStrip(
+fun RecentSmsScanLauncher(
     syncState: HomeSyncState,
-    startPending: Boolean = false,
     onStartSync: () -> Unit,
-    onStopSync: () -> Unit,
-    onInspectSync: () -> Unit,
+    onOpenQueue: () -> Unit,
     onCheckForUnsynced: () -> Unit
 ) {
-    var isExpanded by remember { mutableStateOf(false) }
+    if (
+        syncState.status !in setOf(
+            HomeSyncState.Status.IDLE,
+            HomeSyncState.Status.DONE
+        )
+    ) return
 
-    Box(
+    val pendingCount = syncState.queue.count { it.status == "pending" }
+    val hasQueue = syncState.queue.isNotEmpty()
+    Card(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp)
+            .padding(horizontal = 16.dp),
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = if (pendingCount > 0) {
+                M3_PrimaryContainer
+            } else {
+                M3_SurfaceContainerLow
+            }
+        ),
+        border = BorderStroke(
+            1.dp,
+            M3_OutlineVariant.copy(alpha = 0.25f)
+        )
     ) {
-        when (syncState.status) {
-            HomeSyncState.Status.IDLE -> {
-                val pendingCount = syncState.queue.count { it.status == "pending" }
-                if (pendingCount > 0) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(20.dp))
-                            .background(M3_PrimaryContainer)
-                            .border(BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.2f)), RoundedCornerShape(20.dp))
-                            .clickable { isExpanded = !isExpanded }
-                            .padding(14.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        // Header Row
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(12.dp)
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(40.dp)
-                                    .background(M3_OnPrimaryContainer.copy(alpha = 0.1f), CircleShape),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.CloudDownload,
-                                    contentDescription = null,
-                                    tint = M3_Primary,
-                                    modifier = Modifier.size(20.dp)
-                                )
-                            }
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = "INCOMING MESSAGE STREAM",
-                                    color = M3_OnPrimaryContainer.copy(alpha = 0.8f),
-                                    style = AppTypography.eyebrow
-                                )
-                                Spacer(modifier = Modifier.height(2.dp))
-                                Text(
-                                    text = "$pendingCount Unsynced SMS Found",
-                                    color = M3_OnSurface,
-                                    style = MaterialTheme.typography.titleSmall
-                                )
-                                Spacer(modifier = Modifier.height(2.dp))
-                                Text(
-                                    text = if (isExpanded) "Click to collapse" else "Click to view pending messages",
-                                    color = M3_OnPrimaryContainer.copy(alpha = 0.75f),
-                                    style = MaterialTheme.typography.bodySmall
-                                )
-                            }
-                            if (!isExpanded) {
-                                Row(
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(100))
-                                        .background(M3_Primary)
-                                        .clickable { onStartSync() }
-                                        .padding(horizontal = 10.dp, vertical = 6.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Filled.PlayArrow,
-                                        contentDescription = null,
-                                        tint = M3_OnPrimary,
-                                        modifier = Modifier.size(10.dp)
-                                    )
-                                    Text(
-                                        text = "Process",
-                                        color = M3_OnPrimary,
-                                        style = AppTypography.eyebrow
-                                    )
-                                }
-                            } else {
-                                Icon(
-                                    imageVector = Icons.Rounded.KeyboardArrowUp,
-                                    contentDescription = "Collapse",
-                                    tint = M3_OnPrimaryContainer.copy(alpha = 0.75f),
-                                    modifier = Modifier.size(20.dp)
-                                )
-                            }
-                        }
-
-                        if (isExpanded) {
-                            HorizontalDivider(color = M3_OnPrimaryContainer.copy(alpha = 0.15f))
-                            
-                            // List of SMS yet to be synced
-                            val pendingSmsList = syncState.queue.filter { it.status == "pending" }
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .heightIn(max = 220.dp)
-                                    .verticalScroll(rememberScrollState()),
-                                verticalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                pendingSmsList.forEach { sms ->
-                                    Row(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .clip(RoundedCornerShape(12.dp))
-                                            .background(M3_OnPrimaryContainer.copy(alpha = 0.05f))
-                                            .padding(10.dp),
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                        verticalAlignment = Alignment.Top
-                                    ) {
-                                        Box(
-                                            modifier = Modifier
-                                                .size(24.dp)
-                                                .background(M3_OnPrimaryContainer.copy(alpha = 0.1f), CircleShape),
-                                            contentAlignment = Alignment.Center
-                                        ) {
-                                            Text(
-                                                text = getInitials(sms.sender),
-                                                color = M3_OnPrimaryContainer,
-                                                style = AppTypography.eyebrow
-                                            )
-                                        }
-                                        Column(modifier = Modifier.weight(1f)) {
-                                            Row(
-                                                modifier = Modifier.fillMaxWidth(),
-                                                horizontalArrangement = Arrangement.SpaceBetween,
-                                                verticalAlignment = Alignment.CenterVertically
-                                            ) {
-                                                Text(
-                                                    text = sms.sender,
-                                                    color = M3_OnSurface,
-                                                    style = MaterialTheme.typography.labelSmall
-                                                )
-                                                Text(
-                                                    text = formatTime(sms.date),
-                                                    color = M3_OnPrimaryContainer.copy(alpha = 0.6f),
-                                                    style = AppTypography.timestamp
-                                                )
-                                            }
-                                            Spacer(modifier = Modifier.height(2.dp))
-                                            Text(
-                                                text = sms.body,
-                                                color = M3_OnSurfaceVariant,
-                                                style = AppTypography.monoBody,
-                                                maxLines = 2,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Start Syncing Button
-                            Button(
-                                onClick = {
-                                    onStartSync()
-                                    onInspectSync()
-                                },
-                                colors = ButtonDefaults.buttonColors(containerColor = M3_Primary),
-                                modifier = Modifier.fillMaxWidth(),
-                                shape = RoundedCornerShape(100),
-                                contentPadding = PaddingValues(vertical = 10.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Sync,
-                                    contentDescription = null,
-                                    tint = M3_OnPrimary,
-                                    modifier = Modifier.size(14.dp)
-                                )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(
-                                    text = "Start Syncing & Inspect",
-                                    color = M3_OnPrimary,
-                                    style = MaterialTheme.typography.labelSmall
-                                )
-                            }
-                        }
-                    }
-                } else {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(20.dp))
-                            .background(M3_SurfaceContainerLow)
-                            .border(BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.2f)), RoundedCornerShape(20.dp))
-                            .clickable { 
-                                if (syncState.queue.isNotEmpty()) {
-                                    onInspectSync()
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(40.dp)
+                        .background(M3_SurfaceContainerHigh, CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = if (pendingCount > 0) {
+                            Icons.Rounded.MarkEmailUnread
+                        } else {
+                            Icons.Default.Refresh
+                        },
+                        contentDescription = null,
+                        tint = M3_Primary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "MANUAL SMS SCAN",
+                        color = M3_OnSurfaceVariant,
+                        style = AppTypography.eyebrow
+                    )
+                    Text(
+                        text = if (pendingCount > 0) {
+                            "$pendingCount eligible " +
+                                if (pendingCount == 1) {
+                                    "message is ready"
                                 } else {
-                                    onCheckForUnsynced()
+                                    "messages are ready"
                                 }
-                            }
-                            .padding(horizontal = 14.dp, vertical = 14.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(40.dp)
-                                .background(M3_SurfaceContainerHigh, CircleShape),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.CloudQueue,
-                                contentDescription = null,
-                                tint = M3_OnSurfaceVariant,
-                                modifier = Modifier.size(20.dp)
-                            )
-                        }
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                 text = "MANUAL SMS SCAN",
-                                 color = M3_OnSurfaceVariant.copy(alpha = 0.8f),
-                                 style = MaterialTheme.typography.labelSmall
-                             )
-                             Spacer(modifier = Modifier.height(2.dp))
-                             Text(
-                                 text = "Check for recent eligible alerts",
-                                 color = M3_OnSurface,
-                                 style = AppTypography.bodyMediumBold
-                             )
-                             Spacer(modifier = Modifier.height(2.dp))
-                             Text(
-                                 text = "No pending items are currently shown. Scan results, not queue emptiness, determine coverage.",
-                                 color = M3_OnSurfaceVariant,
-                                 style = MaterialTheme.typography.bodySmall
-                             )
-                        }
-                        Row(
-                            modifier = Modifier
-                                .background(M3_SurfaceContainerHigh, RoundedCornerShape(100))
-                                .border(BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.3f)), RoundedCornerShape(100))
-                                .clickable { onCheckForUnsynced() }
-                                .padding(horizontal = 10.dp, vertical = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Refresh,
-                                contentDescription = null,
-                                tint = M3_Primary,
-                                modifier = Modifier.size(12.dp)
-                            )
-                            Text(
-                                text = "Scan",
-                                color = M3_Primary,
-                                style = AppTypography.eyebrow
-                            )
-                        }
-                    }
+                        } else {
+                            "Check for recent eligible alerts"
+                        },
+                        color = M3_OnSurface,
+                        style = AppTypography.bodyMediumBold
+                    )
+                    Text(
+                        text = if (pendingCount > 0) {
+                            "Review the queue or process it entirely on this device."
+                        } else {
+                            "Look for recent messages that have not been processed yet."
+                        },
+                        color = M3_OnSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall
+                    )
                 }
             }
 
-            HomeSyncState.Status.SCANNING,
-            HomeSyncState.Status.SYNCING,
-            HomeSyncState.Status.CANCELLING -> {
-                val isScanning =
-                    syncState.status == HomeSyncState.Status.SCANNING
-                val isStopping =
-                    syncState.status == HomeSyncState.Status.CANCELLING
-                val isUnstoppableScan =
-                    isScanning && startPending && syncState.activeRunId == null
-                val total = syncState.queue.size
-                val current = (syncState.currentIndex ?: 0) + 1
-                val activeSms = syncState.currentIndex?.let {
-                    syncState.queue.getOrNull(it)
-                }
-                val accent = if (isStopping) M3_Error else Color(0xFFF2C94C)
-                val activeStateDescription = when {
-                    isStopping && syncState.currentStageIndex == 3 ->
-                        "Stopping SMS processing. Finishing the current encrypted save."
-                    isStopping ->
-                        "Stopping SMS processing safely."
-                    isUnstoppableScan ->
-                        "Scanning recent messages."
-                    isScanning ->
-                        "Scanning recent messages. Stop is available."
-                    else ->
-                        "Processing message $current of $total. Stop is available."
-                }
-
-                Row(
+            if (hasQueue) {
+                OutlinedButton(
+                    onClick = onOpenQueue,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clip(RoundedCornerShape(20.dp))
-                        .background(M3_SurfaceContainer)
-                        .border(
-                            BorderStroke(2.dp, accent.copy(alpha = 0.25f)),
-                            RoundedCornerShape(20.dp)
-                        )
-                        .semantics {
-                            liveRegion = LiveRegionMode.Polite
-                            stateDescription = activeStateDescription
-                        }
-                        .padding(horizontal = 14.dp, vertical = 14.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        .heightIn(min = 48.dp)
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .size(40.dp)
-                            .background(accent.copy(alpha = 0.10f), CircleShape),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(18.dp),
-                            color = accent,
-                            strokeWidth = 2.dp
-                        )
-                    }
-                    Column(modifier = Modifier.weight(1f)) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            Text(
-                                text = when {
-                                    isStopping -> "STOPPING LOCAL PROCESSING"
-                                    isScanning -> "SCANNING RECENT MESSAGES"
-                                    else -> "RUNNING LOCAL QWEN SLM"
-                                },
-                                color = accent,
-                                style = AppTypography.eyebrow
-                            )
-                            Box(
-                                modifier = Modifier
-                                    .size(6.dp)
-                                    .background(accent, CircleShape)
-                            )
-                        }
-                        Spacer(modifier = Modifier.height(2.dp))
-                        Text(
-                            text = when {
-                                isStopping &&
-                                    syncState.currentStageIndex == 3 ->
-                                    "Finishing the current encrypted save..."
-                                isStopping ->
-                                    "Stopping the active message safely..."
-                                isScanning ->
-                                    "Checking the recent SMS window..."
-                                activeSms != null ->
-                                    "Analyzing ${activeSms.sender}..."
-                                else -> "Processing SMS stream..."
-                            },
-                            color = M3_OnSurface,
-                            style = MaterialTheme.typography.titleSmall
-                        )
-                        Spacer(modifier = Modifier.height(2.dp))
-                        Text(
-                            text = when {
-                                isStopping ->
-                                    "Completed saves remain in your ledger"
-                                isUnstoppableScan ->
-                                    "The inbox is being checked"
-                                isScanning ->
-                                    "You can stop while the inbox is checked"
-                                else -> "Message $current of $total"
-                            },
-                            color = M3_OnSurfaceVariant,
-                            style = AppTypography.eyebrow
-                        )
-                    }
-                    Column(
-                        horizontalAlignment = Alignment.End,
-                        verticalArrangement = Arrangement.spacedBy(2.dp)
-                    ) {
-                        if (!isScanning) {
-                            TextButton(
-                                onClick = onInspectSync,
-                                contentPadding = PaddingValues(
-                                    horizontal = 8.dp,
-                                    vertical = 2.dp
-                                )
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Visibility,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(14.dp)
-                                )
-                                Spacer(Modifier.width(4.dp))
-                                Text("Inspect", style = AppTypography.eyebrow)
-                            }
-                        }
-                        if (!isUnstoppableScan) {
-                            TextButton(
-                                onClick = onStopSync,
-                                enabled = !isStopping,
-                                colors = ButtonDefaults.textButtonColors(
-                                    contentColor = M3_Error,
-                                    disabledContentColor =
-                                        M3_OnSurfaceVariant
-                                ),
-                                contentPadding = PaddingValues(
-                                    horizontal = 8.dp,
-                                    vertical = 2.dp
-                                )
-                            ) {
-                                Icon(
-                                    imageVector = if (isStopping) {
-                                        Icons.Rounded.HourglassTop
-                                    } else {
-                                        Icons.Rounded.StopCircle
-                                    },
-                                    contentDescription = null,
-                                    modifier = Modifier.size(14.dp)
-                                )
-                                Spacer(Modifier.width(4.dp))
-                                Text(
-                                    if (isStopping) "Stopping..." else "Stop",
-                                    style = AppTypography.eyebrow
-                                )
-                            }
-                        }
-                    }
+                    Text("Review queue")
                 }
             }
-
-            HomeSyncState.Status.DONE -> {
-                val hasFailures = homeSyncHasFailures(syncState)
-                Row(
+            if (pendingCount > 0) {
+                Button(
+                    onClick = onStartSync,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clip(RoundedCornerShape(20.dp))
-                        .background(
-                            if (hasFailures) M3_ErrorContainer else M3_PosContainer
-                        )
-                        .clickable { onInspectSync() }
-                        .padding(horizontal = 14.dp, vertical = 14.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        .heightIn(min = 48.dp)
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .size(40.dp)
-                            .background(
-                                if (hasFailures) {
-                                    M3_OnErrorContainer.copy(alpha = 0.1f)
-                                } else {
-                                    M3_OnPosContainer.copy(alpha = 0.1f)
-                                },
-                                CircleShape
-                            ),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = if (hasFailures) {
-                                Icons.Rounded.ErrorOutline
-                            } else {
-                                Icons.Default.CheckCircle
-                            },
-                            contentDescription = null,
-                            tint = if (hasFailures) M3_Error else M3_Pos,
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = if (hasFailures) {
-                                "PROCESSING FINISHED WITH ISSUES"
-                            } else {
-                                "PROCESSING FINISHED"
-                            },
-                            color = if (hasFailures) {
-                                M3_Error
-                            } else {
-                                M3_Pos.copy(alpha = 0.9f)
-                            },
-                            style = AppTypography.eyebrow
-                        )
-                        Spacer(modifier = Modifier.height(2.dp))
-                        Text(
-                            text = syncState.syncError
-                                ?: "Manual processing finished",
-                            color = M3_OnSurface,
-                            style = MaterialTheme.typography.titleSmall
-                        )
-                        Spacer(modifier = Modifier.height(2.dp))
-                        Text(
-                            text = homeSyncCompletionSummary(syncState),
-                            color = M3_OnPosContainer.copy(alpha = 0.85f),
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                    }
-                    Box(
-                        modifier = Modifier
-                            .background(Color.White.copy(alpha = 0.20f), RoundedCornerShape(100))
-                            .border(BorderStroke(1.dp, Color.White.copy(alpha = 0.1f)), RoundedCornerShape(100))
-                            .padding(horizontal = 10.dp, vertical = 6.dp)
-                    ) {
-                        Text(
-                            text = "View Logs",
-                            color = Color.White,
-                            style = AppTypography.eyebrow
-                        )
-                    }
+                    Icon(
+                        imageVector = Icons.Filled.PlayArrow,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Process messages")
+                }
+            } else {
+                Button(
+                    onClick = onCheckForUnsynced,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 48.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Refresh,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Scan recent messages")
                 }
             }
         }
@@ -1585,521 +1653,136 @@ fun SyncStrip(
 }
 
 @Composable
-fun DrawerContent(
+private fun SmsQueueContent(
     syncState: HomeSyncState,
-    onNavigate: (String) -> Unit,
-    onDismiss: () -> Unit,
-    onResetSync: () -> Unit,
-    onStopSync: () -> Unit,
+    onClose: () -> Unit,
     onItemClick: (SyncSmsItem) -> Unit
 ) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            .navigationBarsPadding()
             .padding(horizontal = 20.dp)
-            .padding(bottom = 32.dp)
+            .padding(bottom = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        // Header
         Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(bottom = 12.dp),
+            modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.Terminal,
-                    contentDescription = null,
-                    tint = M3_Primary,
-                    modifier = Modifier.size(16.dp)
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(
+                    text = "SMS PROCESSING QUEUE",
+                    color = M3_OnSurface,
+                    style = AppTypography.eyebrowBold
                 )
                 Text(
-                    text = "On-Device Local SLM Monitor",
-                    color = M3_OnSurface,
-                    style = AppTypography.titleSmallBold
+                    text = "Candidate evidence stays on this device",
+                    color = M3_OnSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall
                 )
             }
-            Text(
-                text = "Close",
-                color = M3_OnSurfaceVariant,
-                style = AppTypography.bodySmallBold,
-                modifier = Modifier
-                    .background(M3_SurfaceContainerHigh, RoundedCornerShape(100))
-                    .border(BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.3f)), RoundedCornerShape(100))
-                    .clickable { onDismiss() }
-                    .defaultMinSize(minHeight = 48.dp)
-                    .padding(horizontal = 12.dp)
-                    .wrapContentHeight(Alignment.CenterVertically)
-            )
+            TextButton(
+                onClick = onClose,
+                modifier = Modifier.heightIn(min = 48.dp)
+            ) {
+                Text("Close")
+            }
         }
-        HorizontalDivider(color = M3_OutlineVariant.copy(alpha = 0.15f))
-        Spacer(modifier = Modifier.height(16.dp))
 
-        // Target Extraction Queue
-        Text(
-            text = "TARGET EXTRACTION QUEUE",
-            color = M3_OnSurfaceVariant,
-            style = AppTypography.eyebrow
-        )
-        Spacer(modifier = Modifier.height(10.dp))
+        HorizontalDivider(color = M3_OutlineVariant.copy(alpha = 0.2f))
 
-        LazyColumn(
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f, fill = false)
-                .maxHeight(300.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            itemsIndexed(syncState.queue) { idx, item ->
-                val isActive = idx == syncState.currentIndex
-                val isComplete =
-                    item.status == "synced" ||
-                        item.status == "already_saved"
-                val isFiltered = item.status == "filtered_out"
-                val isError = item.status == "error"
-
-                val bg = when {
-                    isActive -> Color(0xFFF2C94C).copy(alpha = 0.05f)
-                    isComplete -> M3_PosContainer.copy(alpha = 0.20f)
-                    isFiltered -> M3_OutlineVariant.copy(alpha = 0.10f)
-                    else -> M3_SurfaceContainerLow
-                }
-                val border = when {
-                    isActive -> BorderStroke(1.dp, Color(0xFFF2C94C).copy(alpha = 0.3f))
-                    isComplete -> BorderStroke(1.dp, M3_Pos.copy(alpha = 0.25f))
-                    isFiltered -> BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.20f))
-                    else -> BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.15f))
-                }
-
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(bg)
-                        .border(border, RoundedCornerShape(12.dp))
-                        .clickable { onItemClick(item) }
-                        .padding(10.dp),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    verticalAlignment = Alignment.Top
-                ) {
-                    Box(modifier = Modifier.padding(top = 2.dp)) {
-                        when {
-                            isComplete -> {
-                                Box(
-                                    modifier = Modifier
-                                        .size(20.dp)
-                                        .background(M3_Pos, CircleShape),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.Check,
-                                        contentDescription = null,
-                                        tint = Color.White,
-                                        modifier = Modifier.size(11.dp)
-                                    )
-                                }
-                            }
-                            isFiltered -> {
-                                Box(
-                                    modifier = Modifier
-                                        .size(20.dp)
-                                        .background(M3_OutlineVariant, CircleShape),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.Block,
-                                        contentDescription = null,
-                                        tint = M3_OnSurface,
-                                        modifier = Modifier.size(11.dp)
-                                    )
-                                }
-                            }
-                            isActive -> {
-                                Box(
-                                    modifier = Modifier
-                                        .size(20.dp)
-                                        .background(Color(0xFFF2C94C).copy(alpha = 0.25f), CircleShape),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.FlashOn,
-                                        contentDescription = null,
-                                        tint = Color(0xFFF2C94C),
-                                        modifier = Modifier.size(12.dp)
-                                    )
-                                }
-                            }
-                            else -> {
-                                Box(
-                                    modifier = Modifier
-                                        .size(20.dp)
-                                        .border(BorderStroke(1.dp, M3_OutlineVariant), CircleShape),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text(
-                                        text = (idx + 1).toString(),
-                                        color = M3_OnSurfaceVariant,
-                                        style = AppTypography.eyebrow.copy(
-                                            platformStyle = androidx.compose.ui.text.PlatformTextStyle(
-                                                includeFontPadding = false
-                                            ),
-                                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
-                                        )
-                                    )
-                                }
-                            }
-                        }
+        if (syncState.queue.isEmpty()) {
+            Text(
+                text = "No queued messages are available.",
+                color = M3_OnSurfaceVariant,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.padding(vertical = 24.dp)
+            )
+        } else {
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 420.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                itemsIndexed(
+                    items = syncState.queue,
+                    key = { _, item -> item.id }
+                ) { index, item ->
+                    val isCurrent = index == syncState.currentIndex &&
+                        syncState.status in setOf(
+                            HomeSyncState.Status.SYNCING,
+                            HomeSyncState.Status.CANCELLING
+                        )
+                    val statusLabel = when {
+                        isCurrent -> "ACTIVE"
+                        item.status == "synced" -> "SAVED"
+                        item.status == "already_saved" -> "IN LEDGER"
+                        item.status == "filtered_out" -> "SKIPPED"
+                        item.status == "error" -> "NEEDS ATTENTION"
+                        else -> "PENDING"
+                    }
+                    val statusColor = when {
+                        isCurrent -> M3_Primary
+                        item.status == "synced" ||
+                            item.status == "already_saved" -> M3_Pos
+                        item.status == "error" -> M3_Error
+                        else -> M3_OnSurfaceVariant
                     }
 
-                    Column(modifier = Modifier.weight(1f)) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = item.sender,
-                                color = M3_OnSurface,
-                                style = AppTypography.bodySmallBold
-                            )
-                            Text(
-                                text = formatTime(item.date),
-                                color = M3_OnSurfaceVariant,
-                                style = AppTypography.timestamp
-                            )
-                        }
-                        Spacer(modifier = Modifier.height(2.dp))
-                        Text(
-                            text = item.body,
-                            color = M3_OnSurfaceVariant,
-                            style = AppTypography.monoBody,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
+                    Card(
+                        onClick = { onItemClick(item) },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = M3_SurfaceContainerLow
+                        ),
+                        border = BorderStroke(
+                            1.dp,
+                            statusColor.copy(alpha = 0.22f)
                         )
-
-                        if (isActive) {
-                            Spacer(modifier = Modifier.height(8.dp))
-                            PipelineStagesView(
-                                activeIndex = syncState.currentStageIndex ?: 0,
-                                thinkingOutput = syncState.thinkingOutput,
-                                hasThinkingMode = syncState.hasThinkingMode
-                            )
-                        }
-
-                        if (isFiltered) {
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text(
-                                text = "Filtered: non-transactional metadata matched",
-                                color = M3_Error,
-                                style = AppTypography.eyebrow,
-                                modifier = Modifier
-                                    .background(M3_ErrorContainer.copy(alpha = 0.1f), RoundedCornerShape(4.dp))
-                                    .padding(horizontal = 6.dp, vertical = 2.dp)
-                            )
-                        }
-
-                        if (isComplete && item.parsedAmount != null) {
-                            Spacer(modifier = Modifier.height(6.dp))
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(5.dp)
+                        ) {
                             Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .background(M3_PosContainer.copy(alpha = 0.1f), RoundedCornerShape(6.dp))
-                                    .border(BorderStroke(1.dp, M3_Pos.copy(alpha = 0.1f)), RoundedCornerShape(6.dp))
-                                    .padding(6.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement =
+                                    Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Text(
-                                    text = "Extracted: ${item.parsedMerchant}",
-                                    color = M3_OnPosContainer,
-                                    style = AppTypography.eyebrow
+                                    text = item.sender.ifBlank {
+                                        "Message ${index + 1}"
+                                    },
+                                    color = M3_OnSurface,
+                                    style = AppTypography.bodySmallBold,
+                                    modifier = Modifier.weight(1f),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                                 Text(
-                                    text = "₹${item.parsedAmount}",
-                                    color = M3_OnPosContainer,
-                                    style = AppTypography.eyebrowBold
+                                    text = statusLabel,
+                                    color = statusColor,
+                                    style = AppTypography.eyebrow
                                 )
                             }
-                        }
-                    }
-                }
-            }
-        }
-
-        if (
-            syncState.status in setOf(
-                HomeSyncState.Status.SCANNING,
-                HomeSyncState.Status.SYNCING,
-                HomeSyncState.Status.CANCELLING
-            )
-        ) {
-            val isStopping =
-                syncState.status == HomeSyncState.Status.CANCELLING
-            Spacer(modifier = Modifier.height(16.dp))
-            if (syncState.status != HomeSyncState.Status.SCANNING) {
-                Button(
-                    onClick = { onNavigate("transactions") },
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = M3_Primary
-                    ),
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(100)
-                ) {
-                    Text(
-                        text = "Inspect Active SLM Token Logs",
-                        color = M3_OnPrimary,
-                        style = AppTypography.bodySmallBold
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Icon(
-                        imageVector = Icons.Default.ChevronRight,
-                        contentDescription = null,
-                        tint = M3_OnPrimary,
-                        modifier = Modifier.size(16.dp)
-                    )
-                }
-                Spacer(modifier = Modifier.height(8.dp))
-            }
-            OutlinedButton(
-                onClick = onStopSync,
-                enabled = !isStopping,
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(100),
-                colors = ButtonDefaults.outlinedButtonColors(
-                    contentColor = M3_Error,
-                    disabledContentColor = M3_OnSurfaceVariant
-                ),
-                border = BorderStroke(
-                    1.dp,
-                    if (isStopping) {
-                        M3_OutlineVariant
-                    } else {
-                        M3_Error.copy(alpha = 0.55f)
-                    }
-                )
-            ) {
-                Icon(
-                    imageVector = if (isStopping) {
-                        Icons.Rounded.HourglassTop
-                    } else {
-                        Icons.Rounded.StopCircle
-                    },
-                    contentDescription = null,
-                    modifier = Modifier.size(16.dp)
-                )
-                Spacer(modifier = Modifier.width(6.dp))
-                Text(
-                    text = if (isStopping) {
-                        "Stopping safely..."
-                    } else {
-                        "Stop SMS processing"
-                    },
-                    style = AppTypography.bodySmallBold
-                )
-            }
-            Spacer(modifier = Modifier.height(6.dp))
-            Text(
-                text = if (isStopping) {
-                    "Waiting for native work or an already-started encrypted save to drain."
-                } else {
-                    "Completed messages stay saved; the active message stops at a safe boundary."
-                },
-                color = M3_OnSurfaceVariant.copy(alpha = 0.7f),
-                style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.fillMaxWidth(),
-                textAlign = androidx.compose.ui.text.style.TextAlign.Center
-            )
-        }
-
-        if (syncState.status == HomeSyncState.Status.DONE) {
-            Spacer(modifier = Modifier.height(16.dp))
-            Button(
-                onClick = {
-                    onResetSync()
-                    onDismiss()
-                },
-                colors = ButtonDefaults.buttonColors(containerColor = M3_Pos),
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(100)
-            ) {
-                Text(
-                    text = "Done",
-                    color = Color.White,
-                    style = AppTypography.bodySmallBold
-                )
-            }
-        }
-    }
-}
-
-@Composable
-fun PipelineStagesView(
-    activeIndex: Int,
-    thinkingOutput: String = "",
-    hasThinkingMode: Boolean = true
-) {
-    val stages = if (hasThinkingMode) {
-        listOf(
-            "Pre-Filter Check" to "Checking message format and keywords",
-            "Phase 1: Thinking Pass" to "Greedy reasoning pass on device CPU",
-            "Phase 2: Structured JSON" to "Structured transaction extraction",
-            "Database Persistence" to "Inserting transaction in encrypted DB"
-        )
-    } else {
-        listOf(
-            "Pre-Filter Check" to "Checking message format and keywords",
-            "Phase 2: Structured JSON" to "Structured transaction extraction",
-            "Database Persistence" to "Inserting transaction in encrypted DB"
-        )
-    }
-
-    val mappedActiveIndex = if (hasThinkingMode) {
-        activeIndex
-    } else {
-        when (activeIndex) {
-            0 -> 0
-            2 -> 1
-            3 -> 2
-            else -> 0
-        }
-    }
-
-    var isPhase1Expanded by remember { mutableStateOf(false) }
-
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(M3_Surface, RoundedCornerShape(8.dp))
-            .border(BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.25f)), RoundedCornerShape(8.dp))
-            .padding(8.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp)
-    ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
-            modifier = Modifier.padding(bottom = 2.dp)
-        ) {
-            Icon(
-                imageVector = Icons.Rounded.AutoAwesome,
-                contentDescription = null,
-                tint = M3_Primary,
-                modifier = Modifier.size(10.dp)
-            )
-            Text(
-                text = "QWEN.SLM PIPELINE STAGES:",
-                color = M3_Primary,
-                style = AppTypography.eyebrow
-            )
-        }
-
-        stages.forEachIndexed { index, (name, _) ->
-            val isCurrent = index == mappedActiveIndex
-            val isDone = index < mappedActiveIndex
-            val isPhase1 = hasThinkingMode && index == 1
-
-            Column(modifier = Modifier.fillMaxWidth()) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(4.dp))
-                        .then(
-                            if (isPhase1 && thinkingOutput.isNotEmpty()) {
-                                Modifier.clickable { isPhase1Expanded = !isPhase1Expanded }
-                            } else Modifier
-                        ),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        val indicator = when {
-                            isDone -> "●"
-                            isCurrent -> "▶"
-                            else -> "○"
-                        }
-                        val color = when {
-                            isDone -> M3_Pos
-                            isCurrent -> Color(0xFFF2C94C)
-                            else -> M3_OnSurfaceVariant.copy(alpha = 0.3f)
-                        }
-
-                        Text(
-                            text = indicator,
-                            color = color,
-                            style = AppTypography.eyebrow
-                        )
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
                             Text(
-                                text = name,
-                                color = if (isCurrent) M3_OnSurface else if (isDone) M3_OnSurfaceVariant else M3_OnSurfaceVariant.copy(alpha = 0.4f),
-                                style = AppTypography.eyebrow.copy(fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal)
-                            )
-                            if (isPhase1 && thinkingOutput.isNotEmpty()) {
-                                Icon(
-                                    imageVector = if (isPhase1Expanded) Icons.Rounded.ArrowDropUp else Icons.Rounded.ArrowDropDown,
-                                    contentDescription = "Expand thinking output",
-                                    tint = M3_Primary,
-                                    modifier = Modifier.size(14.dp)
-                                )
-                            }
-                        }
-                    }
-
-                    val badgeText = when {
-                        isDone -> "done"
-                        isCurrent -> "running"
-                        else -> "idle"
-                    }
-                    val badgeBg = when {
-                        isDone -> M3_PosContainer.copy(alpha = 0.2f)
-                        isCurrent -> Color(0xFFF2C94C).copy(alpha = 0.15f)
-                        else -> Color.Transparent
-                    }
-                    val badgeTextClr = when {
-                        isDone -> M3_OnPosContainer
-                        isCurrent -> Color(0xFFF2C94C)
-                        else -> M3_OnSurfaceVariant.copy(alpha = 0.2f)
-                    }
-
-                    Text(
-                        text = badgeText.uppercase(),
-                        color = badgeTextClr,
-                        style = AppTypography.eyebrow,
-                        modifier = Modifier
-                            .background(badgeBg, RoundedCornerShape(4.dp))
-                            .padding(horizontal = 4.dp, vertical = 1.dp)
-                    )
-                }
-
-                if (isPhase1 && isPhase1Expanded) {
-                    val displayOutput = thinkingOutput.ifEmpty { "Waiting for thinking tokens..." }
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(max = 120.dp)
-                            .background(M3_SurfaceContainerLow, RoundedCornerShape(6.dp))
-                            .border(BorderStroke(1.dp, M3_OutlineVariant.copy(alpha = 0.3f)), RoundedCornerShape(6.dp))
-                            .padding(6.dp)
-                    ) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .verticalScroll(rememberScrollState())
-                        ) {
-                            Text(
-                                text = displayOutput,
+                                text = item.body.ifBlank {
+                                    "Source evidence was cleared after processing."
+                                },
                                 color = M3_OnSurfaceVariant,
-                                style = AppTypography.monoBody
+                                style = AppTypography.monoBody,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = formatTime(item.date),
+                                color = M3_OnSurfaceVariant.copy(alpha = 0.75f),
+                                style = AppTypography.timestamp
                             )
                         }
                     }
@@ -2169,10 +1852,6 @@ private fun formatTime(timestampMs: Long): String {
     return fmt.format(date)
 }
 
-private fun Modifier.maxHeight(max: androidx.compose.ui.unit.Dp): Modifier {
-    return this.heightIn(max = max)
-}
-
 private fun getAccountShortLabel(label: String?): String {
     if (label == null || label == "__UNKNOWN__") return "Unknown"
     
@@ -2210,7 +1889,8 @@ internal fun selectedPeriodEmptyMessage(
     totalTransactionCount: Int,
     setupStatus: SetupImportStatus,
     setupFinishing: Boolean = false,
-    automaticProcessingEnabled: Boolean = true
+    automaticProcessingEnabled: Boolean =
+        AutomaticProcessingPreferences.DEFAULT_ENABLED
 ): String {
     if (totalTransactionCount > 0) {
         return "No spending transactions in the selected ${selectedPeriod.lowercase()} period"
@@ -2233,33 +1913,12 @@ internal fun selectedPeriodEmptyMessage(
             if (automaticProcessingEnabled) {
                 "No eligible transaction history was found. The next eligible alert will appear here."
             } else {
-                "No eligible transaction history was found. Pocket Financer will not process new alerts automatically; scan manually or turn updates on."
+                "No eligible transaction history was found. Pocket Financer will not process new alerts automatically; scan manually or turn automatic SMS processing on."
             }
         SetupImportStatus.READY ->
             "No saved spending transactions in this period."
     }
 }
-
-internal fun homeSyncHasFailures(state: HomeSyncState): Boolean =
-    state.syncError != null ||
-        state.queue.any { it.status == "error" }
-
-internal fun homeSyncCompletionSummary(state: HomeSyncState): String =
-    buildString {
-        val saved = state.queue.count { it.status == "synced" }
-        val alreadySaved =
-            state.queue.count { it.status == "already_saved" }
-        val rejected =
-            state.queue.count { it.status == "filtered_out" }
-        val failed = state.queue.count { it.status == "error" }
-
-        append("$saved saved")
-        if (alreadySaved > 0) {
-            append(" · $alreadySaved already present")
-        }
-        if (rejected > 0) append(" · $rejected rejected")
-        if (failed > 0) append(" · $failed failed")
-    }
 
 @Composable
 fun ModelUpgradeBanner(

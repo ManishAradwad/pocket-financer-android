@@ -106,7 +106,6 @@ internal fun SyncSmsItem.withPrivacySafeStatus(status: String): SyncSmsItem =
 
 internal fun SyncSmsItem.hasDiagnosticSourceEvidence(): Boolean =
     status !in SOURCE_EVIDENCE_DISCARDED_STATUSES &&
-        sender.isNotBlank() &&
         body.isNotBlank()
 
 /**
@@ -431,13 +430,43 @@ class HomeSyncManager @Inject constructor(
         }
 
     /** Returns true only when [runId] owns the currently published run. */
-    internal fun requestServiceStop(runId: String?): Boolean {
+    internal fun requestServiceStop(runId: String?): Boolean =
+        requestServiceStopMatching(
+            runId = runId,
+            expectedCandidateKey = null,
+            requireCandidateMatch = false
+        )
+
+    /**
+     * Candidate-scoped UI stop. A delayed action cannot cancel the next
+     * candidate in the same run; null identifies an actually rendered gap.
+     */
+    internal fun requestServiceStop(
+        runId: String?,
+        expectedCandidateKey: String?
+    ): Boolean = requestServiceStopMatching(
+        runId = runId,
+        expectedCandidateKey = expectedCandidateKey,
+        requireCandidateMatch = true
+    )
+
+    private fun requestServiceStopMatching(
+        runId: String?,
+        expectedCandidateKey: String?,
+        requireCandidateMatch: Boolean
+    ): Boolean {
         while (true) {
             val current = _syncState.value
             if (!manualSyncStopMatches(current.activeRunId, runId)) {
                 return false
             }
             if (current.status !in ACTIVE_SERVICE_STATUSES) {
+                return false
+            }
+            if (
+                requireCandidateMatch &&
+                current.activeServiceCandidateKey() != expectedCandidateKey
+            ) {
                 return false
             }
             if (
@@ -456,6 +485,13 @@ class HomeSyncManager @Inject constructor(
             if (_syncState.compareAndSet(current, next)) return true
         }
     }
+
+    private fun HomeSyncState.activeServiceCandidateKey(): String? =
+        currentIndex
+            ?.let(queue::getOrNull)
+            ?.takeIf { it.status == "syncing" }
+            ?.id
+            ?: queue.firstOrNull { it.status == "syncing" }?.id
 
     /**
      * Idempotently settles cancellation for one run. A current in-flight item

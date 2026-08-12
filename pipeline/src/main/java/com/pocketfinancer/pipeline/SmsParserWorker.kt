@@ -63,6 +63,8 @@ class SmsParserWorker(
         fun smsIngestionRepository(): SmsIngestionRepository
         fun automaticProcessingPreferences(): AutomaticProcessingPreferences
         fun automaticSmsOperationGate(): AutomaticSmsOperationGate
+        fun automaticSmsProcessingActivityStore():
+            AutomaticSmsProcessingActivityStore
     }
 
     override suspend fun doWork(): Result {
@@ -115,7 +117,15 @@ class SmsParserWorker(
         )
         val ingestionRepository = entryPoint.smsIngestionRepository()
         val candidate = ingestionRepository.get(candidateKey)
-            ?: return Result.success()
+        if (candidate == null) {
+            cancelMissingCandidateNotification {
+                SmsNotificationHelper.cancelCandidateNotification(
+                    applicationContext,
+                    candidateKey
+                )
+            }
+            return Result.success()
+        }
 
         val appPreferences = applicationContext.getSharedPreferences(
             APP_SETTINGS,
@@ -161,6 +171,10 @@ class SmsParserWorker(
             ingestionRepository = ingestionRepository
         )
         if (claimDecision is SmsCandidateClaimDecision.AutomaticDisabled) {
+            claimDecision.cancelDiscardedCandidateNotification(
+                context = applicationContext,
+                candidateKey = candidate.candidateKey
+            )
             return Result.success()
         }
         val claimed =
@@ -171,47 +185,88 @@ class SmsParserWorker(
             return Result.success()
         }
 
-        return try {
-            processClaimedCandidate(
-                entryPoint = entryPoint,
-                preferences = appPreferences,
-                candidate = claimed,
-                claimToken = claimToken,
-                automaticProcessingPreferences =
-                    automaticProcessingPreferences
-            )
-        } catch (cancelled: CancellationException) {
-            rethrowAfterNonCancellableSettlement(cancelled) {
-                try {
-                    settleClaimedCandidateForRetry(
-                        candidate = claimed,
-                        claimToken = claimToken,
-                        error = "Worker cancelled",
-                        automaticProcessingPreferences =
-                            automaticProcessingPreferences,
-                        ingestionRepository = ingestionRepository
-                    )
-                } finally {
-                    SmsNotificationHelper.cancelCandidateNotification(
-                        applicationContext,
-                        claimed.candidateKey
-                    )
+        return withAutomaticSmsProcessingActivity(
+            candidate = claimed,
+            claimToken = claimToken,
+            store = entryPoint.automaticSmsProcessingActivityStore()
+        ) { automaticActivity ->
+            try {
+                processClaimedCandidate(
+                    entryPoint = entryPoint,
+                    preferences = appPreferences,
+                    candidate = claimed,
+                    claimToken = claimToken,
+                    automaticProcessingPreferences =
+                        automaticProcessingPreferences,
+                    automaticActivity = automaticActivity
+                )
+            } catch (cancelled: CancellationException) {
+                automaticActivity?.error(
+                    "On-device processing was interrupted before completion."
+                )
+                rethrowAfterNonCancellableSettlement(cancelled) {
+                    try {
+                        val settlement = settleClaimedCandidateForRetry(
+                            candidate = claimed,
+                            claimToken = claimToken,
+                            error = "Worker cancelled",
+                            automaticProcessingPreferences =
+                                automaticProcessingPreferences,
+                            ingestionRepository = ingestionRepository
+                        )
+                        if (
+                            settlement ==
+                            SmsCandidateRetrySettlement.RELEASED_FOR_RETRY
+                        ) {
+                            SmsNotificationHelper.cancelCandidateNotification(
+                                applicationContext,
+                                claimed.candidateKey
+                            )
+                        } else {
+                            cancelStaleTerminalNotificationIfCandidateAbsent(
+                                ingestionRepository = ingestionRepository,
+                                candidateKey = claimed.candidateKey
+                            ) {
+                                SmsNotificationHelper.cancelCandidateNotification(
+                                    applicationContext,
+                                    claimed.candidateKey
+                                )
+                            }
+                        }
+                    } catch (settlementFailure: Throwable) {
+                        try {
+                            cancelNotificationAfterRetrySettlementFailure(
+                                ingestionRepository = ingestionRepository,
+                                candidateKey = claimed.candidateKey,
+                                claimToken = claimToken
+                            ) {
+                                SmsNotificationHelper.cancelCandidateNotification(
+                                    applicationContext,
+                                    claimed.candidateKey
+                                )
+                            }
+                        } catch (cleanupFailure: Throwable) {
+                            settlementFailure.addSuppressed(cleanupFailure)
+                        }
+                        throw settlementFailure
+                    }
                 }
+            } catch (error: Exception) {
+                Log.e(
+                    TAG,
+                    "Encrypted SMS candidate processing failed: " +
+                        error.javaClass.simpleName
+                )
+                retryClaimedOrDiscard(
+                    ingestionRepository = ingestionRepository,
+                    candidate = claimed,
+                    claimToken = claimToken,
+                    error = error.javaClass.simpleName,
+                    automaticProcessingPreferences =
+                        automaticProcessingPreferences,
+                    automaticActivity = automaticActivity
+                )
             }
-        } catch (error: Exception) {
-            Log.e(
-                TAG,
-                "Encrypted SMS candidate processing failed: " +
-                    error.javaClass.simpleName
-            )
-            retryClaimedOrDiscard(
-                ingestionRepository = ingestionRepository,
-                candidate = claimed,
-                claimToken = claimToken,
-                error = error.javaClass.simpleName,
-                automaticProcessingPreferences =
-                    automaticProcessingPreferences
-            )
         }
     }
 
@@ -220,7 +275,8 @@ class SmsParserWorker(
         preferences: SharedPreferences,
         candidate: QueuedSmsCandidate,
         claimToken: String,
-        automaticProcessingPreferences: AutomaticProcessingPreferences
+        automaticProcessingPreferences: AutomaticProcessingPreferences,
+        automaticActivity: AutomaticSmsProcessingSession?
     ): Result {
         val ingestionRepository = entryPoint.smsIngestionRepository()
         val flowLease = entryPoint.homeSyncDelegate().tryEnterSmsWorkerFlow()
@@ -230,7 +286,8 @@ class SmsParserWorker(
                 claimToken = claimToken,
                 error = "Model maintenance owns admission",
                 automaticProcessingPreferences =
-                    automaticProcessingPreferences
+                    automaticProcessingPreferences,
+                automaticActivity = automaticActivity
             )
         return try {
             processDirectlyInBackground(
@@ -239,7 +296,8 @@ class SmsParserWorker(
                 candidate = candidate,
                 claimToken = claimToken,
                 automaticProcessingPreferences =
-                    automaticProcessingPreferences
+                    automaticProcessingPreferences,
+                automaticActivity = automaticActivity
             )
         } finally {
             withContext(NonCancellable) {
@@ -253,7 +311,8 @@ class SmsParserWorker(
         preferences: SharedPreferences,
         candidate: QueuedSmsCandidate,
         claimToken: String,
-        automaticProcessingPreferences: AutomaticProcessingPreferences
+        automaticProcessingPreferences: AutomaticProcessingPreferences,
+        automaticActivity: AutomaticSmsProcessingSession?
     ): Result {
         val ingestionRepository = entryPoint.smsIngestionRepository()
         val sms = SmsReader.SmsMessage(
@@ -265,23 +324,45 @@ class SmsParserWorker(
             sourceTimestamp = candidate.sourceTimestamp
         )
         val filter = entryPoint.smsFilterPipeline()
+        automaticActivity?.filtering()
         if (!filter.isTransactional(sms.address, sms.body)) {
-            discardOwnedTerminalCandidate(
+            automaticActivity?.filteredOut(
+                deterministicFilterRejected = true
+            )
+            val discarded = discardOwnedTerminalCandidate(
                 ingestionRepository = ingestionRepository,
                 candidateKey = candidate.candidateKey,
                 claimToken = claimToken
             )
-            SmsNotificationHelper.showSkippedNotification(
-                applicationContext,
-                candidate.candidateKey
+            applyExactTerminalNotification(
+                settledOwnedClaim = discarded,
+                onOwned = {
+                    SmsNotificationHelper.showSkippedNotification(
+                        applicationContext,
+                        candidate.candidateKey
+                    )
+                },
+                onStale = {
+                    cancelStaleTerminalNotificationIfCandidateAbsent(
+                        ingestionRepository = ingestionRepository,
+                        candidateKey = candidate.candidateKey
+                    ) {
+                        SmsNotificationHelper.cancelCandidateNotification(
+                            applicationContext,
+                            candidate.candidateKey
+                        )
+                    }
+                }
             )
             return Result.success()
         }
+        automaticActivity?.filterPassed()
 
         val runtime = entryPoint.slmRuntime()
         val modelStorage = entryPoint.slmModelStorage()
         var lease: SlmLease? = null
         val workerResult = try {
+            automaticActivity?.loadingModel()
             SmsNotificationHelper.showProcessingNotification(
                 applicationContext,
                 candidate.candidateKey,
@@ -300,7 +381,8 @@ class SmsParserWorker(
                     claimToken,
                     "No supported on-device model",
                     automaticProcessingPreferences =
-                        automaticProcessingPreferences
+                        automaticProcessingPreferences,
+                    automaticActivity = automaticActivity
                 )
             }
 
@@ -313,7 +395,8 @@ class SmsParserWorker(
                     "On-device model is not prepared",
                     automaticProcessingPreferences =
                         automaticProcessingPreferences,
-                    retryMode = SmsCandidateRetryMode.UNTIL_MODEL_PREPARED
+                    retryMode = SmsCandidateRetryMode.UNTIL_MODEL_PREPARED,
+                    automaticActivity = automaticActivity
                 )
             }
 
@@ -334,8 +417,14 @@ class SmsParserWorker(
             // Reset may commit while model acquisition is suspended. Both the
             // preference and durable claim must still be valid before inference
             // can reach ledger persistence.
+            if (!isOnboardingCompleteForSmsWork(preferences)) {
+                SmsNotificationHelper.cancelCandidateNotification(
+                    applicationContext,
+                    candidate.candidateKey
+                )
+                return Result.success()
+            }
             if (
-                !isOnboardingCompleteForSmsWork(preferences) ||
                 !ingestionRepository.isClaimOwned(
                     candidate.candidateKey,
                     claimToken
@@ -343,10 +432,18 @@ class SmsParserWorker(
             ) {
                 // A stale replacement now owns this encrypted evidence. The old
                 // worker must stop without deleting the replacement's claim.
-                SmsNotificationHelper.cancelCandidateNotification(
-                    applicationContext,
-                    candidate.candidateKey
+                automaticActivity?.error(
+                    "This automatic processing claim is no longer current."
                 )
+                cancelStaleTerminalNotificationIfCandidateAbsent(
+                    ingestionRepository = ingestionRepository,
+                    candidateKey = candidate.candidateKey
+                ) {
+                    SmsNotificationHelper.cancelCandidateNotification(
+                        applicationContext,
+                        candidate.candidateKey
+                    )
+                }
                 return Result.success()
             }
 
@@ -357,9 +454,14 @@ class SmsParserWorker(
             )
             when (
                 val processing = entryPoint.pipelineService()
-                    .processSingle(sms, acquiredLease)
+                    .processSingle(
+                        sms = sms,
+                        lease = acquiredLease,
+                        observer = automaticActivity
+                    )
             ) {
                 is PipelineService.ProcessingResult.Saved -> {
+                    automaticActivity?.saved(processing.newlyInserted)
                     // insertIfAbsent deletes the matching queued evidence in the
                     // same Room transaction, whether it inserted or observed a
                     // concurrent winner.
@@ -379,14 +481,31 @@ class SmsParserWorker(
                 }
 
                 is PipelineService.ProcessingResult.Skipped -> {
-                    discardOwnedTerminalCandidate(
+                    automaticActivity?.filteredOut()
+                    val discarded = discardOwnedTerminalCandidate(
                         ingestionRepository = ingestionRepository,
                         candidateKey = candidate.candidateKey,
                         claimToken = claimToken
                     )
-                    SmsNotificationHelper.showSkippedNotification(
-                        applicationContext,
-                        candidate.candidateKey
+                    applyExactTerminalNotification(
+                        settledOwnedClaim = discarded,
+                        onOwned = {
+                            SmsNotificationHelper.showSkippedNotification(
+                                applicationContext,
+                                candidate.candidateKey
+                            )
+                        },
+                        onStale = {
+                            cancelStaleTerminalNotificationIfCandidateAbsent(
+                                ingestionRepository = ingestionRepository,
+                                candidateKey = candidate.candidateKey
+                            ) {
+                                SmsNotificationHelper.cancelCandidateNotification(
+                                    applicationContext,
+                                    candidate.candidateKey
+                                )
+                            }
+                        }
                     )
                     Result.success()
                 }
@@ -398,7 +517,8 @@ class SmsParserWorker(
                         claimToken,
                         "On-device inference stopped",
                         automaticProcessingPreferences =
-                            automaticProcessingPreferences
+                            automaticProcessingPreferences,
+                        automaticActivity = automaticActivity
                     )
 
                 is PipelineService.ProcessingResult.Failure ->
@@ -409,9 +529,13 @@ class SmsParserWorker(
                             claimToken,
                             "On-device extraction failed",
                             automaticProcessingPreferences =
-                                automaticProcessingPreferences
+                                automaticProcessingPreferences,
+                            automaticActivity = automaticActivity
                         )
                     } else {
+                        automaticActivity?.error(
+                            "This alert could not be safely interpreted."
+                        )
                         val discarded = discardOwnedTerminalCandidate(
                             ingestionRepository = ingestionRepository,
                             candidateKey = candidate.candidateKey,
@@ -424,10 +548,15 @@ class SmsParserWorker(
                                 "This alert could not be safely interpreted."
                             )
                         } else {
-                            SmsNotificationHelper.cancelCandidateNotification(
-                                applicationContext,
-                                candidate.candidateKey
-                            )
+                            cancelStaleTerminalNotificationIfCandidateAbsent(
+                                ingestionRepository = ingestionRepository,
+                                candidateKey = candidate.candidateKey
+                            ) {
+                                SmsNotificationHelper.cancelCandidateNotification(
+                                    applicationContext,
+                                    candidate.candidateKey
+                                )
+                            }
                         }
                         Result.success()
                     }
@@ -450,13 +579,33 @@ class SmsParserWorker(
         error: String,
         automaticProcessingPreferences: AutomaticProcessingPreferences,
         retryMode: SmsCandidateRetryMode =
-            SmsCandidateRetryMode.BOUNDED_OPERATIONAL
+            SmsCandidateRetryMode.BOUNDED_OPERATIONAL,
+        automaticActivity: AutomaticSmsProcessingSession? = null
     ): Result {
         if (!hasRetryBudget(retryMode, runAttemptCount)) {
-            val discarded = discardOwnedTerminalCandidate(
-                ingestionRepository = ingestionRepository,
-                candidateKey = candidate.candidateKey,
-                claimToken = claimToken
+            automaticActivity?.error(
+                "Could not process this alert on device."
+            )
+            val discarded = withNotificationCleanupOnSettlementFailure(
+                settle = {
+                    discardOwnedTerminalCandidate(
+                        ingestionRepository = ingestionRepository,
+                        candidateKey = candidate.candidateKey,
+                        claimToken = claimToken
+                    )
+                },
+                cleanup = {
+                    cancelNotificationAfterRetrySettlementFailure(
+                        ingestionRepository = ingestionRepository,
+                        candidateKey = candidate.candidateKey,
+                        claimToken = claimToken
+                    ) {
+                        SmsNotificationHelper.cancelCandidateNotification(
+                            applicationContext,
+                            candidate.candidateKey
+                        )
+                    }
+                }
             )
             if (discarded) {
                 SmsNotificationHelper.showFailureNotification(
@@ -465,15 +614,28 @@ class SmsParserWorker(
                     "Could not process this alert on device."
                 )
             } else {
-                SmsNotificationHelper.cancelCandidateNotification(
-                    applicationContext,
-                    candidate.candidateKey
-                )
+                cancelStaleTerminalNotificationIfCandidateAbsent(
+                    ingestionRepository = ingestionRepository,
+                    candidateKey = candidate.candidateKey
+                ) {
+                    SmsNotificationHelper.cancelCandidateNotification(
+                        applicationContext,
+                        candidate.candidateKey
+                    )
+                }
             }
             return Result.success()
         }
 
-        return when (
+        automaticActivity?.retrying(
+            if (retryMode == SmsCandidateRetryMode.UNTIL_MODEL_PREPARED) {
+                "Waiting for the on-device model to be prepared."
+            } else {
+                "On-device processing will be retried."
+            }
+        )
+
+        val settlement = try {
             settleClaimedCandidateForRetry(
                 candidate = candidate,
                 claimToken = claimToken,
@@ -501,14 +663,47 @@ class SmsParserWorker(
                     }
                 }
             )
-        ) {
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (settlementFailure: Exception) {
+            automaticActivity?.error(
+                "Could not safely schedule the next processing attempt."
+            )
+            try {
+                withContext(NonCancellable) {
+                    cancelNotificationAfterRetrySettlementFailure(
+                        ingestionRepository = ingestionRepository,
+                        candidateKey = candidate.candidateKey,
+                        claimToken = claimToken
+                    ) {
+                        SmsNotificationHelper.cancelCandidateNotification(
+                            applicationContext,
+                            candidate.candidateKey
+                        )
+                    }
+                }
+            } catch (cleanupFailure: Throwable) {
+                settlementFailure.addSuppressed(cleanupFailure)
+            }
+            throw settlementFailure
+        }
+
+        return when (settlement) {
             SmsCandidateRetrySettlement.RELEASED_FOR_RETRY -> Result.retry()
 
             SmsCandidateRetrySettlement.FINISHED -> {
-                SmsNotificationHelper.cancelCandidateNotification(
-                    applicationContext,
-                    candidate.candidateKey
+                automaticActivity?.error(
+                    "Automatic processing is no longer scheduled for this alert."
                 )
+                cancelStaleTerminalNotificationIfCandidateAbsent(
+                    ingestionRepository = ingestionRepository,
+                    candidateKey = candidate.candidateKey
+                ) {
+                    SmsNotificationHelper.cancelCandidateNotification(
+                        applicationContext,
+                        candidate.candidateKey
+                    )
+                }
                 Result.success()
             }
         }
@@ -566,6 +761,7 @@ class SmsWorkSchedulerImpl @Inject internal constructor(
             if (!enabled) {
                 discardPendingAutomaticCandidatesAndNotifications(
                     context = context,
+                    admissionGate = admissionGate,
                     ingestionRepository = ingestionRepository
                 )
                 return@withConsistencyBoundary SmsScheduleResult.AUTOMATIC_DISABLED
@@ -590,6 +786,7 @@ class SmsWorkSchedulerImpl @Inject internal constructor(
             if (!enqueueCandidate(candidateKey)) {
                 discardPendingAutomaticCandidatesAndNotifications(
                     context = context,
+                    admissionGate = admissionGate,
                     ingestionRepository = ingestionRepository
                 )
                 return@withConsistencyBoundary SmsScheduleResult.ADMISSION_PAUSED
@@ -603,6 +800,7 @@ class SmsWorkSchedulerImpl @Inject internal constructor(
                 if (!enabled) {
                     discardPendingAutomaticCandidatesAndNotifications(
                         context = context,
+                        admissionGate = admissionGate,
                         ingestionRepository = ingestionRepository
                     )
                     emptyList()
@@ -620,6 +818,7 @@ class SmsWorkSchedulerImpl @Inject internal constructor(
                     if (!enabled) {
                         discardPendingAutomaticCandidatesAndNotifications(
                             context = context,
+                            admissionGate = admissionGate,
                             ingestionRepository = ingestionRepository
                         )
                         false
@@ -673,7 +872,9 @@ internal fun isOnboardingCompleteForSmsWork(
 ): Boolean = preferences.getBoolean("onboarding_completed", false)
 
 internal sealed interface SmsCandidateClaimDecision {
-    data object AutomaticDisabled : SmsCandidateClaimDecision
+    data class AutomaticDisabled(
+        val discardedCandidate: Boolean
+    ) : SmsCandidateClaimDecision
 
     data class Claimed(
         val candidate: QueuedSmsCandidate?
@@ -700,11 +901,13 @@ internal suspend fun claimSmsCandidateForRun(
             // OFF won before this invocation could establish a claim. Pending
             // evidence, or a same-WorkSpec claim left by process death, can be
             // removed without touching a replacement owner's claim.
-            ingestionRepository.discardAutomaticBeforeClaim(
+            val discardedCandidate = ingestionRepository.discardAutomaticBeforeClaim(
                 candidateKey = candidate.candidateKey,
                 claimToken = claimToken
             )
-            SmsCandidateClaimDecision.AutomaticDisabled
+            SmsCandidateClaimDecision.AutomaticDisabled(
+                discardedCandidate = discardedCandidate
+            )
         } else {
             SmsCandidateClaimDecision.Claimed(
                 ingestionRepository.claim(
@@ -716,6 +919,19 @@ internal suspend fun claimSmsCandidateForRun(
     }
 }
 
+internal fun SmsCandidateClaimDecision.AutomaticDisabled
+    .cancelDiscardedCandidateNotification(
+        context: Context,
+        candidateKey: String
+    ) {
+        if (discardedCandidate) {
+            SmsNotificationHelper.cancelCandidateNotification(
+                context = context,
+                candidateKey = candidateKey
+            )
+        }
+    }
+
 internal suspend fun discardOwnedTerminalCandidate(
     ingestionRepository: SmsIngestionRepository,
     candidateKey: String,
@@ -724,6 +940,107 @@ internal suspend fun discardOwnedTerminalCandidate(
     candidateKey = candidateKey,
     claimToken = claimToken
 )
+
+/** Posts terminal copy only when exact durable settlement still owned it. */
+internal suspend fun applyExactTerminalNotification(
+    settledOwnedClaim: Boolean,
+    onOwned: suspend () -> Unit,
+    onStale: suspend () -> Unit
+) {
+    if (settledOwnedClaim) {
+        onOwned()
+    } else {
+        onStale()
+    }
+}
+
+/**
+ * Candidate-key notifications are shared by successive claim tokens. A stale
+ * owner may cancel only after durable evidence is absent; any existing row can
+ * already belong to a replacement or pending retry whose notification must be
+ * preserved. Repository lookup failure therefore conservatively preserves it.
+ */
+internal suspend fun cancelStaleTerminalNotificationIfCandidateAbsent(
+    ingestionRepository: SmsIngestionRepository,
+    candidateKey: String,
+    cancel: () -> Unit
+): Boolean {
+    val currentCandidate = try {
+        ingestionRepository.get(candidateKey)
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (error: Exception) {
+        Log.w(
+            SmsParserWorker.TAG,
+            "Could not verify candidate notification ownership",
+            error
+        )
+        return false
+    }
+    if (currentCandidate != null) return false
+    cancel()
+    return true
+}
+
+/**
+ * A retry-settlement exception leaves the durable outcome uncertain. Cancel an
+ * old ongoing notification only when the row vanished or still carries this
+ * exact claim. A different claim and an unclaimed pending row can already be a
+ * successor, so both are preserved. Lookup failure is likewise conservative.
+ */
+internal suspend fun cancelNotificationAfterRetrySettlementFailure(
+    ingestionRepository: SmsIngestionRepository,
+    candidateKey: String,
+    claimToken: String,
+    cancel: () -> Unit
+): Boolean {
+    val currentCandidate = try {
+        ingestionRepository.get(candidateKey)
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (error: Exception) {
+        Log.w(
+            SmsParserWorker.TAG,
+            "Could not verify candidate notification ownership",
+            error
+        )
+        return false
+    }
+    if (
+        currentCandidate != null &&
+        currentCandidate.claimToken != claimToken
+    ) {
+        return false
+    }
+    cancel()
+    return true
+}
+
+/**
+ * Settlement failures must not strand an ongoing notification. Cleanup runs
+ * outside cancellation, while the original settlement failure remains the
+ * observable error and any cleanup failure is retained only as suppressed.
+ */
+internal suspend fun <T> withNotificationCleanupOnSettlementFailure(
+    settle: suspend () -> T,
+    cleanup: suspend () -> Unit
+): T = try {
+    settle()
+} catch (settlementFailure: Throwable) {
+    try {
+        withContext(NonCancellable) {
+            cleanup()
+        }
+    } catch (cleanupFailure: Throwable) {
+        settlementFailure.addSuppressed(cleanupFailure)
+    }
+    throw settlementFailure
+}
+
+/** Process-death recovery for work whose durable evidence is already gone. */
+internal fun cancelMissingCandidateNotification(cancel: () -> Unit) {
+    cancel()
+}
 
 internal enum class SmsCandidateRetryMode {
     BOUNDED_OPERATIONAL,

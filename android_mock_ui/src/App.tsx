@@ -136,7 +136,7 @@ export default function App() {
   const [currentStageIndex, setCurrentStageIndex] = useState<number | null>(null);
 
   // Interactive toggle states for Settings
-  const [autoSync, setAutoSync] = useState(true);
+  const [autoSync, setAutoSync] = useState(false);
   const [developerLogs, setDeveloperLogs] = useState(false);
 
   // Navigation states

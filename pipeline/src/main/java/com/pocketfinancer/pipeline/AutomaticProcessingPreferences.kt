@@ -19,9 +19,9 @@ import kotlinx.coroutines.withContext
  * This class owns preference persistence, observation, and the process-wide
  * consistency boundary shared by intake and WorkManager claims.
  * [AutomaticSmsOperationGate] ensures only one automatic candidate can reach
- * this claim boundary at a time. Disabling therefore prevents new or pending
- * automatic work while that one operation finishes; manual scans remain
- * available.
+ * this claim boundary at a time. Disabling therefore prevents new admission,
+ * discards pending automatic work, and lets a claimed operation finish;
+ * manual scans remain available.
  */
 @Singleton
 class AutomaticProcessingPreferences @Inject constructor(
@@ -92,6 +92,6 @@ class AutomaticProcessingPreferences @Inject constructor(
     companion object {
         const val PREFERENCES_NAME = ".app_settings"
         const val KEY_ENABLED = "process_incoming_sms"
-        const val DEFAULT_ENABLED = true
+        const val DEFAULT_ENABLED = false
     }
 }

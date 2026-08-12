@@ -56,9 +56,9 @@ interface SmsWorkController {
 
     /**
      * Applies the automatic-processing consistency boundary without cancelling
-     * the one running worker. Pending automatic candidates are deleted
-     * atomically; the single claimed candidate has already snapshotted ON and
-     * finishes normally.
+     * the one running worker. Pending candidates and their candidate-scoped
+     * WorkManager requests are discarded atomically; the single claimed
+     * candidate has already snapshotted ON and finishes normally.
      *
      * @return number of encrypted pending candidates removed.
      */
@@ -152,6 +152,7 @@ class WorkManagerSmsWorkController @Inject internal constructor(
     override suspend fun discardPendingAutomaticWork(): Int =
         discardPendingAutomaticCandidatesAndNotifications(
             context = context,
+            admissionGate = admissionGate,
             ingestionRepository = ingestionRepository
         )
 
@@ -209,15 +210,42 @@ class WorkManagerSmsWorkController @Inject internal constructor(
 
 internal suspend fun discardPendingAutomaticCandidatesAndNotifications(
     context: Context,
+    admissionGate: SmsWorkAdmissionGate,
     ingestionRepository: SmsIngestionRepository
-): Int {
-    val pending = ingestionRepository.pendingAutomaticCandidates()
-    val removed = ingestionRepository.discardPendingAutomatic()
-    pending.forEach { candidate ->
-        SmsNotificationHelper.cancelCandidateNotification(
-            context = context,
-            candidateKey = candidate.candidateKey
-        )
+): Int = withContext(NonCancellable) {
+    val gatePause = admissionGate.pause()
+    try {
+        // An admitted enqueue can still be committing after enqueueUniqueWork
+        // returns. Wait for those submissions before cancelling by unique name
+        // so no late KEEP shell survives the OFF boundary.
+        gatePause.admittedEnqueues.forEach { operation -> operation.await() }
+
+        val pending = ingestionRepository.pendingAutomaticCandidates()
+        val workManager = WorkManager.getInstance(context)
+
+        // Finish cancellation before deleting the durable rows. This prevents
+        // a stale unfinished KEEP chain from suppressing a later opt-in
+        // admission of the same source identity. Claimed rows are excluded by
+        // the repository query, so the operation that already snapshotted ON
+        // is never cancelled.
+        pending.forEach { candidate ->
+            workManager.cancelUniqueWork(
+                SmsParserWorker.uniqueWorkName(candidate.candidateKey)
+            ).await()
+        }
+
+        // Cancel notifications while their durable candidate identities still
+        // exist. If the process dies here, startup can discover the retained
+        // rows and retry cleanup instead of leaving an orphaned notification.
+        pending.forEach { candidate ->
+            SmsNotificationHelper.cancelCandidateNotification(
+                context = context,
+                candidateKey = candidate.candidateKey
+            )
+        }
+        val removed = ingestionRepository.discardPendingAutomatic()
+        removed
+    } finally {
+        gatePause.release()
     }
-    return removed
 }

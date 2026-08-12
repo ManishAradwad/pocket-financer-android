@@ -84,6 +84,7 @@ class SmsWorkSchedulerImplTest {
                 any<OneTimeWorkRequest>()
             )
         } returns enqueueOperation
+        every { workManager.cancelUniqueWork(any()) } returns completedOperation()
         coEvery {
             ingestionRepository.admit(any())
         } returns SmsIngestionRepository.AdmissionResult.Admitted(
@@ -167,16 +168,38 @@ class SmsWorkSchedulerImplTest {
         }
 
     @Test
-    fun `disabled intake cancels notifications for pending candidates it deletes`() =
+    fun `disabled intake cancels work and notification before deleting evidence`() =
         runTest {
             enabled.value = false
             val pending = pendingCandidate()
+            var workCancellationRequested = false
+            var notificationCancelled = false
             coEvery {
                 ingestionRepository.pendingAutomaticCandidates()
             } returns listOf(pending)
+            every {
+                workManager.cancelUniqueWork(
+                    SmsParserWorker.uniqueWorkName(pending.candidateKey)
+                )
+            } answers {
+                workCancellationRequested = true
+                completedOperation()
+            }
+            every {
+                SmsNotificationHelper.cancelCandidateNotification(
+                    context,
+                    pending.candidateKey
+                )
+            } answers {
+                notificationCancelled = true
+            }
             coEvery {
                 ingestionRepository.discardPendingAutomatic()
-            } returns 1
+            } coAnswers {
+                assertTrue(workCancellationRequested)
+                assertTrue(notificationCancelled)
+                1
+            }
             val scheduler = SmsWorkSchedulerImpl(
                 context,
                 SmsWorkAdmissionGate(),
@@ -190,10 +213,108 @@ class SmsWorkSchedulerImplTest {
             )
 
             verify(exactly = 1) {
+                workManager.cancelUniqueWork(
+                    SmsParserWorker.uniqueWorkName(pending.candidateKey)
+                )
+            }
+            verify(exactly = 0) {
+                workManager.cancelUniqueWork(
+                    SmsParserWorker.uniqueWorkName("claimed-operation")
+                )
+            }
+            verify(exactly = 0) {
+                workManager.cancelAllWorkByTag(SmsParserWorker.WORK_TAG)
+            }
+            verify(exactly = 1) {
                 SmsNotificationHelper.cancelCandidateNotification(
                     context,
                     pending.candidateKey
                 )
+            }
+        }
+
+    @Test
+    @OptIn(ExperimentalCoroutinesApi::class)
+    fun `disabled cleanup waits for admitted enqueue before deleting pending evidence`() =
+        runTest {
+            enabled.value = false
+            val inFlightFuture = TestListenableFuture<Operation.State.SUCCESS>()
+            val inFlightOperation = mockk<Operation> {
+                every { result } returns inFlightFuture
+            }
+            val gate = SmsWorkAdmissionGate()
+            assertTrue(gate.enqueueIfOpen { inFlightOperation })
+            val scheduler = SmsWorkSchedulerImpl(
+                context,
+                gate,
+                ingestionRepository,
+                automaticPreferences
+            )
+
+            val cleanup = launch {
+                scheduler.scheduleSmsParsing(transactionSms())
+            }
+            runCurrent()
+
+            coVerify(exactly = 0) {
+                ingestionRepository.discardPendingAutomatic()
+            }
+
+            inFlightFuture.complete(Operation.SUCCESS)
+            cleanup.join()
+
+            coVerify(exactly = 1) {
+                ingestionRepository.discardPendingAutomatic()
+            }
+        }
+
+    @Test
+    @OptIn(ExperimentalCoroutinesApi::class)
+    fun `disabled cleanup waits for candidate cancellation before deleting evidence`() =
+        runTest {
+            enabled.value = false
+            val pending = pendingCandidate()
+            val cancellationFuture = TestListenableFuture<Operation.State.SUCCESS>()
+            val cancellationOperation = mockk<Operation> {
+                every { result } returns cancellationFuture
+            }
+            coEvery {
+                ingestionRepository.pendingAutomaticCandidates()
+            } returns listOf(pending)
+            coEvery {
+                ingestionRepository.discardPendingAutomatic()
+            } returns 1
+            every {
+                workManager.cancelUniqueWork(
+                    SmsParserWorker.uniqueWorkName(pending.candidateKey)
+                )
+            } returns cancellationOperation
+            val scheduler = SmsWorkSchedulerImpl(
+                context,
+                SmsWorkAdmissionGate(),
+                ingestionRepository,
+                automaticPreferences
+            )
+
+            val cleanup = launch {
+                scheduler.scheduleSmsParsing(transactionSms())
+            }
+            runCurrent()
+
+            verify(exactly = 1) {
+                workManager.cancelUniqueWork(
+                    SmsParserWorker.uniqueWorkName(pending.candidateKey)
+                )
+            }
+            coVerify(exactly = 0) {
+                ingestionRepository.discardPendingAutomatic()
+            }
+
+            cancellationFuture.complete(Operation.SUCCESS)
+            cleanup.join()
+
+            coVerify(exactly = 1) {
+                ingestionRepository.discardPendingAutomatic()
             }
         }
 
@@ -405,6 +526,173 @@ class SmsWorkSchedulerImplTest {
 
 class SmsParserWorkerPolicyTest {
     @Test
+    fun `stale terminal settlement neither posts nor cancels a successor`() =
+        runTest {
+            val ingestionRepository = mockk<SmsIngestionRepository>()
+            coEvery { ingestionRepository.get("opaque-key") } returns
+                queuedCandidate(SmsCandidateOrigin.AUTOMATIC).copy(
+                    claimToken = null
+                )
+            var skippedPosted = false
+            var notificationCancelled = false
+
+            applyExactTerminalNotification(
+                settledOwnedClaim = false,
+                onOwned = { skippedPosted = true },
+                onStale = {
+                    cancelStaleTerminalNotificationIfCandidateAbsent(
+                        ingestionRepository = ingestionRepository,
+                        candidateKey = "opaque-key"
+                    ) {
+                        notificationCancelled = true
+                    }
+                }
+            )
+
+            assertFalse(skippedPosted)
+            assertFalse(notificationCancelled)
+        }
+
+    @Test
+    fun `terminal stale cleanup cancels only after the row is absent`() =
+        runTest {
+            val ingestionRepository = mockk<SmsIngestionRepository>()
+            var notificationCancelled = false
+            coEvery { ingestionRepository.get("opaque-key") } returns
+                queuedCandidate(SmsCandidateOrigin.AUTOMATIC).copy(
+                    claimToken = "same-owner"
+                )
+
+            assertFalse(
+                cancelStaleTerminalNotificationIfCandidateAbsent(
+                    ingestionRepository = ingestionRepository,
+                    candidateKey = "opaque-key"
+                ) {
+                    notificationCancelled = true
+                }
+            )
+            assertFalse(notificationCancelled)
+
+            coEvery { ingestionRepository.get("opaque-key") } returns null
+            assertTrue(
+                cancelStaleTerminalNotificationIfCandidateAbsent(
+                    ingestionRepository = ingestionRepository,
+                    candidateKey = "opaque-key"
+                ) {
+                    notificationCancelled = true
+                }
+            )
+            assertTrue(notificationCancelled)
+        }
+
+    @Test
+    fun `retry settlement failure cleanup cancels a still-owned notification`() =
+        runTest {
+            val ingestionRepository = mockk<SmsIngestionRepository>()
+            coEvery { ingestionRepository.get("opaque-key") } returns
+                queuedCandidate(SmsCandidateOrigin.AUTOMATIC).copy(
+                    claimToken = "same-owner"
+                )
+            var notificationCancelled = false
+
+            assertTrue(
+                cancelNotificationAfterRetrySettlementFailure(
+                    ingestionRepository = ingestionRepository,
+                    candidateKey = "opaque-key",
+                    claimToken = "same-owner"
+                ) {
+                    notificationCancelled = true
+                }
+            )
+            assertTrue(notificationCancelled)
+
+            notificationCancelled = false
+            coEvery { ingestionRepository.get("opaque-key") } returns null
+            assertTrue(
+                cancelNotificationAfterRetrySettlementFailure(
+                    ingestionRepository = ingestionRepository,
+                    candidateKey = "opaque-key",
+                    claimToken = "same-owner"
+                ) {
+                    notificationCancelled = true
+                }
+            )
+            assertTrue(notificationCancelled)
+        }
+
+    @Test
+    fun `retry settlement failure cleanup preserves ambiguous and replacement rows`() =
+        runTest {
+            val ingestionRepository = mockk<SmsIngestionRepository>()
+            var notificationCancelled = false
+            coEvery { ingestionRepository.get("opaque-key") } returns
+                queuedCandidate(SmsCandidateOrigin.AUTOMATIC).copy(
+                    claimToken = null
+                )
+
+            assertFalse(
+                cancelNotificationAfterRetrySettlementFailure(
+                    ingestionRepository = ingestionRepository,
+                    candidateKey = "opaque-key",
+                    claimToken = "stale-owner"
+                ) {
+                    notificationCancelled = true
+                }
+            )
+
+            coEvery { ingestionRepository.get("opaque-key") } returns
+                queuedCandidate(SmsCandidateOrigin.AUTOMATIC).copy(
+                    claimToken = "replacement-owner"
+                )
+            assertFalse(
+                cancelNotificationAfterRetrySettlementFailure(
+                    ingestionRepository = ingestionRepository,
+                    candidateKey = "opaque-key",
+                    claimToken = "stale-owner"
+                ) {
+                    notificationCancelled = true
+                }
+            )
+            assertFalse(notificationCancelled)
+        }
+
+    @Test
+    fun `exhausted retry cleanup preserves the settlement failure`() =
+        runTest {
+            val settlementFailure = IllegalStateException("discard failed")
+            val cleanupFailure = IllegalArgumentException("cancel failed")
+            var cleanupRan = false
+
+            val thrown = assertFailsWith<IllegalStateException> {
+                withNotificationCleanupOnSettlementFailure(
+                    settle = { throw settlementFailure },
+                    cleanup = {
+                        cleanupRan = true
+                        throw cleanupFailure
+                    }
+                )
+            }
+
+            assertTrue(cleanupRan)
+            assertSame(settlementFailure, thrown)
+            val suppressed = assertIs<IllegalArgumentException>(
+                thrown.suppressed.single()
+            )
+            assertEquals("cancel failed", suppressed.message)
+        }
+
+    @Test
+    fun `missing candidate recovery cancels a possibly ongoing notification`() {
+        var notificationCancelled = false
+
+        cancelMissingCandidateNotification {
+            notificationCancelled = true
+        }
+
+        assertTrue(notificationCancelled)
+    }
+
+    @Test
     fun `automatic OFF that wins the boundary prevents claim`() =
         runTest {
             val ingestionRepository = mockk<SmsIngestionRepository>()
@@ -424,7 +712,7 @@ class SmsParserWorkerPolicyTest {
                 )
             } returns true
 
-            assertIs<SmsCandidateClaimDecision.AutomaticDisabled>(
+            val decision = assertIs<SmsCandidateClaimDecision.AutomaticDisabled>(
                 claimSmsCandidateForRun(
                     candidate = queuedCandidate(SmsCandidateOrigin.AUTOMATIC),
                     claimToken = "work-id",
@@ -432,6 +720,7 @@ class SmsParserWorkerPolicyTest {
                     ingestionRepository = ingestionRepository
                 )
             )
+            assertTrue(decision.discardedCandidate)
             coVerify(exactly = 0) { ingestionRepository.claim(any(), any()) }
             coVerify(exactly = 1) {
                 ingestionRepository.discardAutomaticBeforeClaim(
@@ -440,6 +729,39 @@ class SmsParserWorkerPolicyTest {
                 )
             }
         }
+
+    @Test
+    fun `OFF recovery cancels notification only after discarding its candidate`() {
+        val context = mockk<Context>()
+        mockkObject(SmsNotificationHelper)
+        every {
+            SmsNotificationHelper.cancelCandidateNotification(context, "opaque-key")
+        } returns Unit
+
+        try {
+            SmsCandidateClaimDecision.AutomaticDisabled(
+                discardedCandidate = true
+            ).cancelDiscardedCandidateNotification(
+                context = context,
+                candidateKey = "opaque-key"
+            )
+            SmsCandidateClaimDecision.AutomaticDisabled(
+                discardedCandidate = false
+            ).cancelDiscardedCandidateNotification(
+                context = context,
+                candidateKey = "opaque-key"
+            )
+
+            verify(exactly = 1) {
+                SmsNotificationHelper.cancelCandidateNotification(
+                    context,
+                    "opaque-key"
+                )
+            }
+        } finally {
+            unmockkObject(SmsNotificationHelper)
+        }
+    }
 
     @Test
     fun `automatic claim that wins boundary is not deleted by later OFF`() =

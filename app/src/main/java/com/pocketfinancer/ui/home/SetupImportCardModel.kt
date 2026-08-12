@@ -4,6 +4,7 @@ import com.pocketfinancer.setup.SetupEmptyReason
 import com.pocketfinancer.setup.SetupImportState
 import com.pocketfinancer.setup.SetupImportStatus
 import com.pocketfinancer.setup.SetupPauseReason
+import com.pocketfinancer.pipeline.AutomaticProcessingPreferences
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -25,16 +26,14 @@ internal enum class SetupCardAction {
     RESTORE_PERMISSION,
     SCAN_OLDER,
     SCAN_RECENT,
-    RETRY_RECENT_SYNC,
-    STOP_SMS_PROCESSING
+    RETRY_RECENT_SYNC
 }
 
 internal enum class SetupCardActionTarget {
     START_SETUP,
     SCAN_OLDER,
     RETRY_RECENT_SYNC,
-    RESTORE_PERMISSION,
-    STOP_SMS_PROCESSING
+    RESTORE_PERMISSION
 }
 
 internal fun SetupCardAction.target(): SetupCardActionTarget = when (this) {
@@ -46,8 +45,6 @@ internal fun SetupCardAction.target(): SetupCardActionTarget = when (this) {
         SetupCardActionTarget.RETRY_RECENT_SYNC
     SetupCardAction.RESTORE_PERMISSION ->
         SetupCardActionTarget.RESTORE_PERMISSION
-    SetupCardAction.STOP_SMS_PROCESSING ->
-        SetupCardActionTarget.STOP_SMS_PROCESSING
 }
 
 internal fun manualRecentSyncAvailable(
@@ -57,12 +54,11 @@ internal fun manualRecentSyncAvailable(
 
 internal fun setupImportCardModel(
     state: SetupImportState,
-    automaticProcessingEnabled: Boolean = true,
+    automaticProcessingEnabled: Boolean =
+        AutomaticProcessingPreferences.DEFAULT_ENABLED,
     isCancelling: Boolean = false,
-    canStopSmsProcessing: Boolean = false,
     isFinishing: Boolean = false,
     isPreparingModel: Boolean = false,
-    manualSmsOperationRunning: Boolean = false,
     modelUpgradeRunning: Boolean = false,
     nowMillis: Long = System.currentTimeMillis()
 ): SetupImportCardModel {
@@ -100,22 +96,6 @@ internal fun setupImportCardModel(
                     "results and coverage are being finalized. Completed " +
                     "saves remain on this device."
             },
-            showProgress = true
-        )
-    }
-    if (
-        manualSmsOperationRunning &&
-        !state.isActive &&
-        state.status != SetupImportStatus.PERMISSION_NEEDED &&
-        !isCancelling &&
-        !canStopSmsProcessing
-    ) {
-        return SetupImportCardModel(
-            eyebrow = "RECENT SMS ACTIVITY",
-            title = "Recent SMS processing is active",
-            body =
-                "Wait for the current recent SMS operation to finish before " +
-                    "starting another history scan.",
             showProgress = true
         )
     }
@@ -252,7 +232,6 @@ internal fun setupImportCardModel(
         title = when {
             isCancelling -> "Stopping SMS processing"
             isFinishing -> "Finishing SMS processing"
-            canStopSmsProcessing -> "Stop active SMS processing"
             else -> "Restore SMS access"
         },
         body = when {
@@ -260,19 +239,15 @@ internal fun setupImportCardModel(
                 "SMS access is off. Stopping the active on-device operation safely; completed saves remain available."
             isFinishing ->
                 "SMS access is off. A save that already crossed the persistence boundary is finishing; completed saves remain available."
-            canStopSmsProcessing ->
-                "SMS access is off, but an already-read batch is still active. Stop it safely; completed saves remain available."
             else ->
                 "Pocket Financer cannot scan or capture alerts while SMS access is off. Existing encrypted transactions stay available."
         },
         primaryAction = when {
             isCancelling || isFinishing -> null
-            canStopSmsProcessing -> SetupCardAction.STOP_SMS_PROCESSING
             else -> SetupCardAction.RESTORE_PERMISSION
         },
         primaryLabel = when {
             isCancelling || isFinishing -> null
-            canStopSmsProcessing -> "Stop SMS processing"
             else -> "Restore access"
         },
         showProgress = isCancelling || isFinishing
@@ -318,12 +293,6 @@ internal fun setupImportCardModel(
         // successful provider read until this query commits. Showing them as
         // evidence for the active window would be misleading.
         evidence = null,
-        primaryAction = SetupCardAction.STOP_SMS_PROCESSING.takeIf {
-            canStopSmsProcessing && !isCancelling && !isFinishing
-        },
-        primaryLabel = "Stop SMS processing".takeIf {
-            canStopSmsProcessing && !isCancelling && !isFinishing
-        },
         showProgress = true
     )
 
@@ -350,12 +319,6 @@ internal fun setupImportCardModel(
             "${state.processedCount} of ${state.eligibleCandidateCount} checked · " +
                 "${state.savedCount} saved · ${state.rejectedCount} rejected" +
                 if (state.failedCount > 0) " · ${state.failedCount} failed" else "",
-        primaryAction = SetupCardAction.STOP_SMS_PROCESSING.takeIf {
-            canStopSmsProcessing && !isCancelling && !isFinishing
-        },
-        primaryLabel = "Stop SMS processing".takeIf {
-            canStopSmsProcessing && !isCancelling && !isFinishing
-        },
         showProgress = true
     )
 
@@ -388,7 +351,7 @@ internal fun setupImportCardModel(
         eyebrow = if (automaticProcessingEnabled) {
             "READY FOR THE NEXT ALERT"
         } else {
-            "READY · AUTOMATIC UPDATES OFF"
+            "READY · AUTOMATIC SMS PROCESSING OFF"
         },
         title = when (state.emptyReason) {
             SetupEmptyReason.EMPTY_INBOX ->
@@ -412,7 +375,8 @@ internal fun setupImportCardModel(
             } else {
                 append(
                     " Pocket Financer will not process new alerts " +
-                        "automatically. Run a manual scan or turn updates back on."
+                        "automatically. Run a manual scan or turn automatic " +
+                        "SMS processing on."
                 )
             }
         },
@@ -439,16 +403,6 @@ internal fun setupImportCardModel(
                     "finishing. Completed saves remain on this device.",
             evidence = scanEvidence(state),
             showProgress = true
-        )
-        canStopSmsProcessing -> SetupImportCardModel(
-            eyebrow = "SMS PROCESSING ACTIVE",
-            title = "Stop active SMS processing",
-            body =
-                "Permission was restored while an already-read batch was " +
-                    "still active. Stop it safely before resuming setup.",
-            evidence = scanEvidence(state),
-            primaryAction = SetupCardAction.STOP_SMS_PROCESSING,
-            primaryLabel = "Stop SMS processing"
         )
         else -> SetupImportCardModel(
             eyebrow = "SETUP PAUSED",

@@ -30,6 +30,7 @@ import com.pocketfinancer.setup.SetupImportStatus
 import com.pocketfinancer.setup.SetupImportStore
 import com.pocketfinancer.sms.SmsRepository
 import com.pocketfinancer.sms.SmsReader
+import com.pocketfinancer.ui.smsprocessing.SmsProcessingTarget
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
@@ -67,6 +68,101 @@ class ManualSyncCancellationTest {
         assertFalse(manualSyncStopMatches("current-run", null))
         assertFalse(manualSyncStopMatches(null, "current-run"))
         assertFalse(manualSyncStopMatches("", ""))
+    }
+
+    @Test
+    fun `rejected exact stop reports that no other processing was stopped`() {
+        assertEquals(
+            "Stop wasn't applied because this processing step is no longer active. " +
+                "No other SMS processing was stopped.",
+            manualSyncStopRejectionMessage(
+                requiresCandidateMatch = true,
+                stopAccepted = false
+            )
+        )
+        assertNull(
+            manualSyncStopRejectionMessage(
+                requiresCandidateMatch = true,
+                stopAccepted = true
+            )
+        )
+        assertNull(
+            manualSyncStopRejectionMessage(
+                requiresCandidateMatch = false,
+                stopAccepted = false
+            )
+        )
+    }
+
+    @Test
+    fun `pre-dispatch stale candidate and gap use target-neutral rejection feedback`() {
+        val active = HomeSyncState(
+            status = HomeSyncState.Status.SYNCING,
+            activeRunId = "manual-run",
+            queue = listOf(
+                SyncSmsItem(
+                    id = "candidate-a",
+                    sender = "Bank A",
+                    body = "First SMS",
+                    date = 1L,
+                    status = "synced"
+                ),
+                SyncSmsItem(
+                    id = "candidate-b",
+                    sender = "Bank B",
+                    body = "Second SMS",
+                    date = 2L,
+                    status = "syncing"
+                )
+            ),
+            currentIndex = 1
+        )
+        val rejection =
+            "Stop wasn't applied because this processing step is no longer active. " +
+                "No other SMS processing was stopped."
+
+        assertEquals(
+            rejection,
+            manualSyncPreDispatchRejectionMessage(
+                state = active,
+                target = SmsProcessingTarget.ManualRecent(
+                    runId = "manual-run",
+                    candidateKey = "candidate-a"
+                )
+            )
+        )
+        assertEquals(
+            rejection,
+            manualSyncPreDispatchRejectionMessage(
+                state = active,
+                target = SmsProcessingTarget.ManualRecent(
+                    runId = "manual-run",
+                    candidateKey = null
+                )
+            )
+        )
+        assertNull(
+            manualSyncPreDispatchRejectionMessage(
+                state = active,
+                target = SmsProcessingTarget.ManualRecent(
+                    runId = "manual-run",
+                    candidateKey = "candidate-b"
+                )
+            )
+        )
+        assertNull(
+            manualSyncPreDispatchRejectionMessage(
+                state = active.copy(
+                    status = HomeSyncState.Status.SCANNING,
+                    queue = emptyList(),
+                    currentIndex = null
+                ),
+                target = SmsProcessingTarget.ManualRecent(
+                    runId = "manual-run",
+                    candidateKey = null
+                )
+            )
+        )
     }
 
     @Test
@@ -290,7 +386,20 @@ class ManualSyncCancellationTest {
             }
 
             withTimeout(5_000) { extractionStarted.await() }
-            assertTrue(fixture.manager.requestServiceStop(runId))
+            val renderedCandidateKey =
+                fixture.manager.syncState.value.queue.single().id
+            assertFalse(
+                fixture.manager.requestServiceStop(
+                    runId = runId,
+                    expectedCandidateKey = "stale-candidate"
+                )
+            )
+            assertTrue(
+                fixture.manager.requestServiceStop(
+                    runId = runId,
+                    expectedCandidateKey = renderedCandidateKey
+                )
+            )
             assertEquals(
                 HomeSyncState.Status.CANCELLING,
                 fixture.manager.syncState.value.status
@@ -563,6 +672,30 @@ class ManualSyncCancellationTest {
                 }
             )
             flow.release()
+        } finally {
+            fixture.modelDirectory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `candidate scoped stop distinguishes a rendered scan gap`() = runBlocking {
+        val fixture = cancellationFixture()
+        try {
+            val runId = "scan-gap-run"
+            assertTrue(fixture.manager.beginServiceRun(runId))
+
+            assertFalse(
+                fixture.manager.requestServiceStop(
+                    runId = runId,
+                    expectedCandidateKey = "candidate-not-yet-visible"
+                )
+            )
+            assertTrue(
+                fixture.manager.requestServiceStop(
+                    runId = runId,
+                    expectedCandidateKey = null
+                )
+            )
         } finally {
             fixture.modelDirectory.deleteRecursively()
         }
