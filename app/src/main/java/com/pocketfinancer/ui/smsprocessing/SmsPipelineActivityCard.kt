@@ -58,9 +58,9 @@ import com.pocketfinancer.ui.theme.M3_SurfaceContainerLowest
 import com.pocketfinancer.ui.theme.PocketFinancerTheme
 
 /**
- * Shared lightweight monitor for every user-initiated SMS processing path.
- * The card is intentionally not clickable: Inspect and Stop are independent,
- * accessible controls and both return the exact target rendered by this card.
+ * Shared lightweight monitor for every visible SMS processing path. The card
+ * is intentionally not clickable: optional Inspect and Stop controls are
+ * independent, accessible actions and return the exact rendered target.
  */
 @Composable
 fun SmsPipelineActivityCard(

@@ -67,6 +67,45 @@ class SmsProcessingComposeUiTest {
     }
 
     @Test
+    fun automaticActivityCard_isInspectOnlyAndKeepsUnknownSenderEvidence() {
+        val target = SmsProcessingTarget.Automatic(
+            claimToken = "automatic-claim",
+            candidateKey = "automatic-candidate"
+        )
+        val body = "Account ending 6254 was debited."
+        val inspected = mutableListOf<SmsProcessingTarget>()
+        val stopped = mutableListOf<SmsProcessingTarget>()
+
+        composeRule.setContent {
+            PocketFinancerTheme {
+                SmsPipelineActivityCard(
+                    model = activeCardModel(
+                        target = target,
+                        stopState = SmsStopUiState.HIDDEN,
+                        source = SmsSourcePreview.Message("", body)
+                    ),
+                    onInspect = inspected::add,
+                    onStop = stopped::add
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("Unknown sender").assertExists()
+        composeRule.onNodeWithText(body).assertExists()
+        composeRule.onNode(
+            hasText("Inspect") and hasClickAction()
+        ).performClick()
+        composeRule.onNode(
+            hasText("Stop") and hasClickAction()
+        ).assertDoesNotExist()
+
+        composeRule.runOnIdle {
+            assertEquals(listOf(target), inspected)
+            assertTrue(stopped.isEmpty())
+        }
+    }
+
+    @Test
     fun activityCard_stoppingAndCommitControls_areDisabled() {
         val stopRequests = mutableListOf<SmsProcessingTarget>()
         val model = mutableStateOf(
@@ -240,6 +279,30 @@ class SmsProcessingComposeUiTest {
 
         composeRule.onNodeWithText("Unknown sender").assertExists()
         composeRule.onNodeWithText(body).assertExists()
+    }
+
+    @Test
+    fun automaticTelemetryViewer_hasNoStopControl() {
+        val target = SmsProcessingTarget.Automatic(
+            claimToken = "automatic-sheet-claim",
+            candidateKey = "automatic-sheet-candidate"
+        )
+        composeRule.setContent {
+            PocketFinancerTheme {
+                TelemetryLogsViewer(
+                    model = candidateTelemetryModel(
+                        target = target,
+                        sender = "VK-BANK",
+                        body = "INR 1,234.00 spent locally"
+                    ).copy(stopState = SmsStopUiState.HIDDEN),
+                    onStop = { error("automatic telemetry must not dispatch stop") },
+                    onClose = {}
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("Stop SMS processing").assertDoesNotExist()
+        composeRule.onNodeWithText("VK-BANK").assertExists()
     }
 
     @Test

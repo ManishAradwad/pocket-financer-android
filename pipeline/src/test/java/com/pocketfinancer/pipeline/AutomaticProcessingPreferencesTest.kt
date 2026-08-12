@@ -13,6 +13,8 @@ import io.mockk.mockk
 import org.junit.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -82,6 +84,36 @@ class AutomaticProcessingPreferencesTest {
             assertTrue(claimFinished)
             assertTrue(cleanupStarted)
             assertFalse(fixture.preferences.enabled.value)
+        }
+
+    @Test
+    fun `OFF after an exact claim leaves activity visible until claim finishes`() =
+        runTest {
+            val fixture = Fixture(storedValue = true)
+            val store = AutomaticSmsProcessingActivityStore()
+            val activityStarted = CompletableDeferred<Unit>()
+            val allowClaimToFinish = CompletableDeferred<Unit>()
+
+            val claimed = launch {
+                withAutomaticSmsProcessingActivity(
+                    candidate = automaticCandidate(),
+                    claimToken = "work-id",
+                    store = store
+                ) { activity ->
+                    assertNotNull(activity)
+                    activityStarted.complete(Unit)
+                    allowClaimToFinish.await()
+                }
+            }
+            activityStarted.await()
+
+            fixture.preferences.disableAndCleanupPending { 0 }
+
+            assertFalse(fixture.preferences.enabled.value)
+            assertEquals("work-id", store.activity.value?.owner?.claimToken)
+            allowClaimToFinish.complete(Unit)
+            claimed.join()
+            assertNull(store.activity.value)
         }
 
     @Test

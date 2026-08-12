@@ -1049,6 +1049,7 @@ fun TransactionsScreen(
         val processingTarget = selectedProcessingTarget
         when (processingTarget) {
             null -> Unit
+            is SmsProcessingTarget.Automatic,
             is SmsProcessingTarget.Historical -> {
                 LaunchedEffect(processingTarget) {
                     selectedProcessingTarget = null
@@ -1087,6 +1088,7 @@ private fun TransactionsManualTelemetrySheet(
     val currentState = syncState ?: return
 
     val targetIsCurrent = when (requestedTarget) {
+        is SmsProcessingTarget.Automatic -> false
         is SmsProcessingTarget.ManualRecent ->
             currentState.ownsManualProcessingTarget(requestedTarget)
         is SmsProcessingTarget.ManualResult ->
@@ -1106,6 +1108,7 @@ private fun TransactionsManualTelemetrySheet(
     if (!targetIsCurrent) return
 
     val candidate = when (requestedTarget) {
+        is SmsProcessingTarget.Automatic -> null
         is SmsProcessingTarget.ManualRecent ->
             currentState.activeSmsPipelineItem()?.takeIf {
                 it.id == requestedTarget.candidateKey

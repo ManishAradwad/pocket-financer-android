@@ -131,7 +131,7 @@ class HistoricalSmsHomePresentationTest {
         val owner = TestLifecycleOwner()
         var displayed: HistoricalSmsProcessingActivity? = null
         val collection = backgroundScope.launch(dispatcher) {
-            collectHistoricalSmsWhileStarted(
+            collectNullableStateWhileStarted(
                 lifecycle = owner.lifecycle,
                 source = source,
                 publish = { displayed = it }

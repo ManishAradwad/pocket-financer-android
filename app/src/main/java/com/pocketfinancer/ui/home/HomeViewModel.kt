@@ -18,6 +18,8 @@ import com.pocketfinancer.pipeline.PromptBuilder
 import com.pocketfinancer.pipeline.PipelineService
 import com.pocketfinancer.pipeline.ExtractionParser
 import com.pocketfinancer.pipeline.AutomaticProcessingPreferences
+import com.pocketfinancer.pipeline.AutomaticSmsProcessingActivity
+import com.pocketfinancer.pipeline.AutomaticSmsProcessingActivityStore
 import com.pocketfinancer.hardware.DeviceCapabilities
 import com.pocketfinancer.hardware.SlmTier
 import com.pocketfinancer.hardware.isPublishedModelArtifact
@@ -108,6 +110,25 @@ internal fun activeHistoricalSmsForHome(
 
 internal fun HistoricalSmsProcessingActivity.cardSnapshot(): HistoricalSmsProcessingActivity =
     copy(
+        modelName = null,
+        grammarEnabled = null,
+        thinkingTokenBudget = 0,
+        answerTokenBudget = 0,
+        thinkingOutput = "",
+        jsonOutput = "",
+        thinkingOutputTruncated = false,
+        jsonOutputTruncated = false,
+        performance = null,
+        cache = null
+    )
+
+/**
+ * Source evidence needed by the visible automatic card is retained, while
+ * high-frequency and runtime-only telemetry remains available only to an open
+ * details sheet.
+ */
+internal fun AutomaticSmsProcessingActivity.cardSnapshot():
+    AutomaticSmsProcessingActivity = copy(
         modelName = null,
         grammarEnabled = null,
         thinkingTokenBudget = 0,
@@ -214,9 +235,20 @@ internal fun sameManualPresentationState(
 /** Visible cards/queues retain source evidence but never observe token churn. */
 internal fun manualSyncPresentationState(
     source: StateFlow<HomeSyncState>
-): Flow<HomeSyncState> = source
-    .distinctUntilChanged(::sameManualPresentationState)
-    .map(HomeSyncState::withoutManualLiveTelemetry)
+): Flow<HomeSyncState> = flow {
+    var previousSnapshot: HomeSyncState? = null
+    source.collect { state ->
+        val previous = previousSnapshot
+        if (
+            previous == null ||
+            !sameManualPresentationState(previous, state)
+        ) {
+            val snapshot = state.withoutManualLiveTelemetry()
+            previousSnapshot = snapshot
+            emit(snapshot)
+        }
+    }
+}
 
 /**
  * Keeps only the scrubbed manual projection hot so off-screen terminal
@@ -228,25 +260,31 @@ internal fun sanitizedManualSyncState(
 ): StateFlow<HomeSyncState> {
     val initialSource = source.value
     val initialValue = initialSource.withoutManualSmsTelemetry()
-    var lastSourceQueue = initialSource.queue
-    var sanitizedQueue = initialValue.queue
-    return source
-        .distinctUntilChanged(::sameManualAggregateState)
-        .map { state ->
-            if (!sameAggregateQueue(lastSourceQueue, state.queue)) {
-                sanitizedQueue = state.queue.map { item ->
-                    item.copy(sender = "", body = "")
+    return flow {
+        var previousSnapshot = initialValue
+        source.collect { state ->
+            if (!sameManualAggregateState(previousSnapshot, state)) {
+                val sanitizedQueue = if (
+                    sameAggregateQueue(previousSnapshot.queue, state.queue)
+                ) {
+                    previousSnapshot.queue
+                } else {
+                    state.queue.map { item ->
+                        item.copy(sender = "", body = "")
+                    }
                 }
+                val snapshot = state.copy(
+                    queue = sanitizedQueue,
+                    thinkingOutput = "",
+                    jsonOutput = "",
+                    activeSmsPerformance = null,
+                    activeModelName = null
+                )
+                previousSnapshot = snapshot
+                emit(snapshot)
             }
-            lastSourceQueue = state.queue
-            state.copy(
-                queue = sanitizedQueue,
-                thinkingOutput = "",
-                jsonOutput = "",
-                activeSmsPerformance = null,
-                activeModelName = null
-            )
         }
+    }
         .stateIn(
         scope = scope,
         started = SharingStarted.Eagerly,
@@ -274,14 +312,57 @@ private fun sameHistoricalCardActivity(
 /** Source-preserving historical card state exists only while Home collects it. */
 internal fun historicalSmsCardState(
     source: StateFlow<OnboardingSyncManager.OnboardingSyncState>
-): Flow<HistoricalSmsProcessingActivity?> = source
-    .distinctUntilChanged { first, second ->
-        sameHistoricalCardActivity(
-            activeHistoricalSmsForHome(first),
-            activeHistoricalSmsForHome(second)
-        )
+): Flow<HistoricalSmsProcessingActivity?> = flow {
+    var initialized = false
+    var previousSnapshot: HistoricalSmsProcessingActivity? = null
+    source.collect { state ->
+        val activity = activeHistoricalSmsForHome(state)
+        if (
+            !initialized ||
+            !sameHistoricalCardActivity(previousSnapshot, activity)
+        ) {
+            val snapshot = activity?.cardSnapshot()
+            initialized = true
+            previousSnapshot = snapshot
+            emit(snapshot)
+        }
     }
-    .map { state -> activeHistoricalSmsForHome(state)?.cardSnapshot() }
+}
+
+/** Ignores automatic token/runtime churn before allocating a card snapshot. */
+private fun sameAutomaticCardActivity(
+    first: AutomaticSmsProcessingActivity?,
+    second: AutomaticSmsProcessingActivity?
+): Boolean {
+    if (first === second) return true
+    if (first == null || second == null) return false
+    return first.owner == second.owner &&
+        first.sender == second.sender &&
+        first.body == second.body &&
+        first.date == second.date &&
+        first.stage == second.stage &&
+        first.hasThinkingMode == second.hasThinkingMode &&
+        first.detail == second.detail
+}
+
+/** Source-preserving automatic card state exists only while Home collects it. */
+internal fun automaticSmsCardState(
+    source: StateFlow<AutomaticSmsProcessingActivity?>
+): Flow<AutomaticSmsProcessingActivity?> = flow {
+    var initialized = false
+    var previousSnapshot: AutomaticSmsProcessingActivity? = null
+    source.collect { activity ->
+        if (
+            !initialized ||
+            !sameAutomaticCardActivity(previousSnapshot, activity)
+        ) {
+            val snapshot = activity?.cardSnapshot()
+            initialized = true
+            previousSnapshot = snapshot
+            emit(snapshot)
+        }
+    }
+}
 
 /**
  * Covers both an accepted service run and the short Android service-start
@@ -321,7 +402,9 @@ class HomeViewModel @Inject constructor(
     private val setupImportStore: SetupImportStore,
     private val modelUpgradeSessionDismissalStore: ModelUpgradeSessionDismissalStore,
     private val automaticProcessingPreferences:
-        AutomaticProcessingPreferences
+        AutomaticProcessingPreferences,
+    private val automaticSmsProcessingActivityStore:
+        AutomaticSmsProcessingActivityStore
 ) : ViewModel() {
 
     private val _selectedPeriod = MutableStateFlow("Day")
@@ -340,6 +423,14 @@ class HomeViewModel @Inject constructor(
 
     val activeHistoricalSmsCard: Flow<HistoricalSmsProcessingActivity?> =
         historicalSmsCardState(onboardingSyncManager.syncState)
+
+    /** Full automatic evidence is collected only by an open telemetry sheet. */
+    val automaticSmsTelemetry: StateFlow<AutomaticSmsProcessingActivity?> =
+        automaticSmsProcessingActivityStore.activity
+
+    /** Visible-card projection: source-preserving, cold, and token-scrubbed. */
+    val automaticSmsPresentation: Flow<AutomaticSmsProcessingActivity?> =
+        automaticSmsCardState(automaticSmsProcessingActivityStore.activity)
 
     private val onboardingUiState = onboardingSyncManager.syncState
         .map { it.withoutHistoricalSmsActivity() }
@@ -989,6 +1080,12 @@ class HomeViewModel @Inject constructor(
         .filterWithDetails(activity.sender, activity.body)
         .logs
 
+    fun getAutomaticFilterLogs(
+        activity: AutomaticSmsProcessingActivity
+    ): List<String> = smsFilterPipeline
+        .filterWithDetails(activity.sender, activity.body)
+        .logs
+
     /**
      * Returns both chat messages passed to the extraction request. Model-
      * specific chat-template rendering happens inside the local runtime and is
@@ -996,6 +1093,21 @@ class HomeViewModel @Inject constructor(
      */
     fun getHistoricalPromptContent(
         activity: HistoricalSmsProcessingActivity
+    ): String = buildString {
+        appendLine("system:")
+        appendLine(PipelineService.EXTRACTION_SYSTEM_MESSAGE)
+        appendLine()
+        appendLine("user:")
+        append(
+            promptBuilder.buildExtractionPrompt(
+                activity.sender,
+                activity.body
+            )
+        )
+    }
+
+    fun getAutomaticPromptContent(
+        activity: AutomaticSmsProcessingActivity
     ): String = buildString {
         appendLine("system:")
         appendLine(PipelineService.EXTRACTION_SYSTEM_MESSAGE)

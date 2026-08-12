@@ -45,6 +45,10 @@ import androidx.lifecycle.repeatOnLifecycle
 import com.pocketfinancer.data.model.Transaction
 import com.pocketfinancer.data.model.TransactionType
 import com.pocketfinancer.pipeline.AutomaticProcessingPreferences
+import com.pocketfinancer.pipeline.AutomaticSmsFilterResult
+import com.pocketfinancer.pipeline.AutomaticSmsProcessingActivity
+import com.pocketfinancer.pipeline.AutomaticSmsProcessingOwner
+import com.pocketfinancer.pipeline.AutomaticSmsProcessingStage
 import com.pocketfinancer.setup.SetupImportStatus
 import com.pocketfinancer.ui.theme.*
 import com.pocketfinancer.ui.onboarding.HistoricalSmsProcessingActivity
@@ -58,6 +62,7 @@ import com.pocketfinancer.ui.smsprocessing.SmsTelemetryPresenter
 import com.pocketfinancer.ui.smsprocessing.activeSmsPipelineItem
 import com.pocketfinancer.ui.smsprocessing.historicalSmsPipelineGapUiModel
 import com.pocketfinancer.ui.smsprocessing.ownsManualProcessingTarget
+import com.pocketfinancer.ui.smsprocessing.ownsAutomaticProcessingTarget
 import com.pocketfinancer.ui.smsprocessing.smsPipelineCardItem
 import com.pocketfinancer.ui.smsprocessing.toSmsPipelineCardUiModel
 import java.text.SimpleDateFormat
@@ -76,9 +81,14 @@ internal sealed interface HomeSheetTarget {
     data class Historical(
         val processingTarget: SmsProcessingTarget.Historical
     ) : HomeSheetTarget
+
+    data class Automatic(
+        val processingTarget: SmsProcessingTarget.Automatic
+    ) : HomeSheetTarget
 }
 
 internal fun SmsProcessingTarget.toHomeSheetTarget(): HomeSheetTarget = when (this) {
+    is SmsProcessingTarget.Automatic -> HomeSheetTarget.Automatic(this)
     is SmsProcessingTarget.Historical -> HomeSheetTarget.Historical(this)
     is SmsProcessingTarget.ManualRecent,
     is SmsProcessingTarget.ManualResult -> HomeSheetTarget.Manual(this)
@@ -109,6 +119,19 @@ internal fun homePipelineCardModel(
     )
 }
 
+/**
+ * Automatic processing may legitimately overlap a manual or historical flow.
+ * Keep it as a second card instead of applying single-card priority that would
+ * hide either live operation.
+ */
+internal fun homePipelineCardModels(
+    userInitiatedCard: SmsPipelineCardUiModel?,
+    automaticActivity: AutomaticSmsProcessingActivity?
+): List<SmsPipelineCardUiModel> = buildList {
+    userInitiatedCard?.let(::add)
+    automaticActivity?.toSmsPipelineCardUiModel()?.let(::add)
+}
+
 internal fun manualQueueItemTarget(
     state: HomeSyncState,
     item: SyncSmsItem
@@ -129,6 +152,7 @@ private fun HomeViewModel.stopRenderedSmsTarget(
     target: SmsProcessingTarget
 ) {
     when (target) {
+        is SmsProcessingTarget.Automatic -> Unit
         is SmsProcessingTarget.Historical ->
             stopHistoricalImport(target)
         is SmsProcessingTarget.ManualRecent ->
@@ -150,7 +174,9 @@ fun HomeScreen(
     val manualSyncPresentation by
         viewModel.manualSyncPresentation.collectSensitiveManualState()
     val activeHistoricalSmsCard by
-        viewModel.activeHistoricalSmsCard.collectSensitiveHistoricalState()
+        viewModel.activeHistoricalSmsCard.collectSensitiveNullableState()
+    val activeAutomaticSmsCard by
+        viewModel.automaticSmsPresentation.collectSensitiveNullableState()
     val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
     val coroutineScope = rememberCoroutineScope()
@@ -158,7 +184,7 @@ fun HomeScreen(
     val pData = state.periodData[selectedPeriod] ?: PeriodData()
     val renderedManualSyncState =
         manualSyncPresentation ?: aggregateManualSyncState
-    val pipelineCard = homePipelineCardModel(
+    val userInitiatedPipelineCard = homePipelineCardModel(
         manualState = renderedManualSyncState,
         manualStartPending = state.manualOperationStartPending,
         historicalRunId = state.historicalImportRunId,
@@ -166,6 +192,10 @@ fun HomeScreen(
         historicalCancelling = state.historicalImportCancelling,
         historicalFinishing = state.historicalImportFinishing,
         historicalPreparingModel = state.historicalImportPreparingModel
+    )
+    val pipelineCards = homePipelineCardModels(
+        userInitiatedCard = userInitiatedPipelineCard,
+        automaticActivity = activeAutomaticSmsCard
     )
     var sheetTarget by remember { mutableStateOf<HomeSheetTarget?>(null) }
     var showModelDownloadConfirmation by remember { mutableStateOf(false) }
@@ -379,15 +409,29 @@ fun HomeScreen(
                     )
                 }
 
-                pipelineCard?.let { model ->
-                    item(key = "active-sms-pipeline") {
+                pipelineCards.forEach { model ->
+                    val renderedTarget = model.target
+                    val automatic =
+                        renderedTarget is SmsProcessingTarget.Automatic
+                    item(
+                        key = if (automatic) {
+                            "automatic-sms-pipeline:" +
+                                "${renderedTarget.runId}:${renderedTarget.candidateKey}"
+                        } else {
+                            "active-sms-pipeline"
+                        }
+                    ) {
                         SmsPipelineActivityCard(
                             model = model,
                             modifier = Modifier.padding(horizontal = 16.dp),
                             onInspect = { target ->
                                 sheetTarget = target.toHomeSheetTarget()
                             },
-                            onStop = viewModel::stopRenderedSmsTarget
+                            onStop = if (automatic) {
+                                {}
+                            } else {
+                                viewModel::stopRenderedSmsTarget
+                            }
                         )
                     }
                 }
@@ -563,7 +607,7 @@ fun HomeScreen(
                 // ── Sync Banner ──
                 if (
                     (
-                        pipelineCard == null ||
+                        userInitiatedPipelineCard == null ||
                             renderedManualSyncState.status == HomeSyncState.Status.DONE
                         ) &&
                     renderedManualSyncState.status in setOf(
@@ -891,6 +935,17 @@ fun HomeScreen(
                 )
             }
 
+
+            is HomeSheetTarget.Automatic -> {
+                HomeAutomaticTelemetrySheet(
+                    requestedTarget = target.processingTarget,
+                    currentOwner = activeAutomaticSmsCard?.owner,
+                    activityFlow = viewModel.automaticSmsTelemetry,
+                    viewModel = viewModel,
+                    onClose = { sheetTarget = null }
+                )
+            }
+
             null -> Unit
         }
     }
@@ -970,6 +1025,7 @@ internal fun manualTelemetryTargetIsCurrent(
     target: SmsProcessingTarget,
     state: HomeSyncState
 ): Boolean = when (target) {
+    is SmsProcessingTarget.Automatic -> false
     is SmsProcessingTarget.ManualRecent ->
         state.ownsManualProcessingTarget(target)
     is SmsProcessingTarget.ManualResult ->
@@ -1004,6 +1060,7 @@ private fun HomeManualTelemetrySheet(
     if (!manualTelemetryTargetIsCurrent(requestedTarget, currentState)) return
 
     val candidate = when (requestedTarget) {
+        is SmsProcessingTarget.Automatic -> null
         is SmsProcessingTarget.ManualRecent ->
             currentState.activeSmsPipelineItem()?.takeIf {
                 it.id == requestedTarget.candidateKey
@@ -1087,6 +1144,85 @@ private fun HomeManualTelemetrySheet(
     }
 }
 
+internal fun automaticTelemetryTargetIsCurrent(
+    requestedTarget: SmsProcessingTarget.Automatic,
+    currentOwner: AutomaticSmsProcessingOwner?
+): Boolean = currentOwner?.candidateKey == requestedTarget.candidateKey &&
+    currentOwner.claimToken == requestedTarget.claimToken
+
+@Composable
+private fun HomeAutomaticTelemetrySheet(
+    requestedTarget: SmsProcessingTarget.Automatic,
+    currentOwner: AutomaticSmsProcessingOwner?,
+    activityFlow: Flow<AutomaticSmsProcessingActivity?>,
+    viewModel: HomeViewModel,
+    onClose: () -> Unit
+) {
+    val rawActivity by activityFlow.collectSensitiveNullableState()
+    val targetIsCurrent = automaticTelemetryTargetIsCurrent(
+        requestedTarget = requestedTarget,
+        currentOwner = currentOwner
+    )
+    LaunchedEffect(requestedTarget, currentOwner) {
+        if (!targetIsCurrent) onClose()
+    }
+    if (!targetIsCurrent) return
+
+    val activity = rawActivity?.takeIf {
+        it.ownsAutomaticProcessingTarget(requestedTarget)
+    } ?: return
+    val filterLogs = remember(
+        activity.owner,
+        activity.sender,
+        activity.body,
+        activity.filterResult
+    ) {
+        when (activity.filterResult) {
+            AutomaticSmsFilterResult.PASSED,
+            AutomaticSmsFilterResult.REJECTED ->
+                viewModel.getAutomaticFilterLogs(activity)
+            null -> listOf(
+                if (activity.stage == AutomaticSmsProcessingStage.FILTERING) {
+                    "The deterministic SMS filter is running."
+                } else {
+                    "The deterministic SMS filter has not completed yet."
+                }
+            )
+        }
+    }
+    val promptAvailable = activity.grammarEnabled != null
+    val slmPrompt = remember(
+        activity.owner,
+        activity.sender,
+        activity.body,
+        promptAvailable,
+        activity.filterResult
+    ) {
+        when {
+            promptAvailable -> viewModel.getAutomaticPromptContent(activity)
+            activity.filterResult == AutomaticSmsFilterResult.REJECTED ->
+                "No prompt was supplied because local filtering rejected this message."
+            else ->
+                "The extraction prompt has not been supplied to the runtime yet."
+        }
+    }
+    val model = SmsTelemetryPresenter.automatic(
+        activity = activity,
+        filterLogs = filterLogs,
+        slmPrompt = slmPrompt,
+        parseJson = viewModel::getParsedOutput,
+        target = requestedTarget
+    )
+
+    key("${requestedTarget.claimToken}:${requestedTarget.candidateKey}") {
+        SmsTelemetryBottomSheet(
+            model = model,
+            onStop = {},
+            onClose = onClose
+        )
+    }
+}
+
 @Composable
 private fun HomeHistoricalTelemetrySheet(
     requestedTarget: SmsProcessingTarget.Historical,
@@ -1101,7 +1237,7 @@ private fun HomeHistoricalTelemetrySheet(
     onClose: () -> Unit
 ) {
     val historicalActivity by
-        activityFlow.collectSensitiveHistoricalState()
+        activityFlow.collectSensitiveNullableState()
 
     val targetIsCurrent = historicalTelemetryTargetIsCurrent(
         requestedTarget = requestedTarget,
@@ -1177,16 +1313,16 @@ private fun HomeHistoricalTelemetrySheet(
  * by an inactive composition.
  */
 @Composable
-internal fun <T> Flow<T?>.collectSensitiveHistoricalState(): State<T?> {
+internal fun <T> Flow<T?>.collectSensitiveNullableState(): State<T?> {
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     return produceState<T?>(
         initialValue = null,
         this,
         lifecycle
     ) {
-        collectHistoricalSmsWhileStarted(
+        collectNullableStateWhileStarted(
             lifecycle = lifecycle,
-            source = this@collectSensitiveHistoricalState,
+            source = this@collectSensitiveNullableState,
             publish = { value = it }
         )
     }
@@ -1208,7 +1344,7 @@ internal fun <T : Any> Flow<T>.collectSensitiveManualState(): State<T?> {
     }
 }
 
-internal suspend fun <T> collectHistoricalSmsWhileStarted(
+internal suspend fun <T> collectNullableStateWhileStarted(
     lifecycle: Lifecycle,
     source: Flow<T?>,
     publish: (T?) -> Unit
