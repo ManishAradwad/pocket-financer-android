@@ -2,6 +2,18 @@
 
 All notable changes to Pocket Financer are recorded here by Release Please.
 
+## [1.2.0](https://github.com/ManishAradwad/pocket-financer-android/compare/v1.1.0...v1.2.0) (2026-08-14)
+
+
+### Features
+
+* unify on-device SMS processing details ([49b5cb0](https://github.com/ManishAradwad/pocket-financer-android/commit/49b5cb0850074e7499841866c735b9ae40dddcf9))
+
+
+### Bug Fixes
+
+* show automatic SMS processing activity ([#36](https://github.com/ManishAradwad/pocket-financer-android/issues/36)) ([3e1e6f5](https://github.com/ManishAradwad/pocket-financer-android/commit/3e1e6f58af513f345b4ff8fff7a08f2ddbd055de))
+
 ## [1.1.0](https://github.com/ManishAradwad/pocket-financer-android/compare/v1.0.1...v1.1.0) (2026-08-04)
 
 
