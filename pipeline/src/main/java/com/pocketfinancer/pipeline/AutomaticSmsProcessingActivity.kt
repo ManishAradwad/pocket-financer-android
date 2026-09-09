@@ -316,12 +316,13 @@ internal class AutomaticSmsProcessingSession(
             is PipelineService.ProcessingEvent.JsonTokenDelta -> {
                 val enteredJson =
                     activity.stage != AutomaticSmsProcessingStage.GENERATING
-                jsonTruncated = json.appendBounded(event.delta) || jsonTruncated
+                val truncatedThisDelta = json.appendBounded(event.delta)
+                jsonTruncated = truncatedThisDelta || jsonTruncated
                 activity = activity.copy(
                     stage = AutomaticSmsProcessingStage.GENERATING,
                     detail = "Generating transaction details on device."
                 )
-                publishSnapshot(force = enteredJson)
+                publishSnapshot(force = enteredJson || truncatedThisDelta)
             }
 
             is PipelineService.ProcessingEvent.InferenceCompleted -> {

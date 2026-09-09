@@ -228,7 +228,9 @@ class PipelineService @Inject constructor(
             selectorRuntimeVersion = previousSelector.optString(
                 "runtime_version", "llama.cpp-jni"
             ),
-            deviceCohort = android.os.Build.MODEL.ifBlank { "android-device" },
+            deviceCohort = android.os.Build.MODEL
+                ?.takeIf { it.isNotBlank() }
+                ?: "android-device",
             stableEventId = retry.operation.stableEventId,
             parentOperationId = retry.operation.id
         )
@@ -285,7 +287,9 @@ class PipelineService @Inject constructor(
             selectorModelId = lease?.model?.modelId ?: coordinator.currentSelectorModelId(),
             selectorModelHash = null,
             selectorRuntimeVersion = "llama.cpp-jni",
-            deviceCohort = android.os.Build.MODEL.ifBlank { "android-device" },
+            deviceCohort = android.os.Build.MODEL
+                ?.takeIf { it.isNotBlank() }
+                ?: "android-device",
             now = now
         )
         val groundedObserver = SmsProcessingObserver { event ->
