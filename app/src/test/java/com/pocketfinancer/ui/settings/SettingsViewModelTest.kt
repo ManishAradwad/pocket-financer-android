@@ -24,6 +24,7 @@ import com.pocketfinancer.inference.SlmRuntimeOwner
 import com.pocketfinancer.inference.SlmRuntimePhase
 import com.pocketfinancer.inference.SlmRuntimeState
 import com.pocketfinancer.pipeline.AutomaticProcessingPreferences
+import com.pocketfinancer.pipeline.PipelineService
 import com.pocketfinancer.pipeline.SlmProcessingPreferences
 import com.pocketfinancer.pipeline.SmsWorkController
 import com.pocketfinancer.sms.SmsWorkScheduler
