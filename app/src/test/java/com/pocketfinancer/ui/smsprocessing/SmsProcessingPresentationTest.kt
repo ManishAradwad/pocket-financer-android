@@ -74,7 +74,7 @@ class SmsProcessingPresentationTest {
         )
         assertEquals(SmsPipelinePhase.PROCESSING, model.phase)
         assertEquals(SmsStopUiState.AVAILABLE, model.stopState)
-        assertEquals("Extracting transaction", model.stepValue)
+        assertEquals("Selecting grounded candidates", model.stepValue)
     }
 
     @Test

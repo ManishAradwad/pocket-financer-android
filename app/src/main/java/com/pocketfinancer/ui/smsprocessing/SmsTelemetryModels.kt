@@ -7,6 +7,7 @@ import com.pocketfinancer.ui.home.HomeSyncState
 import com.pocketfinancer.ui.home.SyncSmsItem
 import com.pocketfinancer.ui.home.hasDiagnosticSourceEvidence
 import com.pocketfinancer.ui.onboarding.HistoricalSmsProcessingActivity
+import com.pocketfinancer.ui.onboarding.HistoricalSmsProcessingStage
 import java.util.Locale
 import org.json.JSONObject
 
@@ -475,9 +476,11 @@ fun historicalParsedOutput(
     parseJson: (String) -> String
 ): String = when {
     activity.jsonOutput.isEmpty() -> ""
-    activity.stageIndex < 3 && activity.jsonOutputTruncated ->
+    activity.stage == HistoricalSmsProcessingStage.GENERATING &&
+        activity.jsonOutputTruncated ->
         "Live JSON preview truncated; waiting for inference to finish."
-    activity.stageIndex < 3 -> "Waiting for complete JSON..."
+    activity.stage == HistoricalSmsProcessingStage.GENERATING ->
+        "Waiting for complete JSON..."
     activity.jsonOutputTruncated ->
         "Parsed successfully; full JSON was omitted from the live display."
     else -> parseJson(activity.jsonOutput)
