@@ -12,6 +12,8 @@ import com.pocketfinancer.data.model.Transaction
 import com.pocketfinancer.data.model.TransactionType
 import androidx.room.withTransaction
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 import java.util.UUID
 import java.math.BigDecimal
@@ -64,7 +66,10 @@ class TransactionRepository @Inject constructor(
 
     private fun ledgerFlow(
         source: () -> Flow<List<TransactionEntity>>
-    ): Flow<List<Transaction>> = source().map { list -> list.map { it.toDomain() } }
+    ): Flow<List<Transaction>> = flow {
+        accountRepository.ensureInitialConsolidation()
+        emitAll(source().map { list -> list.map { it.toDomain() } })
+    }
 
     /**
      * Compatibility adapter for existing UI callers. Source uniqueness still

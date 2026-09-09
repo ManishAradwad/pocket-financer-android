@@ -30,7 +30,7 @@ class AccountRepository (
     constructor(
         accountDao: AccountDao,
         transactionDao: TransactionDao
-    ) : this(accountDao, transactionDao, runConsolidationOnInit = false)
+    ) : this(accountDao, transactionDao, runConsolidationOnInit = true)
 
     suspend fun consolidateAccounts() = accountMutationMutex.withLock {
         consolidateAccountsLocked()
