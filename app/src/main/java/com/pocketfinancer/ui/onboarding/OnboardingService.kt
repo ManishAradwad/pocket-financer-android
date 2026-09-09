@@ -11,7 +11,6 @@ import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import com.pocketfinancer.data.model.TransactionType
 import com.pocketfinancer.data.repository.TransactionRepository
 import com.pocketfinancer.hardware.DeviceCapabilities
 import com.pocketfinancer.hardware.SlmTier
@@ -1588,8 +1587,6 @@ class OnboardingService : Service() {
         var counters = HistoricalImportCounters(
             processedCount = alreadySavedCount
         )
-        var spendsTotal = 0.0
-        val recentTxList = mutableListOf<ExtractedTxPreview>()
 
         for ((index, sms) in messagesToProcess.withIndex()) {
             if (!smsRepository.hasPermissions()) {
@@ -1656,22 +1653,9 @@ class OnboardingService : Service() {
                         pipelineService.processSingle(
                             sms = sms,
                             lease = activeLease,
-                            onPersistenceCommitted = { committed ->
-                                val settlement = settleHistoricalPersistedResult(
-                                    setupImportStore = setupImportStore,
-                                    alreadySavedCount = alreadySavedCount,
-                                    counters = counters,
-                                    result = committed
-                                )
-                                counters = settlement.counters
-                                checkpointSettlement = settlement
-                            },
-                            observer = observer
+                            observer = observer,
+                            trigger = "historical"
                         )
-                    } catch (
-                        postCommit: PipelineService.PostPersistenceCommitException
-                    ) {
-                        throw postCommit
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Exception) {
@@ -1697,6 +1681,10 @@ class OnboardingService : Service() {
             when (result) {
                 PipelineService.ProcessingResult.Stopped ->
                     throw CancellationException("Onboarding inference stopped")
+                PipelineService.ProcessingResult.AwaitingConfiguration -> {
+                    addLog("➔ Paused: choose a primary currency in Settings.")
+                    error("Primary currency confirmation is required")
+                }
                 is PipelineService.ProcessingResult.Failure -> {
                     val settlement = checkpointHistoricalImportCounters(
                         setupImportStore = setupImportStore,
@@ -1712,43 +1700,6 @@ class OnboardingService : Service() {
                     checkpointSettlement = settlement
                     addLog("➔ Failed: ${result.message}")
                 }
-                is PipelineService.ProcessingResult.Saved -> {
-                    val transaction = result.transaction
-                    if (result.newlyInserted) {
-                        if (transaction.type == TransactionType.DEBIT) {
-                            spendsTotal += transaction.amount
-                        }
-                        recentTxList.add(
-                            0,
-                            ExtractedTxPreview(
-                                amount = transaction.amount,
-                                merchant = transaction.counterparty
-                                    ?: "Unknown Merchant",
-                                type = transaction.type.name.lowercase()
-                            )
-                        )
-
-                        syncManager.updateState {
-                            it.copy(
-                                syncParsedCount = counters.parsedCount,
-                                syncSpendsTotal = spendsTotal,
-                                syncRecentTransactions = recentTxList.take(3)
-                            )
-                        }
-
-                        addLog(
-                            "➔ Extracted: ₹${transaction.amount} at " +
-                                "${transaction.counterparty ?: "Unknown Merchant"} " +
-                                "[${"%.1f".format(durationMs / 1000f)}s]"
-                        )
-                        addLog("➔ Saved to encrypted local database.")
-                    } else {
-                        addLog(
-                            "➔ Already saved by another processing path; " +
-                                "not counted as a new transaction."
-                        )
-                    }
-                }
                 is PipelineService.ProcessingResult.Skipped -> {
                     val settlement = checkpointHistoricalImportCounters(
                         setupImportStore = setupImportStore,
@@ -1762,10 +1713,20 @@ class OnboardingService : Service() {
                     )
                     counters = settlement.counters
                     checkpointSettlement = settlement
-                    addLog(
-                        "➔ Skipped (non-transactional content detected) " +
-                            "[${"%.1f".format(durationMs / 1000f)}s]"
-                    )
+                    if (
+                        result.reason ==
+                        PipelineService.SkipReason.RETAINED_FOR_REVIEW
+                    ) {
+                        addLog(
+                            "➔ Saved for review; no transaction was added " +
+                                "[${"%.1f".format(durationMs / 1000f)}s]"
+                        )
+                    } else {
+                        addLog(
+                            "➔ Skipped (non-transactional content detected) " +
+                                "[${"%.1f".format(durationMs / 1000f)}s]"
+                        )
+                    }
                 }
             }
 
@@ -2210,34 +2171,6 @@ internal data class HistoricalPersistenceSettlement(
 ) {
     val isDurable: Boolean
         get() = persistenceError == null
-}
-
-/**
- * Settles the durable setup counters for a ledger result that has already
- * committed. [PipelineService] invokes this through its non-cancellable
- * post-persistence callback, so a racing user stop cannot preserve counters
- * from before the committed transaction.
- */
-internal fun settleHistoricalPersistedResult(
-    setupImportStore: SetupImportStore,
-    alreadySavedCount: Int,
-    counters: HistoricalImportCounters,
-    result: PipelineService.ProcessingResult.Saved
-): HistoricalPersistenceSettlement {
-    val settled = counters.copy(
-        processedCount = counters.processedCount + 1,
-        parsedCount = counters.parsedCount +
-            if (result.newlyInserted) 1 else 0,
-        concurrentDuplicateCount = counters.concurrentDuplicateCount +
-            if (result.newlyInserted) 0 else 1
-    )
-    return checkpointHistoricalImportCounters(
-        setupImportStore = setupImportStore,
-        alreadySavedCount = alreadySavedCount,
-        counters = settled,
-        persistenceFailureMessage =
-            SETUP_PROGRESS_PERSISTENCE_FAILURE_MESSAGE
-    )
 }
 
 /**
