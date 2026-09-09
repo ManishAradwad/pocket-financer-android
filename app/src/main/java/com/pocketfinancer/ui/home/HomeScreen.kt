@@ -60,6 +60,7 @@ import com.pocketfinancer.ui.smsprocessing.SmsStopUiState
 import com.pocketfinancer.ui.smsprocessing.SmsTelemetryBottomSheet
 import com.pocketfinancer.ui.smsprocessing.SmsTelemetryPresenter
 import com.pocketfinancer.ui.smsprocessing.activeSmsPipelineItem
+import com.pocketfinancer.ui.smsprocessing.formatGroundedSelectorOutput
 import com.pocketfinancer.ui.smsprocessing.historicalSmsPipelineGapUiModel
 import com.pocketfinancer.ui.smsprocessing.ownsManualProcessingTarget
 import com.pocketfinancer.ui.smsprocessing.ownsAutomaticProcessingTarget
@@ -1097,7 +1098,7 @@ private fun HomeManualTelemetrySheet(
             filterLogs = filterLogs,
             cacheLogs = cacheLogs,
             slmPrompt = slmPrompt,
-            parseJson = viewModel::getParsedOutput,
+            parseJson = ::formatGroundedSelectorOutput,
             target = requestedTarget
         )
     } else {
@@ -1210,7 +1211,7 @@ private fun HomeAutomaticTelemetrySheet(
         activity = activity,
         filterLogs = filterLogs,
         slmPrompt = slmPrompt,
-        parseJson = viewModel::getParsedOutput,
+        parseJson = ::formatGroundedSelectorOutput,
         target = requestedTarget
     )
 
@@ -1283,7 +1284,7 @@ private fun HomeHistoricalTelemetrySheet(
             runId = requestedTarget.runId,
             filterLogs = historicalFilterLogs,
             slmPrompt = historicalPrompt,
-            parseJson = viewModel::getParsedOutput,
+            parseJson = ::formatGroundedSelectorOutput,
             stopState = stopState
         )
     } else {

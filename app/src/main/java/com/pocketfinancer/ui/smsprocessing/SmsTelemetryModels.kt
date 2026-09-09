@@ -8,6 +8,13 @@ import com.pocketfinancer.ui.home.SyncSmsItem
 import com.pocketfinancer.ui.home.hasDiagnosticSourceEvidence
 import com.pocketfinancer.ui.onboarding.HistoricalSmsProcessingActivity
 import java.util.Locale
+import org.json.JSONObject
+
+fun formatGroundedSelectorOutput(json: String): String = runCatching {
+    JSONObject(json).toString(2)
+}.getOrElse {
+    "Parsed: null (non-financial)"
+}
 
 enum class SmsTelemetryStatus {
     PENDING,
