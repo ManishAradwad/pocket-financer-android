@@ -17,14 +17,10 @@ data class HistoricalSmsProcessingActivity(
     val total: Int,
     val stage: HistoricalSmsProcessingStage =
         HistoricalSmsProcessingStage.FILTERING,
-    val hasThinkingMode: Boolean = false,
     val modelName: String? = null,
     val grammarEnabled: Boolean? = null,
-    val thinkingTokenBudget: Int = 0,
     val answerTokenBudget: Int = 0,
-    val thinkingOutput: String = "",
     val jsonOutput: String = "",
-    val thinkingOutputTruncated: Boolean = false,
     val jsonOutputTruncated: Boolean = false,
     val performance: HistoricalSlmPerformance? = null,
     val cache: HistoricalSlmCacheTelemetry? = null
@@ -38,9 +34,6 @@ data class HistoricalSmsProcessingActivity(
         require(position <= total) {
             "Historical SMS position cannot exceed its total"
         }
-        require(thinkingTokenBudget >= 0) {
-            "Thinking token budget must not be negative"
-        }
         require(answerTokenBudget >= 0) {
             "Answer token budget must not be negative"
         }
@@ -49,9 +42,8 @@ data class HistoricalSmsProcessingActivity(
     val stageIndex: Int
         get() = when (stage) {
             HistoricalSmsProcessingStage.FILTERING -> 0
-            HistoricalSmsProcessingStage.THINKING -> 1
-            HistoricalSmsProcessingStage.GENERATING -> 2
-            HistoricalSmsProcessingStage.PERSISTING -> 3
+            HistoricalSmsProcessingStage.GENERATING -> 1
+            HistoricalSmsProcessingStage.PERSISTING -> 2
     }
 }
 
@@ -61,7 +53,6 @@ internal fun OnboardingSyncManager.OnboardingSyncState
 
 enum class HistoricalSmsProcessingStage {
     FILTERING,
-    THINKING,
     GENERATING,
     PERSISTING
 }
@@ -97,15 +88,28 @@ internal class HistoricalSmsProcessingObserver(
     private val nanoTime: () -> Long = System::nanoTime
 ) : PipelineService.ProcessingObserver {
     private var activity = initial
-    private val thinking = StringBuilder(initial.thinkingOutput)
     private val json = StringBuilder(initial.jsonOutput)
-    private var thinkingTruncated = initial.thinkingOutputTruncated
     private var jsonTruncated = initial.jsonOutputTruncated
     private var lastPublishedNanos: Long? = null
 
     @Synchronized
     override fun onEvent(event: PipelineService.ProcessingEvent) {
         when (event) {
+            is PipelineService.ProcessingEvent.GroundedStage -> {
+                activity = activity.copy(
+                    stage = when (event.stage) {
+                        "claim", "analysis", "triage" ->
+                            HistoricalSmsProcessingStage.FILTERING
+                        "selector_execution", "selector_validation", "reconstruction" ->
+                            HistoricalSmsProcessingStage.GENERATING
+                        "account_resolution", "persistence_gate", "settlement" ->
+                            HistoricalSmsProcessingStage.PERSISTING
+                        else -> activity.stage
+                    }
+                )
+                publishSnapshot(force = true)
+            }
+
             PipelineService.ProcessingEvent.DeterministicFilterStarted,
             PipelineService.ProcessingEvent.DeterministicFilterPassed,
             PipelineService.ProcessingEvent.DeterministicFilterRejected -> {
@@ -117,27 +121,12 @@ internal class HistoricalSmsProcessingObserver(
 
             is PipelineService.ProcessingEvent.InferenceStarted -> {
                 activity = activity.copy(
-                    stage = if (event.thinkingEnabled) {
-                        HistoricalSmsProcessingStage.THINKING
-                    } else {
-                        HistoricalSmsProcessingStage.GENERATING
-                    },
-                    hasThinkingMode = event.thinkingEnabled,
+                    stage = HistoricalSmsProcessingStage.GENERATING,
                     modelName = File(event.model.modelPath).name,
                     grammarEnabled = event.grammarEnabled,
-                    thinkingTokenBudget = event.thinkingTokenBudget,
                     answerTokenBudget = event.answerTokenBudget
                 )
                 publishSnapshot(force = true)
-            }
-
-            is PipelineService.ProcessingEvent.ThinkingTokenDelta -> {
-                thinkingTruncated = thinking.appendBounded(event.delta) ||
-                    thinkingTruncated
-                activity = activity.copy(
-                    stage = HistoricalSmsProcessingStage.THINKING
-                )
-                publishSnapshot(force = false)
             }
 
             is PipelineService.ProcessingEvent.JsonTokenDelta -> {
@@ -201,9 +190,7 @@ internal class HistoricalSmsProcessingObserver(
             return
         }
         activity = activity.copy(
-            thinkingOutput = thinking.toString(),
             jsonOutput = json.toString(),
-            thinkingOutputTruncated = thinkingTruncated,
             jsonOutputTruncated = jsonTruncated
         )
         publish(activity)

@@ -36,7 +36,6 @@ enum class AutomaticSmsProcessingStage {
     PREPARING,
     FILTERING,
     LOADING_MODEL,
-    THINKING,
     GENERATING,
     PERSISTING,
     RETRYING,
@@ -86,28 +85,18 @@ data class AutomaticSmsProcessingActivity(
     val stage: AutomaticSmsProcessingStage =
         AutomaticSmsProcessingStage.PREPARING,
     val filterResult: AutomaticSmsFilterResult? = null,
-    val hasThinkingMode: Boolean = false,
     val modelName: String? = null,
     val grammarEnabled: Boolean? = null,
-    val thinkingTokenBudget: Int = 0,
     val answerTokenBudget: Int = 0,
-    val thinkingOutput: String = "",
     val jsonOutput: String = "",
-    val thinkingOutputTruncated: Boolean = false,
     val jsonOutputTruncated: Boolean = false,
     val performance: AutomaticSmsSlmPerformance? = null,
     val cache: AutomaticSmsSlmCacheTelemetry? = null,
     val detail: String? = null
 ) {
     init {
-        require(thinkingTokenBudget >= 0) {
-            "Thinking token budget must not be negative"
-        }
         require(answerTokenBudget >= 0) {
             "Answer token budget must not be negative"
-        }
-        require(thinkingOutput.length <= MAX_AUTOMATIC_OUTPUT_CHARS) {
-            "Automatic thinking telemetry exceeded its in-memory bound"
         }
         require(jsonOutput.length <= MAX_AUTOMATIC_OUTPUT_CHARS) {
             "Automatic JSON telemetry exceeded its in-memory bound"
@@ -195,9 +184,7 @@ internal class AutomaticSmsProcessingSession(
     val owner: AutomaticSmsProcessingOwner = initial.owner
 
     private var activity = initial
-    private val thinking = StringBuilder(initial.thinkingOutput)
     private val json = StringBuilder(initial.jsonOutput)
-    private var thinkingTruncated = initial.thinkingOutputTruncated
     private var jsonTruncated = initial.jsonOutputTruncated
     private var lastPublishedNanos: Long? = null
     private var closed = false
@@ -270,6 +257,29 @@ internal class AutomaticSmsProcessingSession(
     override fun onEvent(event: PipelineService.ProcessingEvent) {
         if (closed) return
         when (event) {
+            is PipelineService.ProcessingEvent.GroundedStage -> {
+                val nextStage = when (event.stage) {
+                    "claim", "analysis", "triage" -> AutomaticSmsProcessingStage.FILTERING
+                    "selector_execution", "selector_validation", "reconstruction" ->
+                        AutomaticSmsProcessingStage.GENERATING
+                    "account_resolution", "persistence_gate", "settlement" ->
+                        AutomaticSmsProcessingStage.PERSISTING
+                    else -> activity.stage
+                }
+                val detail = when (event.stage) {
+                    "analysis" -> "Analyzing grounded evidence."
+                    "triage" -> "Checking deterministic transaction state."
+                    "selector_execution" -> "Selecting supplied candidate IDs on device."
+                    "selector_validation" -> "Validating the grounded selector output."
+                    "reconstruction" -> "Reconstructing verified transaction fields."
+                    "persistence_gate" -> "Checking whether ledger storage is allowed."
+                    "settlement" -> "Saving the result for review."
+                    else -> activity.detail
+                }
+                activity = activity.copy(stage = nextStage, detail = detail)
+                publishSnapshot(force = true)
+            }
+
             PipelineService.ProcessingEvent.DeterministicFilterStarted -> {
                 // The worker already performed the same inexpensive filter
                 // before model acquisition. Do not regress LOADING_MODEL back
@@ -293,45 +303,26 @@ internal class AutomaticSmsProcessingSession(
 
             is PipelineService.ProcessingEvent.InferenceStarted -> {
                 activity = activity.copy(
-                    stage = if (event.thinkingEnabled) {
-                        AutomaticSmsProcessingStage.THINKING
-                    } else {
-                        AutomaticSmsProcessingStage.GENERATING
-                    },
-                    hasThinkingMode = event.thinkingEnabled,
+                    stage = AutomaticSmsProcessingStage.GENERATING,
                     modelName = File(event.model.modelPath).name
                         .take(MAX_AUTOMATIC_MODEL_NAME_CHARS),
                     grammarEnabled = event.grammarEnabled,
-                    thinkingTokenBudget = event.thinkingTokenBudget,
                     answerTokenBudget = event.answerTokenBudget,
-                    detail = if (event.thinkingEnabled) {
-                        "Analyzing transaction details on device."
-                    } else {
-                        "Generating transaction details on device."
-                    }
+                    detail = "Selecting grounded candidates on device."
                 )
                 publishSnapshot(force = true)
-            }
-
-            is PipelineService.ProcessingEvent.ThinkingTokenDelta -> {
-                thinkingTruncated = thinking.appendBounded(event.delta) ||
-                    thinkingTruncated
-                activity = activity.copy(
-                    stage = AutomaticSmsProcessingStage.THINKING,
-                    detail = "Analyzing transaction details on device."
-                )
-                publishSnapshot(force = false)
             }
 
             is PipelineService.ProcessingEvent.JsonTokenDelta -> {
                 val enteredJson =
                     activity.stage != AutomaticSmsProcessingStage.GENERATING
-                jsonTruncated = json.appendBounded(event.delta) || jsonTruncated
+                val truncatedThisDelta = json.appendBounded(event.delta)
+                jsonTruncated = truncatedThisDelta || jsonTruncated
                 activity = activity.copy(
                     stage = AutomaticSmsProcessingStage.GENERATING,
                     detail = "Generating transaction details on device."
                 )
-                publishSnapshot(force = enteredJson)
+                publishSnapshot(force = enteredJson || truncatedThisDelta)
             }
 
             is PipelineService.ProcessingEvent.InferenceCompleted -> {
@@ -376,14 +367,11 @@ internal class AutomaticSmsProcessingSession(
     fun close() {
         if (closed) return
         closed = true
-        thinking.clear()
         json.clear()
         activity = activity.copy(
             sender = "",
             body = "",
-            thinkingOutput = "",
             jsonOutput = "",
-            thinkingOutputTruncated = false,
             jsonOutputTruncated = false,
             performance = null,
             cache = null,
@@ -416,9 +404,7 @@ internal class AutomaticSmsProcessingSession(
             return
         }
         activity = activity.copy(
-            thinkingOutput = thinking.toString(),
             jsonOutput = json.toString(),
-            thinkingOutputTruncated = thinkingTruncated,
             jsonOutputTruncated = jsonTruncated
         )
         publish(activity)
