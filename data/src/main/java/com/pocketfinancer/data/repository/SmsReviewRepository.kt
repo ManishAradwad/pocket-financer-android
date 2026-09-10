@@ -198,11 +198,19 @@ class SmsReviewRepository @Inject constructor(
             ?: throw SmsProcessingStoreException("Admitted SMS source not found")
         val result = dao.getReconstructedResult(operationId)?.semanticResultJson
             ?.let(::JSONObject)
-            ?: throw SmsProcessingStoreException("Grounded proposal is unavailable")
-        var minorUnits = result.getLong("minor_units")
-        var currency = result.getString("currency").uppercase()
-        var scale = result.getInt("currency_scale")
-        var direction = result.getString("direction")
+            ?: run {
+                check(command.action == SmsReviewAction.CORRECT) { "Grounded proposal is unavailable" }
+                val requiredFields = setOf("amount_minor_units", "currency", "direction",
+                    "counterparty", "account_id", "occurred_at_epoch_ms")
+                require(command.corrections.map { it.field }.toSet() == requiredFields) {
+                    "A complete correction is required without a grounded proposal"
+                }
+                // This is a user projection only; never fabricate a reconstructed model result.
+                JSONObject()
+            }
+        var minorUnits = result.optLong("minor_units", 0)
+        var currency = result.optString("currency", "").uppercase(java.util.Locale.ROOT)
+        var direction = result.optString("direction", "")
         var merchant = if (result.isNull("counterparty_evidence")) {
             "Unspecified counterparty"
         } else {
@@ -218,7 +226,7 @@ class SmsReviewRepository @Inject constructor(
         command.corrections.forEach { correction ->
             val value = decodeScalar(correction.newValueJson)
             when (correction.field) {
-                "amount_minor_units" -> minorUnits = (value as? Number)?.toLong()
+                "amount_minor_units" -> minorUnits = value.exactLongOrNull()
                     ?: throw IllegalArgumentException("Corrected amount must be an integer")
                 "currency" -> currency = (value as? String)?.uppercase()
                     ?: throw IllegalArgumentException("Corrected currency must be text")
@@ -226,11 +234,11 @@ class SmsReviewRepository @Inject constructor(
                     ?: throw IllegalArgumentException("Corrected direction must be text")
                 "counterparty" -> merchant = (value as? String)?.trim().orEmpty()
                 "account_id" -> accountId = value as? String
-                "occurred_at_epoch_ms" -> occurredAt = (value as? Number)?.toLong()
+                "occurred_at_epoch_ms" -> occurredAt = value.exactLongOrNull()
                 else -> throw IllegalArgumentException("Unsupported correction field")
             }
         }
-        scale = CurrencyScaleRegistry.scale(currency)
+        val scale = CurrencyScaleRegistry.scale(currency)
             ?: throw IllegalArgumentException("Unsupported corrected currency")
         require(minorUnits > 0 && direction in setOf("debit", "credit"))
         require(merchant.isNotBlank())
@@ -275,8 +283,12 @@ class SmsReviewRepository @Inject constructor(
             exactMinorUnits = minorUnits,
             currencyCode = currency,
             currencyScale = scale,
-            currencyProvenance = result.optString("currency_provenance", "unknown"),
-            timestampProvenance = result.optString("timestamp_provenance", "user_corrected_time"),
+            currencyProvenance = if (command.corrections.any { it.field == "currency" }) {
+                "user_supplied"
+            } else result.optString("currency_provenance", "unknown"),
+            timestampProvenance = if (command.corrections.any { it.field == "occurred_at_epoch_ms" }) {
+                "user_corrected_time"
+            } else result.optString("timestamp_provenance", "unknown"),
             currentRevisionId = revisionId,
             projectionState = "current",
             legacyPrecisionStatus = "exact_minor_units"
@@ -316,6 +328,12 @@ class SmsReviewRepository @Inject constructor(
         return revisionId
     }
 
+    private fun Any.exactLongOrNull(): Long? = when (this) {
+        is Long -> this
+        is Int -> toLong()
+        else -> null
+    }
+
     private fun decodeScalar(json: String): Any {
         val value = JSONTokener(json).nextValue()
         require(value !is JSONObject && value !is org.json.JSONArray && value != JSONObject.NULL)
@@ -324,6 +342,9 @@ class SmsReviewRepository @Inject constructor(
 
     private fun validate(command: SmsReviewCommand) {
         require(command.expectedRevision >= 0)
+        require(command.corrections.map { it.field }.distinct().size == command.corrections.size) {
+            "Duplicate correction fields are not permitted"
+        }
         when (command.action) {
             SmsReviewAction.CORRECT -> {
                 require(command.corrections.isNotEmpty())

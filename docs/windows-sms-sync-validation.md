@@ -33,3 +33,23 @@ Baseline: Android PR #40, commit 64a91f7871f59036e8ac45e5f5023f8a268b788c.
 
 Other uncommitted recovery/review tests are separate ongoing work and are not
 part of the Windows asset fix's validation claim.
+
+## Review correction follow-up
+
+The encrypted device regression reproduced a separate failure: an alert without
+reconstructed model output could not accept a complete manual correction. The
+repository now requires all six correction fields in that case and projects only
+an explicit user transaction. It never inserts a fabricated model result.
+Incomplete input, confirmation without a proposal, duplicate fields, fractional
+numbers, overflowing integers, and numeric strings are rejected atomically.
+Currency/time corrections retain explicit user provenance.
+
+Review actions reserve their busy state before coroutine dispatch, preventing
+rapid repeated taps from racing. Confirmation is unavailable without a proposal.
+
+Verification: four encrypted Android device tests passed, covering recovery after
+database reopen, live heartbeat exclusion, stale-owner fencing, durable drafts,
+idempotent feedback/projection, manual correction, and invalid-input rollback.
+All 210 app unit tests passed, including repeated-action coverage. These fixtures
+are invented and use a separate test database; the installed app data is not
+cleared. Process-death and physical-device coverage remain separate gates.

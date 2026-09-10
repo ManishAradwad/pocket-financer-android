@@ -68,6 +68,7 @@ class ReviewViewModel @Inject constructor(
         correction: ReviewCorrectionInput? = null,
         retryConfiguration: String? = null
     ) {
+        if (_state.value.loading || _state.value.actionCompleted) return
         val details = _state.value.details ?: return
         val retryMode = retryConfiguration?.takeIf { it in setOf("original", "current") }
         if (action == SmsReviewAction.RETRY && retryMode == null) {
@@ -100,8 +101,8 @@ class ReviewViewModel @Inject constructor(
             corrections = corrections,
             retryConfiguration = retryMode
         )
+        _state.update { it.copy(loading = true, error = null) }
         viewModelScope.launch {
-            _state.update { it.copy(loading = true, error = null) }
             runCatching {
                 repository.resolve(command, System.currentTimeMillis())
                 if (action == SmsReviewAction.RETRY) {

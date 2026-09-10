@@ -135,7 +135,7 @@ fun ReviewDetailScreen(
                         ReviewCorrectionInput(amount, currency, direction, counterparty, accountId, occurredAt)
                     )
                 },
-                enabled = amount.toLongOrNull()?.let { it > 0 } == true &&
+                enabled = !state.loading && amount.toLongOrNull()?.let { it > 0 } == true &&
                     currency.isNotBlank() && direction in setOf("debit", "credit") &&
                     counterparty.isNotBlank() && accountId.isNotBlank() && occurredAt.toLongOrNull() != null,
                 modifier = Modifier.fillMaxWidth()
@@ -159,15 +159,16 @@ fun ReviewDetailScreen(
             ) { Text("Save draft") }
             OutlinedButton(
                 onClick = { viewModel.resolve(SmsReviewAction.CONFIRM) },
+                enabled = !state.loading && details.reconstructedResult != null,
                 modifier = Modifier.fillMaxWidth()
             ) { Text("Confirm grounded proposal") }
-            TextButton(onClick = { viewModel.resolve(SmsReviewAction.RETRY, retryConfiguration = "original") }) {
+            TextButton(enabled = !state.loading, onClick = { viewModel.resolve(SmsReviewAction.RETRY, retryConfiguration = "original") }) {
                 Text("Retry with original settings")
             }
-            TextButton(onClick = { viewModel.resolve(SmsReviewAction.RETRY, retryConfiguration = "current") }) {
+            TextButton(enabled = !state.loading, onClick = { viewModel.resolve(SmsReviewAction.RETRY, retryConfiguration = "current") }) {
                 Text("Retry with current settings")
             }
-            TextButton(onClick = { viewModel.resolve(SmsReviewAction.REJECT) }) { Text("Reject alert") }
+            TextButton(enabled = !state.loading, onClick = { viewModel.resolve(SmsReviewAction.REJECT) }) { Text("Reject alert") }
             state.error?.let { Text(it) }
         }
     }
