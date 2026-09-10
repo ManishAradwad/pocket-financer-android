@@ -23,10 +23,11 @@ Baseline: Android PR #40, commit 64a91f7871f59036e8ac45e5f5023f8a268b788c.
 ## Verification so far
 
 - Windows debug build/install and packaged-asset instrumentation test passed.
-- 108 pipeline unit tests passed after the timeout change.
+- 110 pipeline unit tests passed, including selector timeout settlement and user cancellation.
 - Retried the emulator's existing failed import without clearing application data.
-  It advanced beyond the first selector operation; final batch verification remains
-  pending. Do not treat this as physical-device or model-accuracy evidence.
+  The complete batch finished: 24 messages checked, 14 eligible, with the same app
+  process alive throughout and no new sync exception. Pipeline lint also passed.
+  This is emulator functional evidence, not physical-device or model-accuracy evidence.
 - Automatic persistence remains disabled. No private messages or model output are
   included in this report.
 
