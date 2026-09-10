@@ -139,6 +139,9 @@ fun PocketFinancerRoot() {
                         HomeScreen(
                             onNavigateToTab = { tab ->
                                 when (tab.lowercase()) {
+                                    "reviews" -> navController.navigate(Screen.Reviews.route) {
+                                        launchSingleTop = true
+                                    }
                                     "transactions" -> navController.navigate(Screen.Transactions.route) {
                                         popUpTo(navController.graph.findStartDestination().id) {
                                             saveState = true

@@ -53,3 +53,21 @@ idempotent feedback/projection, manual correction, and invalid-input rollback.
 All 210 app unit tests passed, including repeated-action coverage. These fixtures
 are invented and use a separate test database; the installed app data is not
 cleared. Process-death and physical-device coverage remain separate gates.
+
+## Import summary and session handoff
+
+Historical import now persists a separate retained-review count through progress
+checkpoints, reset, and terminal settlement. Retained alerts are no longer counted
+as rejected. Completed review imports link directly to Saved alert reviews from
+Home. Older imports keep their unknown category breakdown; the UI offers review
+navigation without inventing a historical review total.
+
+Verification: all 213 app unit tests, debug build/install, and app lint passed.
+The emulator's existing completion card was checked and its new button opened the
+Saved alert reviews inbox. Whitespace validation passed.
+
+Session boundary requested by the user: this session's fixes are complete. The
+investigation into why all Android messages are being retained for review belongs
+to the user's other session. Do not treat the successful import or review UI tests
+as proof of selector accuracy or automatic-persistence readiness. Automatic
+persistence remains disabled. The updated app is installed on the emulator.

@@ -1463,6 +1463,7 @@ class OnboardingService : Service() {
                         processedCount = alreadySavedCount,
                         savedCount = alreadySavedCount,
                         rejectedCount = 0,
+                        retainedReviewCount = 0,
                         failedCount = 0,
                         lastSuccessfulScanMillis = scanCompletedAt
                     )
@@ -1572,6 +1573,7 @@ class OnboardingService : Service() {
                     processedCount = alreadySavedCount,
                     savedCount = alreadySavedCount,
                     rejectedCount = 0,
+                    retainedReviewCount = 0,
                     failedCount = 0,
                     emptyReason = null,
                     actionableError = null
@@ -1704,10 +1706,7 @@ class OnboardingService : Service() {
                     val settlement = checkpointHistoricalImportCounters(
                         setupImportStore = setupImportStore,
                         alreadySavedCount = alreadySavedCount,
-                        counters = counters.copy(
-                            processedCount = counters.processedCount + 1,
-                            rejectedCount = counters.rejectedCount + 1
-                        ),
+                        counters = counters.recordSkipped(result.reason),
                         persistenceFailureMessage =
                             SETUP_CHECKPOINT_PERSISTENCE_FAILURE_MESSAGE
                     )
@@ -1831,6 +1830,7 @@ class OnboardingService : Service() {
                 processedCount = counters.processedCount,
                 savedCount = terminalSavedCount,
                 rejectedCount = counters.rejectedCount,
+                retainedReviewCount = counters.retainedReviewCount,
                 failedCount = counters.failedCount,
                 activeScanWindowDays = if (
                     terminalStatus == SetupImportStatus.FAILED
@@ -1873,6 +1873,7 @@ class OnboardingService : Service() {
         addLog(
             "System: Import finished: ${counters.parsedCount} saved, " +
                 "${counters.rejectedCount} rejected, " +
+                "${counters.retainedReviewCount} saved for review, " +
                 "${counters.failedCount} failed" +
                 if (counters.concurrentDuplicateCount > 0) {
                     ", ${counters.concurrentDuplicateCount} already saved."
@@ -2160,6 +2161,7 @@ internal data class HistoricalImportCounters(
     val processedCount: Int = 0,
     val parsedCount: Int = 0,
     val rejectedCount: Int = 0,
+    val retainedReviewCount: Int = 0,
     val failedCount: Int = 0,
     val concurrentDuplicateCount: Int = 0
 )
@@ -2211,6 +2213,7 @@ internal fun checkpointHistoricalImportCounters(
                 processedCount = counters.processedCount,
                 savedCount = committedSavedCount,
                 rejectedCount = counters.rejectedCount,
+                retainedReviewCount = counters.retainedReviewCount,
                 failedCount = counters.failedCount,
                 emptyReason = if (
                     current.status == SetupImportStatus.PERMISSION_NEEDED
@@ -2259,6 +2262,7 @@ internal fun persistHistoricalImportCounters(
                 counters.parsedCount +
                 counters.concurrentDuplicateCount,
             rejectedCount = counters.rejectedCount,
+            retainedReviewCount = counters.retainedReviewCount,
             failedCount = counters.failedCount
         )
     }
@@ -2305,3 +2309,9 @@ internal fun nextCleanupOnlyRetirementStartId(
 } else {
     currentRetirementStartId
 }
+
+internal fun HistoricalImportCounters.recordSkipped(reason: PipelineService.SkipReason): HistoricalImportCounters = copy(
+    processedCount = processedCount + 1,
+    rejectedCount = rejectedCount + if (reason == PipelineService.SkipReason.RETAINED_FOR_REVIEW) 0 else 1,
+    retainedReviewCount = retainedReviewCount + if (reason == PipelineService.SkipReason.RETAINED_FOR_REVIEW) 1 else 0
+)

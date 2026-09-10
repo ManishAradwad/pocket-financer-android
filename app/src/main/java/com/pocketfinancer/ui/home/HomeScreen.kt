@@ -228,6 +228,7 @@ fun HomeScreen(
 
     val runSetupAction: (SetupCardAction) -> Unit = { action ->
         when (action.target()) {
+            SetupCardActionTarget.OPEN_REVIEWS -> onNavigateToTab("reviews")
             SetupCardActionTarget.SCAN_OLDER ->
                 viewModel.scanOlderMessages()
             SetupCardActionTarget.RETRY_RECENT_SYNC ->
@@ -279,6 +280,7 @@ fun HomeScreen(
 
     val onSetupAction: (SetupCardAction) -> Unit = { action ->
         when (action) {
+            SetupCardAction.OPEN_REVIEWS -> runSetupAction(action)
             SetupCardAction.RESTORE_PERMISSION -> {
                 smsPermissionLauncher.launch(
                     arrayOf(
