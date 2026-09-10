@@ -7,6 +7,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketfinancer.data.model.SmsCandidateOrigin
 import com.pocketfinancer.data.model.SmsSourceIdentity
 import com.pocketfinancer.data.repository.SmsIngestionRepository
+import java.util.UUID
 import kotlinx.coroutines.runBlocking
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
@@ -28,7 +29,7 @@ class AppDatabaseMigrationTest {
     )
 
     @Test
-    fun `v3 to v5 preserves exact duplicates with stable unique identities`() {
+    fun `v3 to v6 preserves exact duplicates with stable unique identities`() {
         migrationHelper.createDatabase(V3_DATABASE_NAME, 3).apply {
             insertV3Transaction(
                 id = "tx-a",
@@ -50,10 +51,11 @@ class AppDatabaseMigrationTest {
 
         val migrated = migrationHelper.runMigrationsAndValidate(
             V3_DATABASE_NAME,
-            5,
+            6,
             true,
             AppDatabase.MIGRATION_3_4,
-            AppDatabase.MIGRATION_4_5
+            AppDatabase.MIGRATION_4_5,
+            AppDatabase.MIGRATION_5_6
         )
 
         migrated.query(
@@ -84,7 +86,7 @@ class AppDatabaseMigrationTest {
         assertIndexUnique(
             database = migrated,
             table = "transactions",
-            index = "index_transactions_sourceConnector_sourceMessageId",
+            index = "index_transactions_sourceConnector_sourceMessageId_sourceEventId",
             expectedUnique = true
         )
         assertIndexUnique(
@@ -129,7 +131,8 @@ class AppDatabaseMigrationTest {
                 val ingestionRepository = SmsIngestionRepository(
                     database,
                     database.transactionDao(),
-                    database.queuedSmsCandidateDao()
+                    database.queuedSmsCandidateDao(),
+                    database.smsProcessingDao()
                 )
 
                 val admission = ingestionRepository.admit(
@@ -171,7 +174,7 @@ class AppDatabaseMigrationTest {
     }
 
     @Test
-    fun `v4 to v5 validates and preserves duplicate legacy provenance and queue keys`() {
+    fun `v4 to v6 preserves provenance and promotes queues to durable operations`() {
         migrationHelper.createDatabase(V4_DATABASE_NAME, 4).apply {
             insertV4Transaction(
                 id = "legacy-provider-a",
@@ -196,9 +199,10 @@ class AppDatabaseMigrationTest {
 
         val migrated = migrationHelper.runMigrationsAndValidate(
             V4_DATABASE_NAME,
-            5,
+            6,
             true,
-            AppDatabase.MIGRATION_4_5
+            AppDatabase.MIGRATION_4_5,
+            AppDatabase.MIGRATION_5_6
         )
 
         migrated.query(
@@ -229,6 +233,37 @@ class AppDatabaseMigrationTest {
             index = "index_transactions_sourceConnector_sourceFingerprint",
             expectedUnique = false
         )
+
+        migrated.query(
+            """
+            SELECT id, sourceId, stableEventId, state, configurationHash
+            FROM sms_processing_operations
+            WHERE sourceId = 'sms_existing_workmanager_key'
+            """.trimIndent()
+        ).use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertNotNull(UUID.fromString(cursor.getString(0)))
+            assertEquals("sms_existing_workmanager_key", cursor.getString(1))
+            assertNotNull(UUID.fromString(cursor.getString(2)))
+            assertEquals("awaiting_configuration", cursor.getString(3))
+            assertEquals("legacy-unconfigured", cursor.getString(4))
+        }
+        migrated.query(
+            """
+            SELECT exactMinorUnits, projectionState, legacyPrecisionStatus, currentRevisionId
+            FROM transactions
+            WHERE id = 'legacy-provider-a'
+            """.trimIndent()
+        ).use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertTrue(cursor.isNull(0))
+            assertEquals("legacy", cursor.getString(1))
+            assertEquals(
+                "legacy_double_original_precision_unknown",
+                cursor.getString(2)
+            )
+            assertEquals("legacy-provider-a:legacy", cursor.getString(3))
+        }
 
         // V5 permits exact-identical evidence when authoritative ids differ.
         migrated.insertV4Transaction(
@@ -392,8 +427,8 @@ class AppDatabaseMigrationTest {
     }
 
     private companion object {
-        const val V3_DATABASE_NAME = "migration-v3-v5"
-        const val V4_DATABASE_NAME = "migration-v4-v5"
+        const val V3_DATABASE_NAME = "migration-v3-v6"
+        const val V4_DATABASE_NAME = "migration-v4-v6"
         const val TEST_SENDER = "AX-HDFCBK"
         const val DUPLICATE_BODY = "Rs 500 debited at Merchant"
         const val SENT_AT = 1_200_000L

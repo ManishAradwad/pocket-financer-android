@@ -971,7 +971,6 @@ class TrustworthyHomeStateTest {
                     status = "syncing"
                 )
             ),
-            thinkingOutput = "private reasoning",
             jsonOutput = "private JSON",
             activeSmsPerformance = "12 tok/s",
             activeModelName = "local-model.gguf"
@@ -979,7 +978,6 @@ class TrustworthyHomeStateTest {
 
         val scrubbed = source.withoutManualSmsTelemetry()
 
-        assertEquals("", scrubbed.thinkingOutput)
         assertEquals("", scrubbed.jsonOutput)
         assertEquals(null, scrubbed.activeSmsPerformance)
         assertEquals(null, scrubbed.activeModelName)
@@ -1006,8 +1004,7 @@ class TrustworthyHomeStateTest {
                 HomeSyncState(
                     status = HomeSyncState.Status.SYNCING,
                     activeRunId = "manual-eager-run",
-                    queue = listOf(candidate),
-                    thinkingOutput = "private reasoning"
+                    queue = listOf(candidate)
                 )
             )
             val projection = sanitizedManualSyncState(
@@ -1018,10 +1015,8 @@ class TrustworthyHomeStateTest {
 
             val initialProjection = projection.value
             assertEquals("", projection.value.queue.single().sender)
-            assertEquals("", projection.value.thinkingOutput)
 
             source.value = source.value.copy(
-                thinkingOutput = "private reasoning plus one token",
                 jsonOutput = "{partial}",
                 activeSmsPerformance = "12 tok/s",
                 activeModelName = "local-model.gguf"
@@ -1067,8 +1062,7 @@ class TrustworthyHomeStateTest {
                 HomeSyncState(
                     status = HomeSyncState.Status.SYNCING,
                     activeRunId = "manual-presentation-run",
-                    queue = listOf(candidate),
-                    thinkingOutput = "private reasoning"
+                    queue = listOf(candidate)
                 )
             )
             val projection = manualSyncPresentationState(source).stateIn(
@@ -1081,10 +1075,8 @@ class TrustworthyHomeStateTest {
             val initialProjection = projection.value
             assertEquals("PRIVATE-BANK", initialProjection.queue.single().sender)
             assertEquals(candidate.body, initialProjection.queue.single().body)
-            assertEquals("", initialProjection.thinkingOutput)
 
             source.value = source.value.copy(
-                thinkingOutput = "private reasoning plus one token",
                 jsonOutput = "{partial}",
                 activeSmsPerformance = "12 tok/s",
                 activeModelName = "local-model.gguf"

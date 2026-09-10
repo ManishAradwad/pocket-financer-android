@@ -19,9 +19,6 @@ import com.pocketfinancer.ui.home.manualSyncPresentationState
 import com.pocketfinancer.ui.home.sanitizedManualSyncState
 import com.pocketfinancer.ui.home.showManualSyncStopRejectionFeedback
 import com.pocketfinancer.pipeline.SmsFilterPipeline
-import com.pocketfinancer.pipeline.PromptBuilder
-import com.pocketfinancer.pipeline.ExtractionParser
-import com.pocketfinancer.inference.SlmRuntime
 import com.pocketfinancer.inference.SlmRuntimeOwner
 import com.pocketfinancer.SlmAppFlowCoordinator
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -62,9 +59,6 @@ class TransactionsViewModel @Inject constructor(
     private val accountRepository: AccountRepository,
     private val syncManager: HomeSyncManager,
     private val smsFilterPipeline: SmsFilterPipeline,
-    private val promptBuilder: PromptBuilder,
-    private val slmRuntime: SlmRuntime,
-    private val extractionParser: ExtractionParser,
     private val appFlowCoordinator: SlmAppFlowCoordinator
 ) : ViewModel() {
 
@@ -215,29 +209,36 @@ class TransactionsViewModel @Inject constructor(
 
     fun updateTransaction(
         id: String,
-        amount: Double,
+        expectedRevisionId: String?,
+        amountText: String,
+        currencyCode: String,
         merchant: String,
         type: TransactionType,
-        accountName: String
+        accountId: String,
+        onResult: (Boolean) -> Unit = {}
     ) {
         viewModelScope.launch {
-            withLedgerEditAdmission(appFlowCoordinator) {
-                val account = accountRepository.getOrCreate(
-                    name = accountName.trim(),
-                    bank = "Unknown Account",
-                    type = "auto-extracted"
-                )
-                val updated = transactionRepository.updateTransaction(
-                    id = id,
-                    amount = amount,
-                    merchant = merchant,
-                    type = type,
-                    accountId = account.id
-                )
-                if (_selectedTransaction.value?.id == id) {
-                    _selectedTransaction.value = updated
+            val receipt = runCatching {
+                withLedgerEditAdmission(appFlowCoordinator) {
+                    transactionRepository.editProjection(
+                        TransactionRepository.ProjectionEditCommand(
+                            actionId = java.util.UUID.randomUUID().toString(),
+                            transactionId = id,
+                            expectedRevisionId = expectedRevisionId,
+                            amountText = amountText,
+                            currencyCode = currencyCode,
+                            merchant = merchant,
+                            type = type,
+                            accountId = accountId
+                        )
+                    )
                 }
+            }.getOrNull()
+            val updated = receipt?.transaction
+            if (updated != null && _selectedTransaction.value?.id == id) {
+                _selectedTransaction.value = updated
             }
+            onResult(updated != null)
         }
     }
 
@@ -262,24 +263,14 @@ class TransactionsViewModel @Inject constructor(
         if (!item.hasDiagnosticSourceEvidence()) {
             return SOURCE_EVIDENCE_UNAVAILABLE
         }
-        val rawPrompt = promptBuilder.buildExtractionPrompt(
-            item.sender,
-            item.body
-        )
-        val hasThinking = slmRuntime.state.value.loadedModel?.hasThinkingMode ?: true
-        return promptBuilder.buildChatPrompt(rawPrompt, enableThinking = hasThinking)
-    }
-
-    fun getParsedOutput(jsonStr: String): String {
-        val parsed = extractionParser.parse(jsonStr)
-        return parsed?.let {
-            "amount=${it.amount}, type=${it.type.name.lowercase()}, counterparty=${it.counterparty ?: "-"}, account=${it.account ?: "-"}"
-        } ?: "Parsed: null (non-financial)"
+        return DECISION_TRACE_MESSAGE
     }
 
     private companion object {
         const val SOURCE_EVIDENCE_UNAVAILABLE =
             "Source evidence is unavailable after terminal processing."
+        const val DECISION_TRACE_MESSAGE =
+            "The legacy extraction prompt is no longer used. Open Saved alert reviews to inspect the durable Decision Trace."
     }
 }
 

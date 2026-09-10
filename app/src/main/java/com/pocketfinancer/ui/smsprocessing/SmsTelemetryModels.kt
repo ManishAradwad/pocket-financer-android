@@ -7,7 +7,15 @@ import com.pocketfinancer.ui.home.HomeSyncState
 import com.pocketfinancer.ui.home.SyncSmsItem
 import com.pocketfinancer.ui.home.hasDiagnosticSourceEvidence
 import com.pocketfinancer.ui.onboarding.HistoricalSmsProcessingActivity
+import com.pocketfinancer.ui.onboarding.HistoricalSmsProcessingStage
 import java.util.Locale
+import org.json.JSONObject
+
+fun formatGroundedSelectorOutput(json: String): String = runCatching {
+    JSONObject(json).toString(2)
+}.getOrElse {
+    "Parsed: null (non-financial)"
+}
 
 enum class SmsTelemetryStatus {
     PENDING,
@@ -69,7 +77,6 @@ sealed interface SmsTelemetryContent {
 
 data class SmsTelemetryRuntimeFacts(
     val grammarEnabled: Boolean,
-    val thinkingTokenBudget: Int,
     val answerTokenBudget: Int,
     val promptEvalMs: Long? = null,
     val evalMs: Long? = null,
@@ -84,9 +91,7 @@ data class SmsTelemetryUiModel(
     val content: SmsTelemetryContent,
     val phase: SmsPipelinePhase,
     val status: SmsTelemetryStatus,
-    val hasThinkingMode: Boolean,
     val activeStageIndex: Int,
-    val thinkingOutput: String,
     val jsonOutput: String,
     val filterLogs: List<String>,
     val cacheLogs: List<String>,
@@ -95,7 +100,6 @@ data class SmsTelemetryUiModel(
     val performanceText: String?,
     val activeModelName: String?,
     val runtimeFacts: SmsTelemetryRuntimeFacts? = null,
-    val thinkingOutputTruncated: Boolean = false,
     val jsonOutputTruncated: Boolean = false,
     val filterOutcome: SmsTelemetryFilterOutcome? = null,
     val stopState: SmsStopUiState = SmsStopUiState.HIDDEN
@@ -196,9 +200,7 @@ object SmsTelemetryPresenter {
             ),
             phase = phase,
             status = status,
-            hasThinkingMode = state.hasThinkingMode,
             activeStageIndex = activeStageIndex,
-            thinkingOutput = if (isActive) state.thinkingOutput else "",
             jsonOutput = manualJsonOutput(state, sms, isActive),
             filterLogs = filterLogs,
             cacheLogs = cacheLogs,
@@ -243,9 +245,7 @@ object SmsTelemetryPresenter {
             else -> SmsPipelinePhase.PROCESSING
         },
         status = SmsTelemetryStatus.ACTIVE,
-        hasThinkingMode = activity.hasThinkingMode,
         activeStageIndex = activity.stageIndex,
-        thinkingOutput = activity.thinkingOutput,
         jsonOutput = activity.jsonOutput,
         filterLogs = filterLogs,
         cacheLogs = activity.historicalCacheLogs(),
@@ -254,7 +254,6 @@ object SmsTelemetryPresenter {
         performanceText = activity.historicalPerformanceText(),
         activeModelName = activity.modelName,
         runtimeFacts = activity.toSmsTelemetryRuntimeFacts(),
-        thinkingOutputTruncated = activity.thinkingOutputTruncated,
         jsonOutputTruncated = activity.jsonOutputTruncated,
         stopState = stopState
     )
@@ -309,9 +308,7 @@ object SmsTelemetryPresenter {
             ),
             phase = phase,
             status = status,
-            hasThinkingMode = activity.hasThinkingMode,
             activeStageIndex = activity.automaticStageIndex(),
-            thinkingOutput = activity.thinkingOutput,
             jsonOutput = activity.jsonOutput,
             filterLogs = filterLogs,
             cacheLogs = activity.automaticCacheLogs(),
@@ -320,7 +317,6 @@ object SmsTelemetryPresenter {
             performanceText = activity.automaticPerformanceText(),
             activeModelName = activity.modelName,
             runtimeFacts = activity.toSmsTelemetryRuntimeFacts(),
-            thinkingOutputTruncated = activity.thinkingOutputTruncated,
             jsonOutputTruncated = activity.jsonOutputTruncated,
             filterOutcome = when (activity.filterResult) {
                 AutomaticSmsFilterResult.PASSED ->
@@ -354,9 +350,7 @@ object SmsTelemetryPresenter {
             content = SmsTelemetryContent.Gap(title, detail),
             phase = phase,
             status = SmsTelemetryStatus.ACTIVE,
-            hasThinkingMode = false,
             activeStageIndex = 0,
-            thinkingOutput = "",
             jsonOutput = "",
             filterLogs = emptyList(),
             cacheLogs = emptyList(),
@@ -397,9 +391,7 @@ private fun expiredManualTelemetry(
     ),
     phase = SmsPipelinePhase.ISSUE,
     status = SmsTelemetryStatus.PENDING,
-    hasThinkingMode = false,
     activeStageIndex = 0,
-    thinkingOutput = "",
     jsonOutput = "",
     filterLogs = emptyList(),
     cacheLogs = emptyList(),
@@ -420,9 +412,7 @@ private fun expiredAutomaticTelemetry(
     ),
     phase = SmsPipelinePhase.ISSUE,
     status = SmsTelemetryStatus.PENDING,
-    hasThinkingMode = false,
     activeStageIndex = 0,
-    thinkingOutput = "",
     jsonOutput = "",
     filterLogs = emptyList(),
     cacheLogs = emptyList(),
@@ -486,9 +476,11 @@ fun historicalParsedOutput(
     parseJson: (String) -> String
 ): String = when {
     activity.jsonOutput.isEmpty() -> ""
-    activity.stageIndex < 3 && activity.jsonOutputTruncated ->
+    activity.stage == HistoricalSmsProcessingStage.GENERATING &&
+        activity.jsonOutputTruncated ->
         "Live JSON preview truncated; waiting for inference to finish."
-    activity.stageIndex < 3 -> "Waiting for complete JSON..."
+    activity.stage == HistoricalSmsProcessingStage.GENERATING ->
+        "Waiting for complete JSON..."
     activity.jsonOutputTruncated ->
         "Parsed successfully; full JSON was omitted from the live display."
     else -> parseJson(activity.jsonOutput)
@@ -499,9 +491,8 @@ private fun AutomaticSmsProcessingActivity.automaticStageIndex(): Int =
         AutomaticSmsProcessingStage.PREPARING -> -1
         AutomaticSmsProcessingStage.FILTERING,
         AutomaticSmsProcessingStage.LOADING_MODEL -> 0
-        AutomaticSmsProcessingStage.THINKING -> 1
-        AutomaticSmsProcessingStage.GENERATING -> 2
-        AutomaticSmsProcessingStage.PERSISTING -> 3
+        AutomaticSmsProcessingStage.GENERATING -> 1
+        AutomaticSmsProcessingStage.PERSISTING -> 2
         AutomaticSmsProcessingStage.RETRYING,
         AutomaticSmsProcessingStage.FILTERED_OUT,
         AutomaticSmsProcessingStage.SAVED,
@@ -540,7 +531,6 @@ fun AutomaticSmsProcessingActivity.toSmsTelemetryRuntimeFacts():
     val grammar = grammarEnabled ?: return null
     return SmsTelemetryRuntimeFacts(
         grammarEnabled = grammar,
-        thinkingTokenBudget = thinkingTokenBudget,
         answerTokenBudget = answerTokenBudget,
         promptEvalMs = performance?.promptEvalMs,
         evalMs = performance?.evalMs,
@@ -584,7 +574,6 @@ fun HistoricalSmsProcessingActivity.toSmsTelemetryRuntimeFacts():
     val grammar = grammarEnabled ?: return null
     return SmsTelemetryRuntimeFacts(
         grammarEnabled = grammar,
-        thinkingTokenBudget = thinkingTokenBudget,
         answerTokenBudget = answerTokenBudget,
         promptEvalMs = performance?.promptEvalMs,
         evalMs = performance?.evalMs,
