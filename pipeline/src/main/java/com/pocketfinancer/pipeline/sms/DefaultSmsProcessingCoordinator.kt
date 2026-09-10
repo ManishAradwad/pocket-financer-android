@@ -24,7 +24,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -204,7 +204,7 @@ class DefaultSmsProcessingCoordinator @Inject constructor(
         val startedAt = System.currentTimeMillis()
         val result = try {
             if (preferredLease != null) {
-                withTimeout(profile.deadlineMs) {
+                withTimeoutOrNull(profile.deadlineMs) {
                     selector.select(
                         preferredLease,
                         DirectCandidateSelectorRequest(prompt, selectorPayload, grammar, profile)
@@ -212,7 +212,7 @@ class DefaultSmsProcessingCoordinator @Inject constructor(
                 }
             } else {
                 runtime.withLease(SlmRuntimeOwner.SMS_WORKER, modelSpec) { lease ->
-                    withTimeout(profile.deadlineMs) {
+                    withTimeoutOrNull(profile.deadlineMs) {
                         selector.select(
                             lease,
                             DirectCandidateSelectorRequest(prompt, selectorPayload, grammar, profile)
@@ -244,6 +244,16 @@ class DefaultSmsProcessingCoordinator @Inject constructor(
             return retainOwned(
                 claim, operation, listOf("runtime_unavailable"), observer
             )
+        }
+        if (result == null) {
+            // Only this selector's deadline becomes review. Parent/user cancellation
+            // still propagates through the cancellation handler above.
+            store.recordSelectorAttempt(
+                claim, runtimeProfileJson(profile), selectorPayload, null,
+                "failed", null, "runtime_timeout", startedAt, System.currentTimeMillis()
+            )
+            emit(claim, "selector_execution", "failed", listOf("runtime_timeout"), observer)
+            return retainOwned(claim, operation, listOf("runtime_timeout"), observer)
         }
         val raw = result.rawOutput
         if (raw == null) {
