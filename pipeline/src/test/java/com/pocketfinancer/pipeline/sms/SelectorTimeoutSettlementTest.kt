@@ -5,6 +5,7 @@ import com.pocketfinancer.data.repository.SmsOperationClaim
 import com.pocketfinancer.data.repository.SmsProcessingStore
 import com.pocketfinancer.data.repository.SmsSourceEvidence
 import com.pocketfinancer.inference.DefaultDirectCandidateSelector
+import com.pocketfinancer.inference.DirectCandidateSelectorResult
 import com.pocketfinancer.inference.SlmLease
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -18,8 +19,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 @OptIn(ExperimentalCoroutinesApi::class)
-class SelectorTimeoutSettlementTest {
-    @Test fun selectorDeadlineRetainsReviewInsteadOfStoppingImport() = verifySettlement(false)
+class SelectorNoDeadlineSettlementTest {
+    @Test fun selectorCanRunPastFormerDeadline() = verifySettlement(false)
 
     @Test fun userCancellationStillStopsImport() = verifySettlement(true)
 
@@ -45,7 +46,9 @@ class SelectorTimeoutSettlementTest {
         coEvery { selector.select(any(), any()) } coAnswers {
             if (userCancelled) throw kotlinx.coroutines.CancellationException("User stopped")
             delay(60_001)
-            error("The selector should have timed out")
+            DirectCandidateSelectorResult(
+                null, "failed", "runtime_unavailable", lease.model, null, null
+            )
         }
         val coordinator = DefaultSmsProcessingCoordinator(context, store, mockk(), mockk(),
             mockk(), selector, mockk(), snapshotFactory)
@@ -59,10 +62,10 @@ class SelectorTimeoutSettlementTest {
             coVerify(exactly = 0) { store.retainForReview(any(), any(), any()) }
         } else {
             assertTrue(result is SmsProcessingOutcome.RetainedForReview)
-            coVerify(exactly = 1) { store.retainForReview(any(), listOf("runtime_timeout"), any()) }
+            coVerify(exactly = 1) { store.retainForReview(any(), listOf("runtime_unavailable"), any()) }
             coVerify(exactly = 1) {
                 store.recordSelectorAttempt(any(), any(), any(), null, "failed", null,
-                    "runtime_timeout", any(), any())
+                    "runtime_unavailable", any(), any())
             }
             coVerify(exactly = 0) { store.requestStop(any(), any()) }
         }

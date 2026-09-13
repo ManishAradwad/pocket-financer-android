@@ -24,7 +24,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -79,7 +78,7 @@ class DefaultSmsProcessingCoordinator @Inject constructor(
             operation.configuration.decoding != "greedy" ||
             operation.configuration.answerTokenLimit != 512 ||
             operation.configuration.rawOutputByteLimit != 16_384 ||
-            operation.configuration.parserDeadlineMs != 60_000L ||
+            operation.configuration.parserDeadlineMs != 0L ||
             operation.configuration.rolloutMode !in setOf("shadow", "review_only") ||
             !snapshotFactory.configurationMatches(operation)
         ) {
@@ -204,20 +203,16 @@ class DefaultSmsProcessingCoordinator @Inject constructor(
         val startedAt = System.currentTimeMillis()
         val result = try {
             if (preferredLease != null) {
-                withTimeoutOrNull(profile.deadlineMs) {
-                    selector.select(
-                        preferredLease,
-                        DirectCandidateSelectorRequest(prompt, selectorPayload, grammar, profile)
-                    )
-                }
+                selector.select(
+                    preferredLease,
+                    DirectCandidateSelectorRequest(prompt, selectorPayload, grammar, profile)
+                )
             } else {
                 runtime.withLease(SlmRuntimeOwner.SMS_WORKER, modelSpec) { lease ->
-                    withTimeoutOrNull(profile.deadlineMs) {
-                        selector.select(
-                            lease,
-                            DirectCandidateSelectorRequest(prompt, selectorPayload, grammar, profile)
-                        )
-                    }
+                    selector.select(
+                        lease,
+                        DirectCandidateSelectorRequest(prompt, selectorPayload, grammar, profile)
+                    )
                 }
             }
         } catch (cancelled: CancellationException) {
@@ -244,16 +239,6 @@ class DefaultSmsProcessingCoordinator @Inject constructor(
             return retainOwned(
                 claim, operation, listOf("runtime_unavailable"), observer
             )
-        }
-        if (result == null) {
-            // Only this selector's deadline becomes review. Parent/user cancellation
-            // still propagates through the cancellation handler above.
-            store.recordSelectorAttempt(
-                claim, runtimeProfileJson(profile), selectorPayload, null,
-                "failed", null, "runtime_timeout", startedAt, System.currentTimeMillis()
-            )
-            emit(claim, "selector_execution", "failed", listOf("runtime_timeout"), observer)
-            return retainOwned(claim, operation, listOf("runtime_timeout"), observer)
         }
         val raw = result.rawOutput
         if (raw == null) {

@@ -28,19 +28,19 @@
       "sha256": "5b16b9a092eb396a8ca0691d4a0f408cbb93016842b1d2842b8dd759b14dc2e8"
     },
     {
-      "contract": "pocketfinancer.selector-validation-profile/2",
-      "path": "configs/sms_processing/contracts/v2/selector-validation-profile.json",
-      "sha256": "b27e33d483421c20aff50d2eb3a117ef7d9d29664c48654bd3c5bde97c133272"
+      "contract": "pocketfinancer.selector-validation-profile/3",
+      "path": "configs/sms_processing/contracts/v3/selector-validation-profile.json",
+      "sha256": "99c24fef59066f3ce86238b8545d186ca57c161acf25dbf88de3bc0abbc8edab"
     },
     {
-      "contract": "pocketfinancer.selector-validation-profile-schema/2",
-      "path": "configs/sms_processing/contracts/v2/selector-validation-profile.schema.json",
-      "sha256": "fb6ff4201ce1d2902ea3f8a52eacc454d1d23f6dcbc386f4dd232d6796b47c7c"
+      "contract": "pocketfinancer.selector-validation-profile-schema/3",
+      "path": "configs/sms_processing/contracts/v3/selector-validation-profile.schema.json",
+      "sha256": "00a402f4fe9decdc7a79415afa43fedf9cf9f385d29dd063cf03979077544373"
     },
     {
-      "contract": "pocketfinancer.processing-config/1",
-      "path": "configs/sms_processing/contracts/processing-config.schema.json",
-      "sha256": "576de91819527326e43f67a1f1753af7aeba60e7d9e47ed93d2a01285cf2d840"
+      "contract": "pocketfinancer.processing-config/2",
+      "path": "configs/sms_processing/contracts/v2/processing-config.schema.json",
+      "sha256": "a0cc5c88502113282b90a7972fd335a55acfe170aea9382cea8ecba49cd89033"
     },
     {
       "contract": "pocketfinancer.processing-result/1",
@@ -140,7 +140,7 @@
   ],
   "automatic_persistence_enabled": false,
   "contract": "pocketfinancer.contract-release-manifest/1",
-  "release_id": "native-integration-v1",
+  "release_id": "native-integration-v2",
   "runtime_policy": {
     "answer_token_limit": 512,
     "automatic_retry_limit": 3,
@@ -148,7 +148,7 @@
     "claim_lease_ms": 120000,
     "decoding": "greedy",
     "generation_mode": "DIRECT_NON_THINKING",
-    "parser_deadline_ms": 60000,
+    "parser_deadline_ms": 0,
     "raw_output_utf8_byte_limit": 16384
   },
   "status": "frozen_for_native_implementation"

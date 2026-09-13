@@ -7,8 +7,8 @@ data class AdmittedMessageRef(
 )
 
 data class SmsOperationConfiguration(
-    val contract: String = "pocketfinancer.processing-config/1",
-    val releaseId: String = "native-integration-v1",
+    val contract: String = "pocketfinancer.processing-config/2",
+    val releaseId: String = "native-integration-v2",
     val operationId: String,
     val parentOperationId: String?,
     val sourceId: String,
@@ -37,7 +37,7 @@ data class SmsOperationConfiguration(
     val decoding: String = "greedy",
     val answerTokenLimit: Int = 512,
     val rawOutputByteLimit: Int = 16_384,
-    val parserDeadlineMs: Long = 60_000
+    val parserDeadlineMs: Long = 0
 )
 
 data class SmsOperationSnapshot(

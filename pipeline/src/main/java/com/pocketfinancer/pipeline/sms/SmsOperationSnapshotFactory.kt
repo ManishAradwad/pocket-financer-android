@@ -186,7 +186,7 @@ class SmsOperationSnapshotFactory @Inject constructor(
                 .put("device_cohort", value.deviceCohort)
                 .put("prompt_version", "pocketfinancer.selector-prompt/1")
                 .put("prompt_sha256", value.promptHash)
-                .put("validation_profile", "pocketfinancer.selector-validation-profile/2")
+                .put("validation_profile", "pocketfinancer.selector-validation-profile/3")
                 .put("generation_mode", value.generationMode)
                 .put("decoding", value.decoding)
                 .put("answer_token_limit", value.answerTokenLimit)
