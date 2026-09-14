@@ -25,4 +25,31 @@ class PackagedSmsContractTest {
             assertEquals("Frozen asset changed during checkout or packaging: $name", digest, actual)
         }
     }
+
+    @Test fun nativeV3BundleRetainsManifestPathsAndBytes() {
+        val assets = InstrumentationRegistry.getInstrumentation().targetContext.assets
+
+        val binding = NativeSmsV3Assets.verify(assets)
+
+        assertEquals(NativeSmsV3Assets.RELEASE_ID, binding.releaseId)
+        assertEquals(NativeSmsV3Assets.MANIFEST_SHA256, binding.manifestSha256)
+        assertEquals(
+            "configuration_integrity",
+            NativeSmsV3AssetIntegrityException.REASON_CODE
+        )
+        assertEquals(
+            NativeSmsV3Assets.EXPECTED_ARTIFACT_COUNT,
+            binding.artifactsByContract.size
+        )
+        assertEquals(
+            "configs/sms_processing/contracts/v3/sms-extractor.schema.json",
+            binding.artifactsByContract.getValue("pocketfinancer.sms-extractor/1").path
+        )
+        assertEquals(
+            "tests/sms_processing/golden/extractor-v1/sanitized-vectors.json",
+            binding.artifactsByContract
+                .getValue("pocketfinancer.sanitized-extractor-golden/1")
+                .path
+        )
+    }
 }
