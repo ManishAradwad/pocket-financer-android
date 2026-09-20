@@ -134,6 +134,53 @@ class ReviewViewModel @Inject constructor(
         }
     }
 
+    fun resolveGrounded(
+        action: SmsReviewAction,
+        corrections: List<SmsFieldCorrection>
+    ) {
+        if (_state.value.loading || _state.value.actionCompleted) return
+        val details = _state.value.details ?: return
+        if (action !in setOf(
+                SmsReviewAction.CONFIRM,
+                SmsReviewAction.CORRECT,
+                SmsReviewAction.SAVE_DRAFT,
+                SmsReviewAction.REJECT
+            )
+        ) {
+            _state.update { it.copy(error = SAFE_ERROR) }
+            return
+        }
+        val command = SmsReviewCommand(
+            actionId = UUID.randomUUID().toString(),
+            reviewCaseId = details.reviewCase.id,
+            expectedRevision = details.reviewCase.revision,
+            action = action,
+            corrections = corrections
+        )
+        _state.update { it.copy(loading = true, error = null) }
+        viewModelScope.launch {
+            runCatching {
+                repository.resolve(command, System.currentTimeMillis())
+                if (action == SmsReviewAction.SAVE_DRAFT) {
+                    repository.details(details.reviewCase.id)
+                } else {
+                    null
+                }
+            }.onSuccess { refreshed ->
+                _state.update {
+                    it.copy(
+                        loading = false,
+                        details = refreshed ?: it.details,
+                        actionCompleted = action != SmsReviewAction.SAVE_DRAFT
+                    )
+                }
+                if (action != SmsReviewAction.SAVE_DRAFT) loadInbox()
+            }.onFailure {
+                _state.update { it.copy(loading = false, error = SAFE_ERROR) }
+            }
+        }
+    }
+
     private fun field(name: String, jsonValue: String) = SmsFieldCorrection(
         field = name,
         classification = SmsFieldGroundingClassification.SUPPLIED_MANUAL_UNGROUNDED_VALUE,

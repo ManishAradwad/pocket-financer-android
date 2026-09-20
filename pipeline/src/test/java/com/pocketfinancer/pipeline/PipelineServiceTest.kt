@@ -5,10 +5,13 @@ import com.pocketfinancer.data.repository.SmsProcessingStore
 import com.pocketfinancer.inference.SlmLease
 import com.pocketfinancer.inference.SlmModelSpec
 import com.pocketfinancer.pipeline.sms.DefaultSmsProcessingCoordinator
-import com.pocketfinancer.pipeline.sms.SmsOperationConfiguration
-import com.pocketfinancer.pipeline.sms.SmsOperationSnapshot
+import com.pocketfinancer.pipeline.sms.DefaultSmsV4ProcessingCoordinator
 import com.pocketfinancer.pipeline.sms.SmsOperationSnapshotFactory
 import com.pocketfinancer.pipeline.sms.SmsProcessingOutcome
+import com.pocketfinancer.pipeline.sms.SmsV4ModelIdentity
+import com.pocketfinancer.pipeline.sms.SmsV4OperationConfiguration
+import com.pocketfinancer.pipeline.sms.SmsV4OperationSnapshot
+import com.pocketfinancer.pipeline.sms.SmsV4OperationSnapshotFactory
 import com.pocketfinancer.sms.SmsReader
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -27,6 +30,8 @@ class PipelineServiceTest {
     private lateinit var snapshotFactory: SmsOperationSnapshotFactory
     private lateinit var configuration: ProcessingConfigurationRepository
     private lateinit var coordinator: DefaultSmsProcessingCoordinator
+    private lateinit var v4SnapshotFactory: SmsV4OperationSnapshotFactory
+    private lateinit var v4Coordinator: DefaultSmsV4ProcessingCoordinator
     private lateinit var lease: SlmLease
     private lateinit var pipeline: PipelineService
     private val snapshot = snapshot()
@@ -37,19 +42,28 @@ class PipelineServiceTest {
         snapshotFactory = mockk()
         configuration = mockk()
         coordinator = mockk()
+        v4SnapshotFactory = mockk()
+        v4Coordinator = mockk()
         lease = mockk()
         every { lease.model } returns SlmModelSpec(
             modelId = "test-selector",
             modelPath = "synthetic-model.gguf"
         )
         every { configuration.enabledProfiles("INR") } returns listOf("core-en", "india")
+        every { v4Coordinator.modelIdentityForLease(lease) } returns
+            SmsV4ModelIdentity(true, "test-selector", "a".repeat(64))
+        every { v4Coordinator.currentModelIdentity() } returns
+            SmsV4ModelIdentity(false, null, null)
         coEvery {
-            snapshotFactory.create(
+            v4SnapshotFactory.create(
                 any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(),
-                any(), any(), any()
+                any(), any()
             )
         } returns snapshot
-        pipeline = PipelineService(store, snapshotFactory, configuration, coordinator)
+        pipeline = PipelineService(
+            store, snapshotFactory, configuration, coordinator,
+            v4SnapshotFactory, v4Coordinator
+        )
     }
 
     @Test
@@ -66,18 +80,18 @@ class PipelineServiceTest {
         assertEquals(PipelineService.ProcessingResult.AwaitingConfiguration, result)
         coVerify(exactly = 1) { store.admitSource(any()) }
         coVerify(exactly = 0) {
-            snapshotFactory.create(
+            v4SnapshotFactory.create(
                 any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(),
-                any(), any(), any()
+                any(), any()
             )
         }
-        coVerify(exactly = 0) { coordinator.processUsingLease(any(), any(), any(), any()) }
+        coVerify(exactly = 0) { v4Coordinator.processUsingLease(any(), any(), any(), any()) }
     }
 
     @Test
     fun `configured processing delegates once and retains review outcome`() = runTest {
         every { configuration.confirmedPrimaryCurrency() } returns "INR"
-        coEvery { coordinator.processUsingLease(any(), snapshot, lease, any()) } returns
+        coEvery { v4Coordinator.processUsingLease(any(), snapshot, lease, any()) } returns
             SmsProcessingOutcome.RetainedForReview(
                 snapshot.operationId,
                 "review-id",
@@ -90,15 +104,14 @@ class PipelineServiceTest {
         assertEquals(PipelineService.SkipReason.RETAINED_FOR_REVIEW, skipped.reason)
         coVerify(exactly = 1) { store.admitSource(any()) }
         coVerify(exactly = 1) {
-            coordinator.processUsingLease(any(), snapshot, lease, any())
+            v4Coordinator.processUsingLease(any(), snapshot, lease, any())
         }
     }
 
     @Test
     fun `worker entrypoint lets coordinator retain an unavailable model`() = runTest {
         every { configuration.confirmedPrimaryCurrency() } returns "INR"
-        every { coordinator.currentSelectorModelId() } returns null
-        coEvery { coordinator.process(any(), snapshot, any()) } returns
+        coEvery { v4Coordinator.process(any(), snapshot, any()) } returns
             SmsProcessingOutcome.RetainedForReview(
                 snapshot.operationId,
                 "review-id",
@@ -109,16 +122,16 @@ class PipelineServiceTest {
 
         val skipped = assertIs<PipelineService.ProcessingResult.Skipped>(result)
         assertEquals(PipelineService.SkipReason.RETAINED_FOR_REVIEW, skipped.reason)
-        coVerify(exactly = 1) { coordinator.process(any(), snapshot, any()) }
+        coVerify(exactly = 1) { v4Coordinator.process(any(), snapshot, any()) }
         coVerify(exactly = 0) {
-            coordinator.processUsingLease(any(), any(), any(), any())
+            v4Coordinator.processUsingLease(any(), any(), any(), any())
         }
     }
 
     @Test
     fun `retryable coordinator outcome remains retryable`() = runTest {
         every { configuration.confirmedPrimaryCurrency() } returns "INR"
-        coEvery { coordinator.processUsingLease(any(), snapshot, lease, any()) } returns
+        coEvery { v4Coordinator.processUsingLease(any(), snapshot, lease, any()) } returns
             SmsProcessingOutcome.RetryableFailure(
                 snapshot.operationId,
                 "review-id",
@@ -142,36 +155,39 @@ class PipelineServiceTest {
         providerMessageId = "synthetic-provider-id"
     )
 
-    private fun snapshot(): SmsOperationSnapshot {
+    private fun snapshot(): SmsV4OperationSnapshot {
         val operationId = "11111111-1111-4111-8111-111111111111"
-        return SmsOperationSnapshot(
+        return SmsV4OperationSnapshot(
             operationId = operationId,
             parentOperationId = null,
             stableEventId = "22222222-2222-4222-8222-222222222222",
-            configuration = SmsOperationConfiguration(
+            configuration = SmsV4OperationConfiguration(
                 operationId = operationId,
                 parentOperationId = null,
                 sourceId = "synthetic-source",
                 sourceRefHash = "a".repeat(64),
                 trigger = "manual",
                 createdAtEpochMs = 1_700_000_000_000,
+                admissionTimestampEpochMs = 1_700_000_000_000,
+                receivedTimestampEpochMs = 1_700_000_000_000,
+                receivedTimestampProvenance = "acquisition_supplied_message_time",
+                timezoneId = "UTC",
                 primaryCurrency = "INR",
                 enabledProfiles = listOf("core-en", "india"),
-                sourceTimestampEpochMs = 1_700_000_000_000,
-                sourceTimestampProvenance = "acquisition_supplied_message_time",
-                admissionTimestampEpochMs = 1_700_000_000_000,
-                timezoneId = "UTC",
                 releaseManifestHash = "b".repeat(64),
                 currencyAssetHash = "c".repeat(64),
                 profileAssetHashes = emptyMap(),
-                selectorEligible = true,
-                selectorIneligibilityReason = null,
-                selectorModelId = "test-selector",
-                selectorModelHash = null,
-                selectorRuntimeVersion = "test-runtime",
+                extractorEligible = true,
+                extractorIneligibilityReason = null,
+                modelIdentifier = "test-selector",
+                modelFileSha256 = "a".repeat(64),
+                modelIdentityKind = "file_sha256",
+                runtimeVersion = "test-runtime",
                 osVersion = "test-os",
                 deviceCohort = "test-device",
-                promptHash = "d".repeat(64)
+                promptHash = "d".repeat(64),
+                grammarHash = "e".repeat(64),
+                validationProfileHash = "f".repeat(64)
             ),
             configurationJson = "{}",
             configurationHash = "e".repeat(64)

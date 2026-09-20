@@ -29,7 +29,7 @@ class AppDatabaseMigrationTest {
     )
 
     @Test
-    fun `v3 to v6 preserves exact duplicates with stable unique identities`() {
+    fun `v3 to v7 preserves exact duplicates with stable unique identities`() {
         migrationHelper.createDatabase(V3_DATABASE_NAME, 3).apply {
             insertV3Transaction(
                 id = "tx-a",
@@ -51,11 +51,12 @@ class AppDatabaseMigrationTest {
 
         val migrated = migrationHelper.runMigrationsAndValidate(
             V3_DATABASE_NAME,
-            6,
+            7,
             true,
             AppDatabase.MIGRATION_3_4,
             AppDatabase.MIGRATION_4_5,
-            AppDatabase.MIGRATION_5_6
+            AppDatabase.MIGRATION_5_6,
+            AppDatabase.MIGRATION_6_7
         )
 
         migrated.query(
@@ -117,6 +118,7 @@ class AppDatabaseMigrationTest {
             V3_DATABASE_NAME
         )
             .allowMainThreadQueries()
+            .addMigrations(AppDatabase.MIGRATION_6_7)
             .build()
         try {
             runBlocking {
@@ -174,7 +176,7 @@ class AppDatabaseMigrationTest {
     }
 
     @Test
-    fun `v4 to v6 preserves provenance and promotes queues to durable operations`() {
+    fun `v4 to v7 preserves provenance and promotes queues to durable operations`() {
         migrationHelper.createDatabase(V4_DATABASE_NAME, 4).apply {
             insertV4Transaction(
                 id = "legacy-provider-a",
@@ -199,10 +201,11 @@ class AppDatabaseMigrationTest {
 
         val migrated = migrationHelper.runMigrationsAndValidate(
             V4_DATABASE_NAME,
-            6,
+            7,
             true,
             AppDatabase.MIGRATION_4_5,
-            AppDatabase.MIGRATION_5_6
+            AppDatabase.MIGRATION_5_6,
+            AppDatabase.MIGRATION_6_7
         )
 
         migrated.query(
@@ -288,6 +291,40 @@ class AppDatabaseMigrationTest {
             assertTrue(cursor.moveToFirst())
             assertEquals(2, cursor.getInt(0))
         }
+        migrated.close()
+    }
+
+    @Test
+    fun `v6 to v7 adds nullable indexed transaction fingerprints`() {
+        migrationHelper.createDatabase(V6_DATABASE_NAME, 6).close()
+        val migrated = migrationHelper.runMigrationsAndValidate(
+            V6_DATABASE_NAME,
+            7,
+            true,
+            AppDatabase.MIGRATION_6_7
+        )
+        migrated.query("PRAGMA table_info(`sms_reconstructed_results`)").use { cursor ->
+            var found = false
+            while (cursor.moveToNext()) {
+                if (cursor.getString(1) == "transactionFingerprint") {
+                    found = true
+                    assertEquals(0, cursor.getInt(3))
+                }
+            }
+            assertTrue(found)
+        }
+        assertIndexUnique(
+            migrated,
+            "sms_reconstructed_results",
+            "index_sms_reconstructed_results_transactionFingerprint",
+            expectedUnique = false
+        )
+        assertIndexUnique(
+            migrated,
+            "account_aliases",
+            "index_account_aliases_normalizedAliasHash_matchingScope",
+            expectedUnique = false
+        )
         migrated.close()
     }
 
@@ -429,6 +466,7 @@ class AppDatabaseMigrationTest {
     private companion object {
         const val V3_DATABASE_NAME = "migration-v3-v6"
         const val V4_DATABASE_NAME = "migration-v4-v6"
+        const val V6_DATABASE_NAME = "migration-v6-v7"
         const val TEST_SENDER = "AX-HDFCBK"
         const val DUPLICATE_BODY = "Rs 500 debited at Merchant"
         const val SENT_AT = 1_200_000L

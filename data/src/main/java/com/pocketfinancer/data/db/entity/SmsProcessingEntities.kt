@@ -125,7 +125,10 @@ data class SmsProcessingTraceEventEntity(
 
 @Entity(
     tableName = "sms_reconstructed_results",
-    indices = [Index(value = ["operationId"], unique = true)]
+    indices = [
+        Index(value = ["operationId"], unique = true),
+        Index(value = ["transactionFingerprint"])
+    ]
 )
 data class SmsReconstructedResultEntity(
     @PrimaryKey val id: String,
@@ -133,6 +136,7 @@ data class SmsReconstructedResultEntity(
     val contractVersion: String,
     val recognitionDecision: String,
     val semanticResultJson: String?,
+    val transactionFingerprint: String? = null,
     val createdAt: Long
 )
 
@@ -231,7 +235,7 @@ data class TransactionRevisionEntity(
     tableName = "account_aliases",
     indices = [
         Index(value = ["accountId"]),
-        Index(value = ["normalizedAliasHash", "matchingScope"], unique = true)
+        Index(value = ["normalizedAliasHash", "matchingScope"])
     ]
 )
 data class AccountAliasEntity(

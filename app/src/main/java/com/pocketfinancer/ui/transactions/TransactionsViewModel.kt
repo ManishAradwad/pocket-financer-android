@@ -8,6 +8,9 @@ import com.pocketfinancer.data.model.TransactionType
 import com.pocketfinancer.data.model.Account
 import com.pocketfinancer.data.repository.TransactionRepository
 import com.pocketfinancer.data.repository.AccountRepository
+import com.pocketfinancer.data.repository.SmsReviewRepository
+import com.pocketfinancer.data.db.entity.SmsProcessingOperationEntity
+import com.pocketfinancer.data.db.entity.SmsReviewCaseEntity
 import com.pocketfinancer.ui.home.HomeSyncManager
 import com.pocketfinancer.ui.smsprocessing.SmsProcessingTarget
 import com.pocketfinancer.ui.home.HomeSyncState
@@ -49,7 +52,9 @@ data class TransactionsUiState(
     val selectedAccountId: String = "All",
     val syncState: HomeSyncState = HomeSyncState(),
     val searchQuery: String = "",
-    val sortOption: SortOption = SortOption.DATE_DESC
+    val sortOption: SortOption = SortOption.DATE_DESC,
+    val processingOperations: List<SmsProcessingOperationEntity> = emptyList(),
+    val reviewCases: List<SmsReviewCaseEntity> = emptyList()
 )
 
 @HiltViewModel
@@ -59,7 +64,8 @@ class TransactionsViewModel @Inject constructor(
     private val accountRepository: AccountRepository,
     private val syncManager: HomeSyncManager,
     private val smsFilterPipeline: SmsFilterPipeline,
-    private val appFlowCoordinator: SlmAppFlowCoordinator
+    private val appFlowCoordinator: SlmAppFlowCoordinator,
+    private val smsReviewRepository: SmsReviewRepository
 ) : ViewModel() {
 
     private val _activeSegment = MutableStateFlow("All")
@@ -76,6 +82,13 @@ class TransactionsViewModel @Inject constructor(
 
     private val _sortOption = MutableStateFlow(SortOption.DATE_DESC)
     val sortOption: StateFlow<SortOption> = _sortOption.asStateFlow()
+
+    private val _processingOperations = MutableStateFlow<List<SmsProcessingOperationEntity>>(emptyList())
+    private val _reviewCases = MutableStateFlow<List<SmsReviewCaseEntity>>(emptyList())
+
+    init {
+        refreshNativeWork()
+    }
 
     /** Full evidence is collected only by an open telemetry sheet. */
     val manualSyncTelemetry: StateFlow<HomeSyncState> = syncManager.syncState
@@ -98,7 +111,9 @@ class TransactionsViewModel @Inject constructor(
         _selectedAccountId,
         manualSyncUiState,
         _searchQuery,
-        _sortOption
+        _sortOption,
+        _processingOperations,
+        _reviewCases
     ) { flowsArray ->
         val txs = flowsArray[0] as List<Transaction>
         val segment = flowsArray[1] as String
@@ -108,6 +123,8 @@ class TransactionsViewModel @Inject constructor(
         val syncState = flowsArray[5] as HomeSyncState
         val query = flowsArray[6] as String
         val sort = flowsArray[7] as SortOption
+        val processing = flowsArray[8] as List<SmsProcessingOperationEntity>
+        val reviews = flowsArray[9] as List<SmsReviewCaseEntity>
 
         val filteredBySegment = when (segment) {
             "Debits" -> txs.filter { it.type == TransactionType.DEBIT }
@@ -145,7 +162,9 @@ class TransactionsViewModel @Inject constructor(
             selectedAccountId = selectedAccId,
             syncState = syncState,
             searchQuery = query,
-            sortOption = sort
+            sortOption = sort,
+            processingOperations = processing,
+            reviewCases = reviews
         )
     }
     .stateIn(
@@ -172,6 +191,17 @@ class TransactionsViewModel @Inject constructor(
 
     fun updateSortOption(option: SortOption) {
         _sortOption.value = option
+    }
+
+    fun refreshNativeWork() {
+        viewModelScope.launch {
+            runCatching {
+                smsReviewRepository.activeOperations() to smsReviewRepository.openCases()
+            }.onSuccess { (processing, reviews) ->
+                _processingOperations.value = processing
+                _reviewCases.value = reviews
+            }
+        }
     }
 
     fun resetSyncState() {

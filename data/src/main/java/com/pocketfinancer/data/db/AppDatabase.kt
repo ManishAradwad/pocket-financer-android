@@ -65,7 +65,7 @@ import javax.inject.Singleton
         LegacyTransactionSnapshotEntity::class,
         SmsTraceImportReceiptEntity::class
     ],
-    version = 6,
+    version = 7,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -447,6 +447,29 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /** Adds duplicate fingerprints and permits detection of ambiguous owned aliases. */
+        val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE sms_reconstructed_results " +
+                        "ADD COLUMN transactionFingerprint TEXT"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS " +
+                        "`index_sms_reconstructed_results_transactionFingerprint` " +
+                        "ON `sms_reconstructed_results` (`transactionFingerprint`)"
+                )
+                db.execSQL(
+                    "DROP INDEX IF EXISTS " +
+                        "`index_account_aliases_normalizedAliasHash_matchingScope`"
+                )
+                db.execSQL(
+                    "CREATE INDEX `index_account_aliases_normalizedAliasHash_matchingScope` " +
+                        "ON `account_aliases` (`normalizedAliasHash`, `matchingScope`)"
+                )
+            }
+        }
+
         private fun createNativeSmsTables(db: SupportSQLiteDatabase) {
             val statements = listOf(
                 """
@@ -732,7 +755,8 @@ abstract class AppDatabase : RoomDatabase() {
                     MIGRATION_2_3,
                     MIGRATION_3_4,
                     MIGRATION_4_5,
-                    MIGRATION_5_6
+                    MIGRATION_5_6,
+                    MIGRATION_6_7
                 )
 
             return builder.build()

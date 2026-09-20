@@ -61,6 +61,17 @@ import java.text.SimpleDateFormat
 import java.util.*
 import kotlinx.coroutines.flow.StateFlow
 
+private fun nativeStageLabel(state: String): String = when (state) {
+    "ready" -> "Alert saved"
+    "claimed", "analysis_started", "analyzed" -> "Inspecting message"
+    "selector_started" -> "Running on-device AI"
+    "selector_completed", "validated" -> "Validating details"
+    "reconstructed" -> "Matching account"
+    "retained_for_review" -> "Ready for review"
+    "interrupted" -> "Interrupted — retry available"
+    else -> "Processing locally"
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun TransactionsScreen(
@@ -86,6 +97,7 @@ fun TransactionsScreen(
             focusRequester.requestFocus()
         }
     }
+    LaunchedEffect(Unit) { viewModel.refreshNativeWork() }
 
     Box(
         modifier = Modifier
@@ -392,7 +404,9 @@ fun TransactionsScreen(
             }
 
             val pipelineCard = renderedManualSyncState.toSmsPipelineCardUiModel()
-            val showEmptyState = shouldShowTransactionsEmptyState(
+            val hasNativeWork =
+                state.processingOperations.isNotEmpty() || state.reviewCases.isNotEmpty()
+            val showEmptyState = !hasNativeWork && shouldShowTransactionsEmptyState(
                 hasTransactions = state.transactions.isNotEmpty(),
                 hasSyncCard = pipelineCard != null,
                 syncStatus = renderedManualSyncState.status
@@ -417,6 +431,67 @@ fun TransactionsScreen(
                         .fillMaxSize()
                         .weight(1f)
                 ) {
+                    if (state.processingOperations.isNotEmpty()) {
+                        item(key = "native-processing-header") {
+                            Text(
+                                "Processing",
+                                style = MaterialTheme.typography.titleMedium,
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                            )
+                        }
+                        items(
+                            count = state.processingOperations.size,
+                            key = { index -> state.processingOperations[index].id }
+                        ) { index ->
+                            val operation = state.processingOperations[index]
+                            Card(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 4.dp),
+                                colors = CardDefaults.cardColors(containerColor = M3_SurfaceContainerLow)
+                            ) {
+                                Column(Modifier.padding(16.dp)) {
+                                    Text(nativeStageLabel(operation.state), fontWeight = FontWeight.SemiBold)
+                                    Text(
+                                        "Saved locally · on-device processing",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = M3_OnSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    if (state.reviewCases.isNotEmpty()) {
+                        item(key = "native-review-header") {
+                            Text(
+                                "Needs Review",
+                                style = MaterialTheme.typography.titleMedium,
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                            )
+                        }
+                        items(
+                            count = state.reviewCases.size,
+                            key = { index -> state.reviewCases[index].id }
+                        ) { index ->
+                            val review = state.reviewCases[index]
+                            Card(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 4.dp)
+                                    .clickable { onNavigateToTab("reviews") },
+                                colors = CardDefaults.cardColors(containerColor = M3_SecondaryContainer)
+                            ) {
+                                Column(Modifier.padding(16.dp)) {
+                                    Text("Review extracted transaction", fontWeight = FontWeight.SemiBold)
+                                    Text(
+                                        "Tap to verify source evidence · revision ${review.revision}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = M3_OnSecondaryContainer
+                                    )
+                                }
+                            }
+                        }
+                    }
                     pipelineCard?.let { model ->
                         item(key = "manual-sms-pipeline") {
                             SmsPipelineActivityCard(

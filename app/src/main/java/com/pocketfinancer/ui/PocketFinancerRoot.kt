@@ -188,7 +188,12 @@ fun PocketFinancerRoot() {
                         if (reviewCaseId != null) {
                             ReviewDetailScreen(
                                 reviewCaseId = reviewCaseId,
-                                onFinished = { navController.popBackStack() }
+                                onFinished = {
+                                    navController.navigate(Screen.Transactions.route) {
+                                        popUpTo(navController.graph.findStartDestination().id)
+                                        launchSingleTop = true
+                                    }
+                                }
                             )
                         }
                     }

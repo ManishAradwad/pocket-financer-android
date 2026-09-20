@@ -11,7 +11,10 @@ import com.pocketfinancer.inference.SlmPerformanceData
 import com.pocketfinancer.sms.SmsReader
 import com.pocketfinancer.pipeline.sms.AdmittedMessageRef
 import com.pocketfinancer.pipeline.sms.DefaultSmsProcessingCoordinator
+import com.pocketfinancer.pipeline.sms.DefaultSmsV4ProcessingCoordinator
 import com.pocketfinancer.pipeline.sms.SmsOperationSnapshotFactory
+import com.pocketfinancer.pipeline.sms.SmsV4ModelIdentity
+import com.pocketfinancer.pipeline.sms.SmsV4OperationSnapshotFactory
 import com.pocketfinancer.pipeline.sms.SmsProcessingOutcome
 import com.pocketfinancer.pipeline.sms.SmsProcessingObserver
 import java.util.UUID
@@ -28,7 +31,9 @@ class PipelineService @Inject constructor(
     private val smsProcessingStore: SmsProcessingStore,
     private val snapshotFactory: SmsOperationSnapshotFactory,
     private val processingConfiguration: ProcessingConfigurationRepository,
-    private val smsProcessingCoordinator: DefaultSmsProcessingCoordinator
+    private val smsProcessingCoordinator: DefaultSmsProcessingCoordinator,
+    private val v4SnapshotFactory: SmsV4OperationSnapshotFactory,
+    private val v4Coordinator: DefaultSmsV4ProcessingCoordinator
 ) {
     private val _pipelineState = MutableStateFlow<PipelineStep?>(null)
     val pipelineState: StateFlow<PipelineStep?> = _pipelineState.asStateFlow()
@@ -146,14 +151,12 @@ class PipelineService @Inject constructor(
         observer: ProcessingObserver? = null,
         trigger: String = "manual"
     ): ProcessingResult {
-        return processThroughGroundedCoordinator(
+        return processThroughV4Coordinator(
             sms = sms,
             lease = lease,
             trigger = trigger,
             store = smsProcessingStore,
-            snapshotFactory = snapshotFactory,
             configurationRepository = processingConfiguration,
-            coordinator = smsProcessingCoordinator,
             observer = observer
         )
     }
@@ -168,14 +171,12 @@ class PipelineService @Inject constructor(
         observer: ProcessingObserver? = null,
         trigger: String = "manual"
     ): ProcessingResult {
-        return processThroughGroundedCoordinator(
+        return processThroughV4Coordinator(
             sms = sms,
             lease = null,
             trigger = trigger,
             store = smsProcessingStore,
-            snapshotFactory = snapshotFactory,
             configurationRepository = processingConfiguration,
-            coordinator = smsProcessingCoordinator,
             observer = observer
         )
     }
@@ -185,7 +186,7 @@ class PipelineService @Inject constructor(
         val retry = smsProcessingStore.retryContext(reviewCaseId)
         val previousConfiguration = JSONObject(retry.operation.configurationJson)
         val previousCurrencyContext = previousConfiguration.getJSONObject("currency_context")
-        val previousSelector = previousConfiguration.getJSONObject("selector")
+        val previousContract = previousConfiguration.getString("contract")
         val currency = if (configurationMode == "original") {
             previousCurrencyContext.getString("primary_currency")
         } else {
@@ -199,42 +200,143 @@ class PipelineService @Inject constructor(
         } else {
             processingConfiguration.enabledProfiles(currency)
         }
-        val selectorModelId = if (configurationMode == "original") {
-            previousSelector.optString("model_identifier")
-                .takeIf { it.isNotBlank() && it != "null" }
-        } else {
-            smsProcessingCoordinator.currentSelectorModelId()
-        }
         val source = retry.source
         val reference = AdmittedMessageRef(
             source.id,
             source.admissionReceiptId,
             SmsProcessingStore.sha256(source.rawMessage)
         )
-        val snapshot = snapshotFactory.create(
+        if (configurationMode == "original" && previousContract == "pocketfinancer.processing-config/2") {
+            val selector = previousConfiguration.getJSONObject("selector")
+            val snapshot = snapshotFactory.create(
+                source = reference,
+                trigger = "retry",
+                primaryCurrency = currency,
+                enabledProfiles = profiles,
+                sourceTimestampEpochMs = source.sourceTimestamp,
+                sourceTimestampProvenance = if (source.sourceTimestamp == null) "unknown" else
+                    "acquisition_supplied_message_time",
+                admissionTimestampEpochMs = source.admittedAt,
+                selectorModelId = selector.optString("model_identifier")
+                    .takeIf { it.isNotBlank() && it != "null" },
+                selectorModelHash = selector.optString("model_file_sha256")
+                    .takeIf { it.matches(Regex("[0-9a-f]{64}")) },
+                selectorRuntimeVersion = selector.optString("runtime_version", "llama.cpp-jni"),
+                deviceCohort = android.os.Build.MODEL?.takeIf { it.isNotBlank() }
+                    ?: "android-device",
+                stableEventId = retry.operation.stableEventId,
+                parentOperationId = retry.operation.id
+            )
+            return mapOutcome(smsProcessingCoordinator.process(reference, snapshot))
+        }
+        if (configurationMode == "original" && previousContract != "pocketfinancer.processing-config/4") {
+            return ProcessingResult.Failure(
+                "The original frozen configuration is retained but has no executable native adapter; retry with current configuration.",
+                retryable = false
+            )
+        }
+        val identity = if (configurationMode == "original") {
+            val extractor = previousConfiguration.getJSONObject("extractor")
+            SmsV4ModelIdentity(
+                extractor.getBoolean("eligible"),
+                extractor.optString("model_identifier").takeIf { it.isNotBlank() && it != "null" },
+                extractor.optString("model_file_sha256").takeIf {
+                    it.matches(Regex("[0-9a-f]{64}"))
+                }
+            )
+        } else v4Coordinator.currentModelIdentity()
+        val received = if (configurationMode == "original") {
+            previousConfiguration.getJSONObject("received_timestamp")
+        } else null
+        val snapshot = v4SnapshotFactory.create(
             source = reference,
             trigger = "retry",
             primaryCurrency = currency,
             enabledProfiles = profiles,
-            sourceTimestampEpochMs = source.sourceTimestamp,
-            sourceTimestampProvenance = if (source.sourceTimestamp == null) {
-                "unknown"
-            } else {
-                "acquisition_supplied_message_time"
-            },
+            receivedTimestampEpochMs = received?.getLong("epoch_ms")
+                ?: source.sourceTimestamp ?: source.admittedAt,
+            receivedTimestampProvenance = received?.getString("provenance")
+                ?: if (source.sourceTimestamp == null) "platform_received" else
+                    "acquisition_supplied_message_time",
             admissionTimestampEpochMs = source.admittedAt,
-            selectorModelId = selectorModelId,
-            selectorModelHash = null,
-            selectorRuntimeVersion = previousSelector.optString(
-                "runtime_version", "llama.cpp-jni"
-            ),
-            deviceCohort = android.os.Build.MODEL
-                ?.takeIf { it.isNotBlank() }
+            modelIdentity = identity,
+            runtimeVersion = "llama.cpp-jni",
+            deviceCohort = android.os.Build.MODEL?.takeIf { it.isNotBlank() }
                 ?: "android-device",
             stableEventId = retry.operation.stableEventId,
             parentOperationId = retry.operation.id
         )
-        return mapOutcome(smsProcessingCoordinator.process(reference, snapshot))
+        return mapOutcome(v4Coordinator.process(reference, snapshot))
+    }
+
+    private suspend fun processThroughV4Coordinator(
+        sms: SmsReader.SmsMessage,
+        lease: SlmLease?,
+        trigger: String,
+        store: SmsProcessingStore,
+        configurationRepository: ProcessingConfigurationRepository,
+        observer: ProcessingObserver?
+    ): ProcessingResult {
+        val sourceIdentity = sms.sourceIdentity
+        val sourceId = sourceIdentity.opaqueCandidateKey
+        val receiptId = UUID.nameUUIDFromBytes(sourceId.toByteArray(Charsets.UTF_8)).toString()
+        val now = System.currentTimeMillis()
+        store.admitSource(
+            AdmittedSmsSourceEntity(
+                id = sourceId,
+                sourceConnector = sourceIdentity.connector,
+                sourceMessageId = sourceIdentity.messageId,
+                sourceProviderMessageId = sourceIdentity.providerMessageId,
+                sourceFingerprint = sourceIdentity.fallbackFingerprint,
+                sourceAlternateFingerprint = sourceIdentity.alternateFingerprint,
+                sender = sms.address,
+                rawMessage = sms.body,
+                sourceTimestamp = sms.sourceTimestamp,
+                messageType = sms.type,
+                origin = trigger,
+                admissionReceiptId = receiptId,
+                admittedAt = now,
+                retentionState = "admitted"
+            )
+        )
+        val currency = configurationRepository.confirmedPrimaryCurrency()
+            ?: return ProcessingResult.AwaitingConfiguration
+        val reference = AdmittedMessageRef(
+            sourceId, receiptId, SmsProcessingStore.sha256(sms.body)
+        )
+        val snapshot = v4SnapshotFactory.create(
+            source = reference,
+            trigger = trigger,
+            primaryCurrency = currency,
+            enabledProfiles = configurationRepository.enabledProfiles(currency),
+            receivedTimestampEpochMs = sms.sourceTimestamp ?: now,
+            receivedTimestampProvenance = if (sms.sourceTimestamp == null) {
+                "platform_received"
+            } else "acquisition_supplied_message_time",
+            admissionTimestampEpochMs = now,
+            modelIdentity = lease?.let(v4Coordinator::modelIdentityForLease)
+                ?: v4Coordinator.currentModelIdentity(),
+            runtimeVersion = "llama.cpp-jni",
+            deviceCohort = android.os.Build.MODEL?.takeIf { it.isNotBlank() }
+                ?: "android-device",
+            now = now
+        )
+        val v4Observer = SmsProcessingObserver { event ->
+            when (event.stage) {
+                "analysis", "triage" -> emit(Stage.EXTRACTING, "Preparing advisory evidence")
+                "selector_execution" -> emit(Stage.EXTRACTING, "Extracting transaction fields")
+                "settlement" -> emit(Stage.SKIPPED, "Saved for review")
+            }
+            runCatching {
+                observer?.onEvent(ProcessingEvent.GroundedStage(
+                    event.stage, event.status, event.reasonCodes.toList()
+                ))
+            }
+        }
+        val outcome = if (lease != null) {
+            v4Coordinator.processUsingLease(reference, snapshot, lease, v4Observer)
+        } else v4Coordinator.process(reference, snapshot, v4Observer)
+        return mapOutcome(outcome)
     }
 
     private suspend fun processThroughGroundedCoordinator(

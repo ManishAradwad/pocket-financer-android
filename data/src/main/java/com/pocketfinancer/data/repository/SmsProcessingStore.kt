@@ -54,6 +54,12 @@ data class SmsReviewRetryContext(
     val operation: SmsProcessingOperationEntity
 )
 
+data class SmsDuplicateMatchCounts(
+    val persistedSourceEvents: Int,
+    val matchingSourceEvents: Int,
+    val matchingTransactionFingerprints: Int
+)
+
 class SmsProcessingStoreException(message: String) : IllegalStateException(message)
 
 @Singleton
@@ -310,7 +316,10 @@ class SmsProcessingStore @Inject constructor(
     suspend fun recordReconstruction(
         claim: SmsOperationClaim,
         semanticResultJson: String,
-        now: Long
+        now: Long,
+        contractVersion: String = "pocketfinancer.processing-result/2",
+        recognitionDecision: String = "posted",
+        transactionFingerprint: String? = null
     ) = database.withTransaction {
         requireOwned(claim, now)
         if (dao.getReconstructedResult(claim.operationId) == null) {
@@ -318,14 +327,32 @@ class SmsProcessingStore @Inject constructor(
                 SmsReconstructedResultEntity(
                     id = UUID.randomUUID().toString(),
                     operationId = claim.operationId,
-                    contractVersion = "pocketfinancer.processing-result/2",
-                    recognitionDecision = "posted",
+                    contractVersion = contractVersion,
+                    recognitionDecision = recognitionDecision,
                     semanticResultJson = semanticResultJson,
+                    transactionFingerprint = transactionFingerprint,
                     createdAt = now
                 )
             )
         }
     }
+
+    suspend fun duplicateMatchCounts(
+        operationId: String,
+        sourceId: String,
+        stableEventId: String,
+        transactionFingerprint: String
+    ): SmsDuplicateMatchCounts = SmsDuplicateMatchCounts(
+        persistedSourceEvents = dao.countPersistedSourceEvents(
+            operationId, sourceId, stableEventId
+        ),
+        matchingSourceEvents = dao.countMatchingSourceEvents(
+            operationId, sourceId, stableEventId
+        ),
+        matchingTransactionFingerprints = dao.countMatchingTransactionFingerprints(
+            operationId, transactionFingerprint
+        )
+    )
 
     suspend fun recordGateDecision(
         claim: SmsOperationClaim,

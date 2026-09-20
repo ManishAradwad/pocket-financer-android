@@ -61,6 +61,39 @@ fun ReviewDetailScreen(
             Text(state.error ?: "Review is unavailable.", Modifier.padding(padding).padding(24.dp))
             return@Scaffold
         }
+        if (details.operation.contractReleaseId == "native-integration-v4") {
+            if (details.groundedProposal != null) {
+                GroundedReviewContent(
+                    details = details,
+                    state = state,
+                    padding = padding,
+                    viewModel = viewModel
+                )
+            } else {
+                Column(
+                    Modifier.fillMaxSize().padding(padding).padding(24.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text("The on-device result could not be verified")
+                    Text("Nothing can be saved from this result. Retry local extraction or mark the alert as not a transaction.")
+                    OutlinedButton(
+                        enabled = !state.loading,
+                        onClick = {
+                            viewModel.resolve(
+                                SmsReviewAction.RETRY,
+                                retryConfiguration = "current"
+                            )
+                        }
+                    ) { Text("Retry extraction") }
+                    TextButton(
+                        enabled = !state.loading,
+                        onClick = { viewModel.resolve(SmsReviewAction.REJECT) }
+                    ) { Text("Not a transaction") }
+                    state.error?.let { Text(it) }
+                }
+            }
+            return@Scaffold
+        }
         val proposal = remember(details.reconstructedResult?.semanticResultJson) {
             details.reconstructedResult?.semanticResultJson?.let(::JSONObject)
         }

@@ -10,6 +10,7 @@ import com.pocketfinancer.data.db.entity.TransactionEntity
 import com.pocketfinancer.data.db.entity.TransactionRevisionEntity
 import com.pocketfinancer.data.db.entity.SmsUserFeedbackEventEntity
 import com.pocketfinancer.data.db.entity.AccountEntity
+import com.pocketfinancer.data.db.entity.AccountAliasEntity
 import com.pocketfinancer.data.db.entity.AdmittedSmsSourceEntity
 import com.pocketfinancer.data.db.entity.SmsPersistenceDecisionEntity
 import com.pocketfinancer.data.db.entity.SmsProcessingOperationEntity
@@ -72,7 +73,10 @@ data class SmsReviewDetails(
     val reconstructedResult: SmsReconstructedResultEntity?,
     val persistenceDecision: SmsPersistenceDecisionEntity?,
     val feedback: List<SmsUserFeedbackEventEntity>,
-    val accounts: List<AccountEntity>
+    val accounts: List<AccountEntity>,
+    val groundedProposal: SmsReviewProposal?,
+    val draftProposal: SmsReviewProposal?,
+    val draftCorrections: List<SmsFieldCorrection>
 )
 
 @Singleton
@@ -85,6 +89,8 @@ class SmsReviewRepository @Inject constructor(
 ) {
     suspend fun openCases(): List<SmsReviewCaseEntity> = dao.getOpenReviewCases()
 
+    suspend fun activeOperations(): List<SmsProcessingOperationEntity> = dao.getActiveOperations()
+
     suspend fun details(reviewCaseId: String): SmsReviewDetails {
         val review = dao.getReviewCase(reviewCaseId)
             ?: throw SmsProcessingStoreException("Review case not found")
@@ -92,15 +98,37 @@ class SmsReviewRepository @Inject constructor(
             ?: throw SmsProcessingStoreException("Admitted SMS source not found")
         val operation = dao.getOperation(review.currentOperationId)
             ?: throw SmsProcessingStoreException("Processing operation not found")
+        val reconstructed = dao.getReconstructedResult(operation.id)
+        val proposal = SmsReviewGrounding.proposal(
+            reconstructed?.semanticResultJson,
+            source.rawMessage
+        )
+        val draftCorrections = runCatching {
+            SmsReviewGrounding.correctionsFromJson(review.draftJson)
+        }.getOrDefault(emptyList())
+        val draftProposal = proposal?.let { base ->
+            runCatching {
+                SmsReviewGrounding.applyCorrections(
+                    base,
+                    source.rawMessage,
+                    draftCorrections.filter {
+                        it.evidenceJson != null || it.field == "counterparty"
+                    }
+                )
+            }.getOrNull()
+        }
         return SmsReviewDetails(
             review,
             source,
             operation,
             dao.getTrace(operation.id),
-            dao.getReconstructedResult(operation.id),
+            reconstructed,
             dao.getPersistenceDecision(operation.id),
             dao.getFeedbackHistory(review.id),
-            accountDao.getAllOnce()
+            accountDao.getAllOnce(),
+            proposal,
+            draftProposal,
+            draftCorrections
         )
     }
 
@@ -196,6 +224,9 @@ class SmsReviewRepository @Inject constructor(
             ?: throw SmsProcessingStoreException("Processing operation not found")
         val source = dao.getSource(operation.sourceId)
             ?: throw SmsProcessingStoreException("Admitted SMS source not found")
+        if (operation.contractReleaseId == "native-integration-v4") {
+            return projectV4Review(operation, source, command, now)
+        }
         val result = dao.getReconstructedResult(operationId)?.semanticResultJson
             ?.let(::JSONObject)
             ?: run {
@@ -305,7 +336,7 @@ class SmsReviewRepository @Inject constructor(
                 transactionId = transactionId,
                 sourceId = source.id,
                 stableEventId = operation.stableEventId,
-                revision = revisionNumber.toLong(),
+                revision = revisionNumber,
                 previousRevisionId = previous?.id,
                 operationId = operation.id,
                 feedbackActionId = command.actionId,
@@ -328,6 +359,176 @@ class SmsReviewRepository @Inject constructor(
         return revisionId
     }
 
+    private suspend fun projectV4Review(
+        operation: SmsProcessingOperationEntity,
+        source: AdmittedSmsSourceEntity,
+        command: SmsReviewCommand,
+        now: Long
+    ): String {
+        val configuration = JSONObject(operation.configurationJson)
+        check(configuration.optString("config_hash") == operation.configurationHash) {
+            "Stored configuration hash changed"
+        }
+        val payload = JSONObject(operation.configurationJson).apply { remove("config_hash") }
+        check(SmsProcessingStore.sha256(canonicalJson(payload)) == operation.configurationHash) {
+            "Stored configuration payload changed"
+        }
+        check(configuration.optString("contract") == "pocketfinancer.processing-config/4")
+        check(configuration.getJSONObject("contract_release").optString("release_id") == "native-integration-v4")
+        check(configuration.getJSONObject("persistence_policy").optString("rollout_mode") == "review_only")
+        val extractor = configuration.getJSONObject("extractor")
+        check(extractor.optString("model_identity_kind") == "file_sha256")
+        check(extractor.optString("model_file_sha256").matches(Regex("[0-9a-f]{64}")))
+        check(configuration.optString("source_ref_hash") == SmsProcessingStore.sha256(source.id)) {
+            "Stored source reference changed"
+        }
+        val analysis = requireNotNull(dao.getAnalysis(operation.id)) {
+            "Stored analysis is unavailable"
+        }
+        check(analysis.configurationHash == operation.configurationHash) {
+            "Analysis configuration changed after extraction"
+        }
+        check(analysis.sourceHash == SmsProcessingStore.sha256(source.rawMessage)) {
+            "SMS source changed after extraction"
+        }
+        val resultEntity = dao.getReconstructedResult(operation.id)
+            ?: throw SmsProcessingStoreException("Grounded proposal is unavailable")
+        val base = SmsReviewGrounding.proposal(resultEntity.semanticResultJson, source.rawMessage)
+            ?: throw SmsProcessingStoreException("Grounded proposal is invalid")
+        check(base.duplicateIdempotencyKey == source.id) {
+            "Duplicate assessment source identity changed"
+        }
+        check(base.duplicateSourceEventKey == operation.stableEventId) {
+            "Duplicate assessment event identity changed"
+        }
+        check(base.duplicateStatus != "already_persisted") { "This source event was already saved" }
+        val allowed = setOf("amount", "direction", "account", "counterparty")
+        require(command.corrections.all { it.field in allowed })
+        require(command.corrections.map { it.field }.toSet().size == command.corrections.size)
+        val projection = SmsReviewGrounding.applyCorrections(
+            base,
+            source.rawMessage,
+            command.corrections
+        )
+
+        val normalizedAlias = if ('@' in projection.accountReference) {
+            "vpa:${projection.accountReference}"
+        } else {
+            "suffix:${projection.accountReference}"
+        }
+        val aliasHash = SmsProcessingStore.sha256(normalizedAlias)
+        val matchingAccounts = revisionDao.findConfirmedAliases(
+            aliasHash,
+            GroundedAccountResolver.MATCHING_SCOPE
+        ).mapNotNull { accountDao.getById(it.accountId) }.distinctBy { it.id }
+        check(matchingAccounts.size <= 1) { "Account reference is ambiguous" }
+        val account = matchingAccounts.singleOrNull() ?: run {
+            val display = if ('@' in projection.accountReference) {
+                "UPI account ${projection.accountReference}"
+            } else {
+                "Account ••${projection.accountReference.takeLast(4)}"
+            }
+            AccountEntity(
+                id = UUID.randomUUID().toString(),
+                name = display,
+                bank = source.sender.ifBlank { "Unknown Account" },
+                type = "sms-review",
+                createdAt = now,
+                updatedAt = now
+            ).also { created ->
+                accountDao.insert(created)
+                revisionDao.insertAccountAlias(
+                    AccountAliasEntity(
+                        id = UUID.randomUUID().toString(),
+                        accountId = created.id,
+                        normalizedAliasHash = aliasHash,
+                        aliasKind = if ('@' in projection.accountReference) "vpa" else "suffix",
+                        matchingScope = GroundedAccountResolver.MATCHING_SCOPE,
+                        confirmedByUser = true,
+                        createdAt = now
+                    )
+                )
+            }
+        }
+
+        check(transactionDao.getBySourceEvent(source.id, operation.stableEventId) == null) {
+            "This SMS event already has a transaction"
+        }
+        val fingerprint = SmsProcessingStore.sha256(
+            "${projection.amountMinorUnits}\u0000${projection.currency}\u0000" +
+                "${projection.direction}\u0000${account.id}\u0000${projection.receiptTimestampEpochMs}"
+        )
+        // Exact source/event duplicates are blocked above. A semantic fingerprint
+        // match remains visible in review and is resolved by this explicit action.
+        @Suppress("UNUSED_VARIABLE")
+        val matchingFingerprints = dao.countMatchingTransactionFingerprints(operation.id, fingerprint)
+
+        val transactionId = UUID.nameUUIDFromBytes(
+            "${source.id}|${operation.stableEventId}".toByteArray(Charsets.UTF_8)
+        ).toString()
+        val revisionId = UUID.randomUUID().toString()
+        val merchant = projection.counterparty ?: "Unspecified counterparty"
+        val scale = requireNotNull(CurrencyScaleRegistry.scale(projection.currency))
+        val transaction = TransactionEntity(
+            id = transactionId,
+            amount = BigDecimal.valueOf(projection.amountMinorUnits)
+                .movePointLeft(scale).toDouble(),
+            merchant = merchant,
+            date = projection.receiptTimestampEpochMs,
+            type = projection.direction,
+            accountId = account.id,
+            rawMessage = source.rawMessage,
+            sender = source.sender,
+            isEdited = command.corrections.isNotEmpty(),
+            createdAt = now,
+            updatedAt = now,
+            slmModelName = "direct-sms-extractor-v4",
+            sourceConnector = source.sourceConnector,
+            sourceProviderMessageId = source.sourceProviderMessageId,
+            sourceMessageId = source.sourceMessageId,
+            sourceFingerprint = source.sourceFingerprint,
+            sourceAlternateFingerprint = source.sourceAlternateFingerprint,
+            sourceId = source.id,
+            sourceEventId = operation.stableEventId,
+            exactMinorUnits = projection.amountMinorUnits,
+            currencyCode = projection.currency,
+            currencyScale = scale,
+            currencyProvenance = "review_source_span",
+            timestampProvenance = "${projection.receiptProvenance}_read_only",
+            currentRevisionId = revisionId,
+            projectionState = "current",
+            legacyPrecisionStatus = "exact_minor_units"
+        )
+        check(transactionDao.insert(transaction) != -1L) { "Transaction projection conflict" }
+        revisionDao.insertRevision(
+            TransactionRevisionEntity(
+                id = revisionId,
+                transactionId = transactionId,
+                sourceId = source.id,
+                stableEventId = operation.stableEventId,
+                revision = 0,
+                previousRevisionId = null,
+                operationId = operation.id,
+                feedbackActionId = command.actionId,
+                exactMinorUnits = projection.amountMinorUnits,
+                currencyCode = projection.currency,
+                currencyScale = scale,
+                direction = projection.direction,
+                merchant = merchant,
+                accountId = account.id,
+                occurredAt = projection.receiptTimestampEpochMs,
+                provenance = if (command.corrections.isEmpty()) {
+                    "user_confirmed_grounded_proposal"
+                } else {
+                    "user_confirmed_source_span_revision"
+                },
+                isCurrentProjection = true,
+                createdAt = now
+            )
+        )
+        return revisionId
+    }
+
     private fun Any.exactLongOrNull(): Long? = when (this) {
         is Long -> this
         is Int -> toLong()
@@ -338,6 +539,19 @@ class SmsReviewRepository @Inject constructor(
         val value = JSONTokener(json).nextValue()
         require(value !is JSONObject && value !is org.json.JSONArray && value != JSONObject.NULL)
         return value
+    }
+
+    private fun canonicalJson(value: Any?): String = when (value) {
+        null, JSONObject.NULL -> "null"
+        is JSONObject -> value.keys().asSequence().toList().sorted().joinToString(
+            prefix = "{", postfix = "}", separator = ","
+        ) { key -> "${JSONObject.quote(key)}:${canonicalJson(value.get(key))}" }
+        is org.json.JSONArray -> (0 until value.length()).joinToString(
+            prefix = "[", postfix = "]", separator = ","
+        ) { canonicalJson(value.get(it)) }
+        is String -> JSONObject.quote(value)
+        is Boolean, is Int, is Long -> value.toString()
+        else -> error("Unsupported canonical JSON value")
     }
 
     private fun validate(command: SmsReviewCommand) {

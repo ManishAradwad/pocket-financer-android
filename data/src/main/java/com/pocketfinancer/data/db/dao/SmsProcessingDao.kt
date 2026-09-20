@@ -71,6 +71,37 @@ interface SmsProcessingDao {
     @Query("SELECT * FROM sms_reconstructed_results WHERE operationId = :operationId LIMIT 1")
     suspend fun getReconstructedResult(operationId: String): SmsReconstructedResultEntity?
 
+    @Query(
+        "SELECT COUNT(*) FROM sms_reconstructed_results " +
+            "WHERE operationId != :operationId AND transactionFingerprint = :fingerprint"
+    )
+    suspend fun countMatchingTransactionFingerprints(
+        operationId: String,
+        fingerprint: String
+    ): Int
+
+    @Query(
+        "SELECT COUNT(*) FROM sms_processing_operations " +
+            "WHERE id != :operationId AND state = 'persisted' " +
+            "AND (sourceId = :sourceId OR stableEventId = :stableEventId)"
+    )
+    suspend fun countPersistedSourceEvents(
+        operationId: String,
+        sourceId: String,
+        stableEventId: String
+    ): Int
+
+    @Query(
+        "SELECT COUNT(*) FROM sms_processing_operations " +
+            "WHERE id != :operationId AND state != 'discarded' " +
+            "AND (sourceId = :sourceId OR stableEventId = :stableEventId)"
+    )
+    suspend fun countMatchingSourceEvents(
+        operationId: String,
+        sourceId: String,
+        stableEventId: String
+    ): Int
+
     @Query("SELECT * FROM sms_persistence_decisions WHERE operationId = :operationId LIMIT 1")
     suspend fun getPersistenceDecision(operationId: String): SmsPersistenceDecisionEntity?
 
@@ -112,6 +143,12 @@ interface SmsProcessingDao {
             "WHERE state IN ('open', 'draft', 'waiting_retry') ORDER BY updatedAt ASC"
     )
     suspend fun getOpenReviewCases(): List<SmsReviewCaseEntity>
+
+    @Query(
+        "SELECT * FROM sms_processing_operations " +
+            "WHERE settledAt IS NULL ORDER BY updatedAt DESC"
+    )
+    suspend fun getActiveOperations(): List<SmsProcessingOperationEntity>
 
     @Query(
         """

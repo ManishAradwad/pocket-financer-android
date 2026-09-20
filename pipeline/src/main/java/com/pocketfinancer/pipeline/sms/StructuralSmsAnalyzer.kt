@@ -92,10 +92,38 @@ class StructuralSmsAnalyzer {
         )
     )
 
-    fun analyze(source: String, operation: SmsOperationSnapshot): SmsAnalysis {
+    fun analyze(source: String, operation: SmsOperationSnapshot): SmsAnalysis = analyze(
+        source = source,
+        operationId = operation.operationId,
+        configurationHash = operation.configurationHash,
+        primaryCurrency = operation.configuration.primaryCurrency,
+        enabledProfiles = operation.configuration.enabledProfiles,
+        sourceTimestampEpochMs = operation.configuration.sourceTimestampEpochMs,
+        sourceTimestampProvenance = operation.configuration.sourceTimestampProvenance
+    )
+
+    fun analyze(source: String, operation: SmsV4OperationSnapshot): SmsAnalysis = analyze(
+        source = source,
+        operationId = operation.operationId,
+        configurationHash = operation.configurationHash,
+        primaryCurrency = operation.configuration.primaryCurrency,
+        enabledProfiles = operation.configuration.enabledProfiles,
+        sourceTimestampEpochMs = operation.configuration.receivedTimestampEpochMs,
+        sourceTimestampProvenance = operation.configuration.receivedTimestampProvenance
+    )
+
+    private fun analyze(
+        source: String,
+        operationId: String,
+        configurationHash: String,
+        primaryCurrency: String,
+        enabledProfiles: List<String>,
+        sourceTimestampEpochMs: Long?,
+        sourceTimestampProvenance: String
+    ): SmsAnalysis {
         val sourceHash = SmsProcessingStore.sha256(source)
-        val analysisIdentity = operation.operationId + "\u0000" + sourceHash + "\u0000" +
-            operation.configurationHash + "\u0000pocketfinancer.structural-sms-analyzer/2"
+        val analysisIdentity = operationId + "\u0000" + sourceHash + "\u0000" +
+            configurationHash + "\u0000pocketfinancer.structural-sms-analyzer/2"
         val analysisId = SmsProcessingStore.sha256(analysisIdentity).take(24)
         val structuralView = SmsStructuralView(source)
         val clauses = StructuralClauseSegmenter.split(source)
@@ -114,7 +142,7 @@ class StructuralSmsAnalyzer {
         val candidates = mutableListOf<SmsCandidate>()
         for (match in structuralView.findAll(money)) {
             val code = match.normalizedGroup("code")?.uppercase()
-                ?: operation.configuration.primaryCurrency
+                ?: primaryCurrency
             val provenance = if (match.normalizedGroup("code") == null) {
                 "explicit_unambiguous_symbol_or_marker"
             } else {
@@ -194,7 +222,7 @@ class StructuralSmsAnalyzer {
         val annotations = clauseAnnotations(structuralView, clauses, candidates, cues)
         return SmsAnalysis(
             analysisId = analysisId,
-            configurationHash = operation.configurationHash,
+            configurationHash = configurationHash,
             sourceHash = sourceHash,
             source = source,
             clauses = clauses,
@@ -202,12 +230,12 @@ class StructuralSmsAnalyzer {
             cues = cues,
             reasonCodes = reasons.toList(),
             completedEventCount = directionsFound.size,
-            profileId = operation.configuration.enabledProfiles.joinToString("+"),
-            primaryCurrency = operation.configuration.primaryCurrency,
+            profileId = enabledProfiles.joinToString("+"),
+            primaryCurrency = primaryCurrency,
             normalizedStructuralFingerprint = SmsProcessingStore.sha256(structuralView.normalized),
-            currencyContextHash = currencyContextHash(operation.configuration),
-            sourceTimestampEpochMs = operation.configuration.sourceTimestampEpochMs,
-            sourceTimestampProvenance = operation.configuration.sourceTimestampProvenance,
+            currencyContextHash = currencyContextHash(primaryCurrency, enabledProfiles),
+            sourceTimestampEpochMs = sourceTimestampEpochMs,
+            sourceTimestampProvenance = sourceTimestampProvenance,
             unicodeDatabaseVersion = "14.0.0",
             clauseAnnotations = annotations
         )
@@ -312,15 +340,15 @@ class StructuralSmsAnalyzer {
         }
     }
 
-    private fun currencyContextHash(configuration: SmsOperationConfiguration): String {
+    private fun currencyContextHash(primaryCurrency: String, enabledProfiles: List<String>): String {
         val profiles = JSONArray()
-        configuration.enabledProfiles.forEach { profileId ->
+        enabledProfiles.forEach { profileId ->
             profiles.put(JSONObject().put("profile_id", profileId).put("revision", 1))
         }
         return SmsProcessingStore.sha256(
             CanonicalAndroidJson.stringify(
                 JSONObject()
-                    .put("primary_currency", configuration.primaryCurrency)
+                    .put("primary_currency", primaryCurrency)
                     .put("profiles", profiles)
             )
         )
