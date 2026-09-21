@@ -1,5 +1,10 @@
 # Windows SMS sync validation — 2026-09-10
 
+> Historical evidence for the named baseline and follow-ups. It does not establish
+> current selector/extractor accuracy, direct-to-Transactions routing, physical
+> device readiness, or that later emulator observations are fixed. Use
+> [sms-processing-next-steps.md](sms-processing-next-steps.md) for current work.
+
 Baseline: Android PR #40, commit 64a91f7871f59036e8ac45e5f5023f8a268b788c.
 
 ## Failures reproduced
