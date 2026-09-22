@@ -40,27 +40,40 @@ Implemented in `fcf6614`:
 - decoded-token callback propagation from JNI-facing extraction through the
   coordinator and `PipelineService` observer contract.
 
+Commit `f6079ff` completes the existing Review surface for the automatic policy:
+
+- `review-case/2` partial SLM fields are projected without converting analyzer
+  suggestions into model output;
+- all valid source spans remain highlighted while missing fields remain visibly
+  unassigned;
+- missing direction wording uses an explicit debit/credit owner control;
+- confirmation requires a deliberate existing-account selection and every
+  mandatory field to be valid;
+- confirmation reuses the revision-bound atomic transaction path; and
+- selecting a Needs Review card opens that case directly while the Review inbox
+  remains available from its existing entry point.
+
 ## Open Android observations
 
-The emulator was not running during commit `fcf6614`, so no emulator or physical
-device behavior is claimed. The visible processing surfaces still need their
-separate decoded-delta/cumulative-output presentation completed. Review data
-projection, partial-field controls, and direct card-to-detail navigation also
-remain implementation work before a fresh emulator run.
+The emulator was not running during commits `fcf6614` or `f6079ff`, so no emulator
+or physical-device behavior is claimed. The Review implementation is verified by
+focused JVM tests and Kotlin compilation only. The visible processing surfaces
+still need their separate decoded-delta/cumulative-output presentation completed
+before a fresh emulator run.
 
 ## Next implementation change
 
-1. Project review-case/2 partial fields and suggestions through the existing
-   `GroundedReviewContent` and `EvidenceSelectionText`; do not add a second Review
-   screen.
-2. Add explicit direction fallback and deliberate existing-account selection,
-   and gate confirmation on all mandatory valid fields.
-3. Open a selected Transactions Review card directly in that case while retaining
-   the inbox for browsing.
-4. Complete decoded-delta and cumulative-output presentation, stale-operation
+Implemented and verified locally in `f6079ff`: review-case/2 projection through
+the existing `GroundedReviewContent` and `EvidenceSelectionText`, explicit
+direction fallback, deliberate existing-account selection, mandatory-field
+confirmation gating, and direct Review-card navigation.
+
+Planned next:
+
+1. Complete decoded-delta and cumulative-output presentation, stale-operation
    fencing, lifecycle scrubbing, and tests across automatic, historical, and
    manual processing.
-5. Keep corrections revision-bound, append-only, local label evidence. Explicit
+2. Keep corrections revision-bound, append-only, local label evidence. Explicit
    export and adjudication are required before approved, source-grounded,
    split-safe labels may improve the SLM or another pipeline component.
 
@@ -113,9 +126,25 @@ Verified locally:
   partial-field, Room 7-to-8 migration, duplicate-fencing, and atomic rollback
   tests.
 
-Not verified: emulator/device runtime, UI navigation, accessibility, process-death
-presentation recovery, full unit/lint/build gates. Next start in
-`SmsReviewRepository`, `ReviewDetailScreen`, `GroundedReviewContent`, and
-`TransactionsScreen`; then finish live output state in
-`AutomaticSmsProcessingActivity`, `HistoricalSmsProcessingActivity`, and
-`HomeSyncManager`.
+Not verified at the `fcf6614` checkpoint: emulator/device runtime, UI navigation,
+accessibility, process-death presentation recovery, full unit/lint/build gates.
+Its recorded next starting points were `SmsReviewRepository`,
+`ReviewDetailScreen`, `GroundedReviewContent`, and `TransactionsScreen`, followed
+by live output state.
+
+Review/UI implementation commit:
+`f6079ff feat(sms): complete partial evidence review`.
+
+Verified locally for `f6079ff`:
+
+- `./gradlew.bat :data:testDebugUnitTest --tests
+  "com.pocketfinancer.data.repository.SmsReviewRepositoryV5Test"
+  :app:compileDebugKotlin --no-daemon`;
+- `./gradlew.bat :app:testDebugUnitTest --tests
+  "com.pocketfinancer.ui.review.ReviewViewModelActionTest" --no-daemon`.
+
+These are JVM/compile results only. Emulator navigation, accessibility, and
+interaction behavior remain unverified. The next recommended starting point is
+live-output state and cleanup in `AutomaticSmsProcessingActivity`,
+`HistoricalSmsProcessingActivity`, `HomeSyncManager`, `HomeViewModel`, and
+`SmsTelemetryViewer`.
