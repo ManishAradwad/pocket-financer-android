@@ -161,20 +161,25 @@ fun PocketFinancerRoot() {
                         )
                     }
                     composable(Screen.Transactions.route) {
-                        TransactionsScreen(onNavigateToTab = { tab ->
-                            when (tab.lowercase()) {
-                                "settings" -> navController.navigate(Screen.Settings.route) {
-                                    popUpTo(navController.graph.findStartDestination().id) {
-                                        saveState = true
+                        TransactionsScreen(
+                            onNavigateToTab = { tab ->
+                                when (tab.lowercase()) {
+                                    "settings" -> navController.navigate(Screen.Settings.route) {
+                                        popUpTo(navController.graph.findStartDestination().id) {
+                                            saveState = true
+                                        }
+                                        launchSingleTop = true
+                                        restoreState = true
                                     }
-                                    launchSingleTop = true
-                                    restoreState = true
+                                    "reviews" -> navController.navigate(Screen.Reviews.route) {
+                                        launchSingleTop = true
+                                    }
                                 }
-                                "reviews" -> navController.navigate(Screen.Reviews.route) {
-                                    launchSingleTop = true
-                                }
+                            },
+                            onOpenReview = { reviewCaseId ->
+                                navController.navigate(Screen.ReviewDetail.route(reviewCaseId))
                             }
-                        })
+                        )
                     }
                     composable(Screen.Insights.route) { InsightsScreen() }
                     composable(Screen.Settings.route) { SettingsScreen() }

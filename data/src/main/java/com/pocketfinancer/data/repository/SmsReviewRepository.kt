@@ -76,7 +76,8 @@ data class SmsReviewDetails(
     val accounts: List<AccountEntity>,
     val groundedProposal: SmsReviewProposal?,
     val draftProposal: SmsReviewProposal?,
-    val draftCorrections: List<SmsFieldCorrection>
+    val draftCorrections: List<SmsFieldCorrection>,
+    val retainedEvidence: SmsReviewRetainedEvidence?
 )
 
 @Singleton
@@ -99,6 +100,7 @@ class SmsReviewRepository @Inject constructor(
         val operation = dao.getOperation(review.currentOperationId)
             ?: throw SmsProcessingStoreException("Processing operation not found")
         val reconstructed = dao.getReconstructedResult(operation.id)
+        val extension = dao.getReviewCaseV2Extension(review.id)
         val proposal = SmsReviewGrounding.proposal(
             reconstructed?.semanticResultJson,
             source.rawMessage
@@ -128,7 +130,12 @@ class SmsReviewRepository @Inject constructor(
             accountDao.getAllOnce(),
             proposal,
             draftProposal,
-            draftCorrections
+            draftCorrections,
+            SmsReviewGrounding.retainedEvidence(
+                extension,
+                operation.configurationJson,
+                source.rawMessage
+            )
         )
     }
 
@@ -226,6 +233,9 @@ class SmsReviewRepository @Inject constructor(
             ?: throw SmsProcessingStoreException("Admitted SMS source not found")
         if (operation.contractReleaseId == "native-integration-v4") {
             return projectV4Review(operation, source, command, now)
+        }
+        if (operation.contractReleaseId == "native-integration-v5") {
+            return projectV5Review(operation, source, command, now)
         }
         val result = dao.getReconstructedResult(operationId)?.semanticResultJson
             ?.let(::JSONObject)
@@ -527,6 +537,200 @@ class SmsReviewRepository @Inject constructor(
             )
         )
         return revisionId
+    }
+
+    private suspend fun projectV5Review(
+        operation: SmsProcessingOperationEntity,
+        source: AdmittedSmsSourceEntity,
+        command: SmsReviewCommand,
+        now: Long
+    ): String {
+        require(command.action == SmsReviewAction.CORRECT) {
+            "Automatic-policy review requires an explicit confirmed projection"
+        }
+        val configuration = JSONObject(operation.configurationJson)
+        check(configuration.optString("config_hash") == operation.configurationHash) {
+            "Stored configuration hash changed"
+        }
+        val payload = JSONObject(operation.configurationJson).apply { remove("config_hash") }
+        check(SmsProcessingStore.sha256(canonicalJson(payload)) == operation.configurationHash) {
+            "Stored configuration payload changed"
+        }
+        check(configuration.optString("contract") == "pocketfinancer.processing-config/5")
+        check(
+            configuration.getJSONObject("contract_release").optString("release_id") ==
+                "native-integration-v5"
+        )
+        check(configuration.getJSONObject("persistence_policy").optString("rollout_mode") == "automatic")
+        check(configuration.optString("source_ref_hash") == SmsProcessingStore.sha256(source.id)) {
+            "Stored source reference changed"
+        }
+        dao.getReconstructedResult(operation.id)?.semanticResultJson?.let { resultJson ->
+            val result = JSONObject(resultJson)
+            val duplicate = result.optJSONObject("duplicate_assessment")
+            check(duplicate?.optString("status") != "already_persisted") {
+                "This source event was already saved"
+            }
+        }
+        check(
+            dao.countPersistedSourceEvents(
+                operation.id,
+                source.id,
+                operation.stableEventId
+            ) == 0
+        ) { "This SMS event already has a transaction" }
+
+        val allowed = setOf("amount", "direction", "account", "counterparty", "account_id")
+        require(command.corrections.all { it.field in allowed })
+        val corrections = command.corrections.associateBy { it.field }
+        require(corrections.size == command.corrections.size)
+
+        val amountCorrection = requireNotNull(corrections["amount"]) {
+            "A grounded amount is required"
+        }
+        val amountSpan = requireReviewSpan(amountCorrection, source.rawMessage)
+        val amountValue = JSONObject(amountCorrection.newValueJson)
+        val currency = amountValue.getString("currency").uppercase(java.util.Locale.ROOT)
+        val minorUnits = amountValue.get("minor_units").exactLongOrNull()
+            ?: throw IllegalArgumentException("Amount must use exact minor units")
+        require(SmsReviewGrounding.minorUnits(amountSpan.text, currency) == minorUnits)
+
+        val directionCorrection = requireNotNull(corrections["direction"]) {
+            "A debit or credit direction is required"
+        }
+        val direction = decodeScalar(directionCorrection.newValueJson) as? String
+            ?: throw IllegalArgumentException("Direction must be text")
+        require(direction in setOf("debit", "credit"))
+        val directionSpan = directionCorrection.evidenceJson?.let {
+            requireReviewSpan(directionCorrection, source.rawMessage)
+        }
+        if (directionSpan == null) {
+            require(
+                directionCorrection.classification ==
+                    SmsFieldGroundingClassification.SUPPLIED_MANUAL_UNGROUNDED_VALUE
+            ) { "Direction without source wording must be an explicit owner choice" }
+        } else {
+            require(SmsReviewGrounding.directionFrom(directionSpan.text) == direction)
+        }
+
+        corrections["account"]?.let { accountCorrection ->
+            val span = requireReviewSpan(accountCorrection, source.rawMessage)
+            val reference = JSONObject(accountCorrection.newValueJson).getString("reference")
+            require(SmsReviewGrounding.normalizeAccount(span.text).isNotBlank())
+            require(
+                SmsReviewGrounding.normalizeAccount(span.text) ==
+                    SmsReviewGrounding.normalizeAccount(reference)
+            )
+        }
+        val accountCorrection = requireNotNull(corrections["account_id"]) {
+            "An existing owned account must be selected"
+        }
+        require(accountCorrection.evidenceJson == null)
+        require(
+            accountCorrection.classification ==
+                SmsFieldGroundingClassification.SUPPLIED_MANUAL_UNGROUNDED_VALUE
+        ) { "Account selection must be an explicit owner choice" }
+        val accountId = decodeScalar(accountCorrection.newValueJson) as? String
+            ?: throw IllegalArgumentException("An existing owned account must be selected")
+        val account = accountDao.getById(accountId)
+            ?: throw IllegalArgumentException("Selected account does not exist")
+
+        val counterparty = corrections["counterparty"]?.let { correction ->
+            if (correction.newValueJson == "null") {
+                require(correction.evidenceJson == null)
+                null
+            } else {
+                val span = requireReviewSpan(correction, source.rawMessage)
+                val value = decodeScalar(correction.newValueJson) as? String
+                    ?: throw IllegalArgumentException("Counterparty must be text")
+                val normalized = SmsReviewGrounding.normalizeText(span.text)
+                require(normalized.isNotBlank())
+                require(normalized == SmsReviewGrounding.normalizeText(value))
+                normalized
+            }
+        }
+        val receipt = configuration.getJSONObject("received_timestamp")
+        check(receipt.optBoolean("read_only"))
+        val occurredAt = receipt.get("epoch_ms").exactLongOrNull()
+            ?: throw IllegalStateException("Stored receipt time is invalid")
+        val receiptProvenance = receipt.getString("provenance")
+        val scale = CurrencyScaleRegistry.scale(currency)
+            ?: throw IllegalArgumentException("Unsupported transaction currency")
+        require(minorUnits > 0)
+
+        val transactionId = UUID.nameUUIDFromBytes(
+            "${source.id}|${operation.stableEventId}".toByteArray(Charsets.UTF_8)
+        ).toString()
+        val revisionId = UUID.randomUUID().toString()
+        val merchant = counterparty ?: "Unspecified counterparty"
+        val transaction = TransactionEntity(
+            id = transactionId,
+            amount = BigDecimal.valueOf(minorUnits).movePointLeft(scale).toDouble(),
+            merchant = merchant,
+            date = occurredAt,
+            type = direction,
+            accountId = account.id,
+            rawMessage = source.rawMessage,
+            sender = source.sender,
+            isEdited = true,
+            createdAt = now,
+            updatedAt = now,
+            slmModelName = configuration.getJSONObject("extractor")
+                .optString("model_identifier", "direct-sms-extractor"),
+            sourceConnector = source.sourceConnector,
+            sourceProviderMessageId = source.sourceProviderMessageId,
+            sourceMessageId = source.sourceMessageId,
+            sourceFingerprint = source.sourceFingerprint,
+            sourceAlternateFingerprint = source.sourceAlternateFingerprint,
+            sourceId = source.id,
+            sourceEventId = operation.stableEventId,
+            exactMinorUnits = minorUnits,
+            currencyCode = currency,
+            currencyScale = scale,
+            currencyProvenance = "review_source_span",
+            timestampProvenance = "${receiptProvenance}_read_only",
+            currentRevisionId = revisionId,
+            projectionState = "current",
+            legacyPrecisionStatus = "exact_minor_units"
+        )
+        check(transactionDao.insert(transaction) != -1L) { "Transaction projection conflict" }
+        revisionDao.insertRevision(
+            TransactionRevisionEntity(
+                id = revisionId,
+                transactionId = transactionId,
+                sourceId = source.id,
+                stableEventId = operation.stableEventId,
+                revision = 0,
+                previousRevisionId = null,
+                operationId = operation.id,
+                feedbackActionId = command.actionId,
+                exactMinorUnits = minorUnits,
+                currencyCode = currency,
+                currencyScale = scale,
+                direction = direction,
+                merchant = merchant,
+                accountId = account.id,
+                occurredAt = occurredAt,
+                provenance = "user_confirmed_automatic_review",
+                isCurrentProjection = true,
+                createdAt = now
+            )
+        )
+        return revisionId
+    }
+
+    private fun requireReviewSpan(
+        correction: SmsFieldCorrection,
+        source: String
+    ): SmsReviewSourceSpan {
+        val evidence = JSONObject(requireNotNull(correction.evidenceJson))
+        val span = SmsReviewGrounding.span(
+            source,
+            evidence.getInt("start_scalar"),
+            evidence.getInt("end_scalar")
+        )
+        require(span.text == evidence.getString("text"))
+        return span
     }
 
     private fun Any.exactLongOrNull(): Long? = when (this) {

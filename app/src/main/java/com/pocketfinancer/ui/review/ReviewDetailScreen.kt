@@ -61,8 +61,18 @@ fun ReviewDetailScreen(
             Text(state.error ?: "Review is unavailable.", Modifier.padding(padding).padding(24.dp))
             return@Scaffold
         }
-        if (details.operation.contractReleaseId == "native-integration-v4") {
-            if (details.groundedProposal != null) {
+        if (
+            details.operation.contractReleaseId == "native-integration-v4" ||
+            details.operation.contractReleaseId == "native-integration-v5"
+        ) {
+            val reviewIsRenderable = if (
+                details.operation.contractReleaseId == "native-integration-v4"
+            ) {
+                details.groundedProposal != null
+            } else {
+                details.retainedEvidence != null
+            }
+            if (reviewIsRenderable) {
                 GroundedReviewContent(
                     details = details,
                     state = state,

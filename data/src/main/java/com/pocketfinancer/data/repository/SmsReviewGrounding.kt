@@ -1,5 +1,6 @@
 package com.pocketfinancer.data.repository
 
+import com.pocketfinancer.data.db.entity.SmsReviewCaseV2ExtensionEntity
 import java.math.BigDecimal
 import java.math.RoundingMode
 import java.text.Normalizer
@@ -33,11 +34,109 @@ data class SmsReviewProposal(
     val transactionFingerprint: String
 )
 
+data class SmsReviewFieldEvidence(
+    val field: String,
+    val sourceSpan: SmsReviewSourceSpan,
+    val normalizedValueJson: String?,
+    val validationState: String,
+    val originatingStage: String,
+    val origin: String
+)
+
+data class SmsReviewAnalyzerSuggestion(
+    val kind: String,
+    val sourceSpan: SmsReviewSourceSpan?,
+    val summary: String
+)
+
+data class SmsReviewRetainedEvidence(
+    val furthestStage: String,
+    val primaryCurrency: String,
+    val receiptTimestampEpochMs: Long,
+    val receiptProvenance: String,
+    val slmFields: Map<String, SmsReviewFieldEvidence>,
+    val analyzerSuggestions: List<SmsReviewAnalyzerSuggestion>
+)
+
 /**
  * Parses and revalidates the v4 review projection without trusting UI-provided
  * normalized values. Frozen offsets are Unicode-scalar offsets.
  */
 object SmsReviewGrounding {
+    fun retainedEvidence(
+        extension: SmsReviewCaseV2ExtensionEntity?,
+        operationConfigurationJson: String,
+        source: String
+    ): SmsReviewRetainedEvidence? = runCatching {
+        val retained = extension ?: return null
+        check(retained.contractVersion == "pocketfinancer.review-case/2")
+        val configuration = JSONObject(operationConfigurationJson)
+        check(configuration.getString("contract") == "pocketfinancer.processing-config/5")
+        check(
+            configuration.getJSONObject("contract_release").getString("release_id") ==
+                "native-integration-v5"
+        )
+        check(configuration.getJSONObject("persistence_policy").getString("rollout_mode") == "automatic")
+        val receipt = configuration.getJSONObject("received_timestamp")
+        check(receipt.getBoolean("read_only"))
+        val receiptProvenance = receipt.getString("provenance")
+        check(
+            receiptProvenance in
+                setOf("platform_received", "acquisition_supplied_message_time")
+        )
+        val fields = JSONArray(retained.fieldEvidenceJson)
+        val modelFields = buildList {
+            repeat(fields.length()) { index ->
+                val item = fields.getJSONObject(index)
+                val origin = item.getString("origin")
+                check(origin in setOf("slm", "advisory_analyzer"))
+                if (origin != "slm") return@repeat
+                val field = item.getString("field")
+                check(field in setOf("amount", "direction", "account", "counterparty"))
+                val state = item.getString("validation_state")
+                check(state in setOf("valid", "grounded_only"))
+                add(
+                    SmsReviewFieldEvidence(
+                        field = field,
+                        sourceSpan = item.getJSONObject("source_span").span(source),
+                        normalizedValueJson = item.opt("normalized_value")
+                            .takeUnless { it == null || it == JSONObject.NULL }
+                            ?.toJsonLiteral(),
+                        validationState = state,
+                        originatingStage = item.getString("originating_stage"),
+                        origin = origin
+                    )
+                )
+            }
+        }
+        check(modelFields.map { it.field }.distinct().size == modelFields.size)
+        val suggestions = JSONArray(retained.analyzerSuggestionsJson)
+        val analyzer = buildList {
+            repeat(suggestions.length()) { index ->
+                val item = suggestions.getJSONObject(index)
+                val kind = item.getString("kind")
+                val span = (item.opt("span") as? JSONObject)?.span(source)
+                val suggested = item.opt("suggested_interpretation")
+                    .takeUnless { it == null || it == JSONObject.NULL }
+                    ?.let(::suggestionSummary)
+                    .orEmpty()
+                val summary = span?.text?.takeIf(String::isNotBlank)
+                    ?: suggested.takeIf(String::isNotBlank)
+                    ?: return@repeat
+                add(SmsReviewAnalyzerSuggestion(kind, span, summary))
+            }
+        }
+        SmsReviewRetainedEvidence(
+            furthestStage = retained.furthestStage,
+            primaryCurrency = configuration.getJSONObject("currency_context")
+                .getString("primary_currency"),
+            receiptTimestampEpochMs = receipt.get("epoch_ms").exactLong(),
+            receiptProvenance = receiptProvenance,
+            slmFields = modelFields.associateBy { it.field },
+            analyzerSuggestions = analyzer
+        )
+    }.getOrNull()
+
     fun proposal(resultJson: String?, source: String): SmsReviewProposal? = runCatching {
         val root = JSONObject(resultJson ?: return null)
         if (root.optString("contract") != "pocketfinancer.processing-result/3") return null
@@ -305,6 +404,20 @@ object SmsReviewGrounding {
         )
         require(value.text == getString("text"))
         return value
+    }
+
+    private fun Any.toJsonLiteral(): String = when (this) {
+        is String -> JSONObject.quote(this)
+        is JSONObject, is JSONArray -> toString()
+        is Boolean, is Int, is Long -> toString()
+        else -> error("Unsupported retained field value")
+    }
+
+    private fun suggestionSummary(value: Any): String = when (value) {
+        is String -> value
+        is JSONObject -> value.keys().asSequence().toList().sorted()
+            .joinToString(", ") { key -> "$key: ${value.opt(key)}" }
+        else -> value.toString()
     }
 
     private fun requireSpan(

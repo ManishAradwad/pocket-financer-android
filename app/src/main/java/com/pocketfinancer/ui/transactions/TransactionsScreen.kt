@@ -76,6 +76,7 @@ private fun nativeStageLabel(state: String): String = when (state) {
 @Composable
 fun TransactionsScreen(
     onNavigateToTab: (String) -> Unit = {},
+    onOpenReview: (String) -> Unit = {},
     viewModel: TransactionsViewModel = hiltViewModel()
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
@@ -478,7 +479,7 @@ fun TransactionsScreen(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .padding(horizontal = 16.dp, vertical = 4.dp)
-                                    .clickable { onNavigateToTab("reviews") },
+                                    .clickable { onOpenReview(review.id) },
                                 colors = CardDefaults.cardColors(containerColor = M3_SecondaryContainer)
                             ) {
                                 Column(Modifier.padding(16.dp)) {
