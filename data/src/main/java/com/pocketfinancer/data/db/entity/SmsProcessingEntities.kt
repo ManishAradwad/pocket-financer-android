@@ -176,6 +176,21 @@ data class SmsReviewCaseEntity(
     val updatedAt: Long
 )
 
+/** Additive review-case/2 data; review-case/1 rows remain byte-for-byte intact. */
+@Entity(
+    tableName = "sms_review_case_v2_extensions",
+    indices = [Index(value = ["operationId"], unique = true)]
+)
+data class SmsReviewCaseV2ExtensionEntity(
+    @PrimaryKey val reviewCaseId: String,
+    val operationId: String,
+    val contractVersion: String,
+    val furthestStage: String,
+    val analyzerSuggestionsJson: String,
+    val fieldEvidenceJson: String,
+    val createdAt: Long
+)
+
 @Entity(
     tableName = "sms_user_feedback_events",
     indices = [

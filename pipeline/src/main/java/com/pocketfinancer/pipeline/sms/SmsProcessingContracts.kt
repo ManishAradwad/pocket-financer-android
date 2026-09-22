@@ -1,5 +1,8 @@
 package com.pocketfinancer.pipeline.sms
 
+import com.pocketfinancer.inference.DirectCandidateSelectorResult
+import com.pocketfinancer.inference.SlmModelSpec
+
 data class AdmittedMessageRef(
     val sourceId: String,
     val admissionReceiptId: String,
@@ -212,5 +215,24 @@ data class SmsProcessingObserverEvent(
     val sequence: Long,
     val stage: String,
     val status: String,
-    val reasonCodes: List<String>
+    val reasonCodes: List<String>,
+    val transient: SmsProcessingTransientEvent? = null
 )
+
+/** Process-only inference visibility. Durable truth remains the selector attempt row. */
+sealed interface SmsProcessingTransientEvent {
+    data class InferenceStarted(
+        val model: SlmModelSpec,
+        val grammarEnabled: Boolean,
+        val answerTokenBudget: Int
+    ) : SmsProcessingTransientEvent
+
+    data class DecodedToken(
+        val delta: String,
+        val cumulativeStructuredOutput: String
+    ) : SmsProcessingTransientEvent
+
+    data class InferenceCompleted(
+        val result: DirectCandidateSelectorResult
+    ) : SmsProcessingTransientEvent
+}

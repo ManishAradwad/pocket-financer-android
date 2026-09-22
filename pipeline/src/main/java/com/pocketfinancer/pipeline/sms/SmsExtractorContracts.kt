@@ -16,6 +16,22 @@ data class ExtractedDirection(val value: String, val evidence: UnicodeScalarSpan
 data class ExtractedAccount(val reference: String, val evidence: UnicodeScalarSpan)
 data class ExtractedCounterparty(val value: String, val evidence: UnicodeScalarSpan)
 
+data class NormalizedSmsMoney(
+    val minorUnits: Long,
+    val currency: String,
+    val scale: Int
+)
+
+/** One independently grounded model field retained after complete-result failure. */
+data class SmsPartialFieldEvidence(
+    val field: String,
+    val sourceSpan: UnicodeScalarSpan,
+    val normalizedValueJson: String?,
+    val validationState: String,
+    val originatingStage: String,
+    val origin: String = "slm"
+)
+
 data class NormalizedSmsExtraction(
     val minorUnits: Long,
     val currency: String,

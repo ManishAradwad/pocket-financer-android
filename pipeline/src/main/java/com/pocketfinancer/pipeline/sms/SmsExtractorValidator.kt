@@ -4,13 +4,7 @@ package com.pocketfinancer.pipeline.sms
  * org.json is unsuitable here because it accepts duplicate keys and trailing data. */
 object SmsExtractorValidator {
     fun validate(raw: String, source: String, byteLimit: Int = 16_384): SmsExtractorResult {
-        if (hasUnpairedSurrogate(raw)) fail("extractor_malformed_json")
-        if (raw.toByteArray(Charsets.UTF_8).size > byteLimit) fail("runtime_output_truncated")
-        val root = try {
-            StrictJson(raw).document()
-        } catch (error: StrictJsonFailure) {
-            fail(error.reasonCode)
-        }
+        val root = strictDocument(raw, byteLimit)
         val objectValue = root as? JsonValue.Obj ?: fail("extractor_output_not_object")
         val decision = string(
             objectValue,
@@ -36,6 +30,158 @@ object SmsExtractorValidator {
             }
             "posted" -> posted(objectValue, source)
             else -> fail("extractor_unknown_decision")
+        }
+    }
+
+    /**
+     * Independently validates fields from one strict posted document without
+     * repairing or accepting the complete invalid extractor result.
+     */
+    fun collectGroundedFields(
+        raw: String,
+        source: String,
+        primaryCurrency: String,
+        enabledProfiles: List<String>,
+        byteLimit: Int = 16_384
+    ): List<SmsPartialFieldEvidence> = runCatching {
+        val root = strictDocument(raw, byteLimit) as? JsonValue.Obj ?: return emptyList()
+        val decision = (root.values["decision"] as? JsonValue.Str)?.value
+        if (decision != "posted") return emptyList()
+        buildList {
+            partialAmount(root, source, primaryCurrency, enabledProfiles)?.let(::add)
+            partialDirection(root, source)?.let(::add)
+            partialAccount(root, source)?.let(::add)
+            partialCounterparty(root, source)?.let(::add)
+        }
+    }.getOrDefault(emptyList())
+
+    private fun partialAmount(
+        root: JsonValue.Obj,
+        source: String,
+        primaryCurrency: String,
+        enabledProfiles: List<String>
+    ): SmsPartialFieldEvidence? = partialField {
+        val amount = root.values["amount"] as? JsonValue.Obj
+            ?: fail("extractor_amount_invalid")
+        exactKeys(amount, setOf("value", "currency", "evidence"), "extractor_amount_invalid")
+        val extracted = ExtractedAmount(
+            nonEmptyString(amount, "value", "extractor_amount_invalid"),
+            nonEmptyString(amount, "currency", "extractor_currency_invalid"),
+            span(obj(amount, "evidence", "extractor_amount_invalid"), source)
+        )
+        val normalized = runCatching {
+            SmsExtractorNormalizer.normalizeAmountField(
+                extracted, primaryCurrency, enabledProfiles
+            )
+        }.getOrNull()
+        SmsPartialFieldEvidence(
+            field = "amount",
+            sourceSpan = extracted.evidence,
+            normalizedValueJson = normalized?.let {
+                "{\"currency\":\"${it.currency}\",\"minor_units\":${it.minorUnits}}"
+            },
+            validationState = if (normalized == null) "grounded_only" else "valid",
+            originatingStage = if (normalized == null) "extractor_validation" else "normalization"
+        )
+    }
+
+    private fun partialDirection(
+        root: JsonValue.Obj,
+        source: String
+    ): SmsPartialFieldEvidence? = partialField {
+        val direction = root.values["direction"] as? JsonValue.Obj
+            ?: fail("extractor_direction_invalid")
+        exactKeys(direction, setOf("value", "evidence"), "extractor_direction_invalid")
+        val extracted = ExtractedDirection(
+            nonEmptyString(direction, "value", "extractor_direction_invalid"),
+            span(obj(direction, "evidence", "extractor_direction_invalid"), source)
+        )
+        val normalized = runCatching {
+            SmsExtractorNormalizer.normalizeDirectionField(extracted)
+        }.getOrNull()
+        SmsPartialFieldEvidence(
+            field = "direction",
+            sourceSpan = extracted.evidence,
+            normalizedValueJson = normalized?.let(org.json.JSONObject::quote),
+            validationState = if (normalized == null) "grounded_only" else "valid",
+            originatingStage = if (normalized == null) "extractor_validation" else "normalization"
+        )
+    }
+
+    private fun partialAccount(
+        root: JsonValue.Obj,
+        source: String
+    ): SmsPartialFieldEvidence? = partialField {
+        val account = root.values["account"] as? JsonValue.Obj
+            ?: fail("extractor_account_reference_invalid")
+        exactKeys(
+            account,
+            setOf("reference", "evidence"),
+            "extractor_account_reference_invalid"
+        )
+        val extracted = ExtractedAccount(
+            nonEmptyString(account, "reference", "extractor_account_reference_invalid"),
+            span(obj(account, "evidence", "extractor_account_reference_invalid"), source)
+        )
+        val normalized = runCatching {
+            SmsExtractorNormalizer.normalizeAccountField(extracted)
+        }.getOrNull()
+        SmsPartialFieldEvidence(
+            field = "account",
+            sourceSpan = extracted.evidence,
+            normalizedValueJson = normalized?.let(org.json.JSONObject::quote),
+            validationState = if (normalized == null) "grounded_only" else "valid",
+            originatingStage = if (normalized == null) "extractor_validation" else "normalization"
+        )
+    }
+
+    private fun partialCounterparty(
+        root: JsonValue.Obj,
+        source: String
+    ): SmsPartialFieldEvidence? {
+        if (root.values["counterparty"] == null || root.values["counterparty"] == JsonValue.Null) {
+            return null
+        }
+        return partialField {
+            val counterparty = root.values["counterparty"] as? JsonValue.Obj
+                ?: fail("extractor_counterparty_invalid")
+            exactKeys(
+                counterparty,
+                setOf("value", "evidence"),
+                "extractor_counterparty_invalid"
+            )
+            val extracted = ExtractedCounterparty(
+                nonEmptyString(counterparty, "value", "extractor_counterparty_invalid"),
+                span(obj(counterparty, "evidence", "extractor_counterparty_invalid"), source)
+            )
+            val normalized = runCatching {
+                SmsExtractorNormalizer.normalizeCounterpartyField(extracted)
+            }.getOrNull()
+            SmsPartialFieldEvidence(
+                field = "counterparty",
+                sourceSpan = extracted.evidence,
+                normalizedValueJson = normalized?.let(org.json.JSONObject::quote),
+                validationState = if (normalized == null) "grounded_only" else "valid",
+                originatingStage = if (normalized == null) "extractor_validation" else "normalization"
+            )
+        }
+    }
+
+    private inline fun partialField(
+        block: () -> SmsPartialFieldEvidence
+    ): SmsPartialFieldEvidence? = try {
+        block()
+    } catch (_: SmsExtractorValidationException) {
+        null
+    }
+
+    private fun strictDocument(raw: String, byteLimit: Int): JsonValue {
+        if (hasUnpairedSurrogate(raw)) fail("extractor_malformed_json")
+        if (raw.toByteArray(Charsets.UTF_8).size > byteLimit) fail("runtime_output_truncated")
+        return try {
+            StrictJson(raw).document()
+        } catch (error: StrictJsonFailure) {
+            fail(error.reasonCode)
         }
     }
 

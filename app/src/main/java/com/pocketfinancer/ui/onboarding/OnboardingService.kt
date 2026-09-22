@@ -1687,6 +1687,33 @@ class OnboardingService : Service() {
                     addLog("➔ Paused: choose a primary currency in Settings.")
                     error("Primary currency confirmation is required")
                 }
+                is PipelineService.ProcessingResult.Saved -> {
+                    val updated = counters.copy(
+                        processedCount = counters.processedCount + 1,
+                        parsedCount = counters.parsedCount +
+                            if (result.alreadyCommitted) 0 else 1,
+                        concurrentDuplicateCount = counters.concurrentDuplicateCount +
+                            if (result.alreadyCommitted) 1 else 0
+                    )
+                    val settlement = checkpointHistoricalImportCounters(
+                        setupImportStore = setupImportStore,
+                        alreadySavedCount = alreadySavedCount,
+                        counters = updated,
+                        persistenceFailureMessage =
+                            SETUP_CHECKPOINT_PERSISTENCE_FAILURE_MESSAGE
+                    )
+                    counters = settlement.counters
+                    checkpointSettlement = settlement
+                    addLog(
+                        if (result.alreadyCommitted) {
+                            "➔ Already saved; no duplicate was created " +
+                                "[${"%.1f".format(durationMs / 1000f)}s]"
+                        } else {
+                            "➔ Saved transaction " +
+                                "[${"%.1f".format(durationMs / 1000f)}s]"
+                        }
+                    )
+                }
                 is PipelineService.ProcessingResult.Failure -> {
                     val settlement = checkpointHistoricalImportCounters(
                         setupImportStore = setupImportStore,

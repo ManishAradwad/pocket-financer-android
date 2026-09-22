@@ -5,6 +5,7 @@ import com.pocketfinancer.inference.DefaultDirectCandidateSelector
 import com.pocketfinancer.inference.DirectCandidateSelectorRequest
 import com.pocketfinancer.inference.DirectCandidateSelectorResult
 import com.pocketfinancer.inference.SlmLease
+import com.pocketfinancer.inference.SlmTokenCallback
 import javax.inject.Inject
 import org.json.JSONArray
 
@@ -23,7 +24,8 @@ data class DirectSmsExtractorRequest(
     val profileIds: List<String>,
     val advisoryEvidence: JSONArray,
     val prompt: String,
-    val grammar: String
+    val grammar: String,
+    val jsonCallback: SlmTokenCallback? = null
 ) {
     fun payload(): String = CanonicalAndroidJson.stringify(
         org.json.JSONObject()
@@ -55,7 +57,8 @@ class DefaultDirectSmsExtractor @Inject constructor(
             prompt = request.prompt,
             candidatePayloadJson = request.payload(),
             grammar = request.grammar,
-            profile = CandidateSelectorRuntimeProfile()
+            profile = CandidateSelectorRuntimeProfile(),
+            jsonCallback = request.jsonCallback
         )
     )
 }

@@ -10,8 +10,12 @@ import com.pocketfinancer.data.db.entity.SmsProcessingOperationEntity
 import com.pocketfinancer.data.db.entity.SmsProcessingTraceEventEntity
 import com.pocketfinancer.data.db.entity.SmsReconstructedResultEntity
 import com.pocketfinancer.data.db.entity.SmsReviewCaseEntity
+import com.pocketfinancer.data.db.entity.SmsReviewCaseV2ExtensionEntity
 import com.pocketfinancer.data.db.entity.SmsSelectorAttemptEntity
+import com.pocketfinancer.data.db.entity.TransactionEntity
+import com.pocketfinancer.data.db.entity.TransactionRevisionEntity
 import org.json.JSONObject
+import java.math.BigDecimal
 import java.security.MessageDigest
 import java.util.UUID
 import javax.inject.Inject
@@ -60,6 +64,34 @@ data class SmsDuplicateMatchCounts(
     val matchingTransactionFingerprints: Int
 )
 
+data class SmsReviewV2Evidence(
+    val furthestStage: String,
+    val analyzerSuggestionsJson: String,
+    val fieldEvidenceJson: String
+)
+
+data class SmsAutomaticTransactionInput(
+    val amountMinorUnits: Long,
+    val currency: String,
+    val direction: String,
+    val counterparty: String?,
+    val accountId: String,
+    val occurredAtEpochMs: Long,
+    val timestampProvenance: String,
+    val modelIdentifier: String,
+    val processingResultJson: String,
+    val transactionFingerprint: String,
+    val checksJson: String,
+    val accountResolutionJson: String
+)
+
+data class SmsAutomaticPersistenceReceipt(
+    val transactionId: String,
+    val revisionId: String
+)
+
+class SmsAutomaticPersistenceConflict(message: String) : IllegalStateException(message)
+
 class SmsProcessingStoreException(message: String) : IllegalStateException(message)
 
 @Singleton
@@ -104,6 +136,9 @@ class SmsProcessingStore @Inject constructor(
 
     suspend fun reviewCaseIdForOperation(operationId: String): String? =
         dao.getReviewCaseForOperation(operationId)?.id
+
+    suspend fun reviewV2Extension(reviewCaseId: String): SmsReviewCaseV2ExtensionEntity? =
+        dao.getReviewCaseV2Extension(reviewCaseId)
 
     suspend fun retryContext(reviewCaseId: String): SmsReviewRetryContext {
         val review = dao.getReviewCase(reviewCaseId)
@@ -380,10 +415,145 @@ class SmsProcessingStore @Inject constructor(
         }
     }
 
+    /**
+     * Writes the ledger projection, immutable revision, processing evidence,
+     * gate decision, and operation settlement in one Room transaction. The
+     * optional hook is a test-only fault boundary and executes before commit.
+     */
+    suspend fun persistEligibleTransaction(
+        claim: SmsOperationClaim,
+        input: SmsAutomaticTransactionInput,
+        now: Long,
+        beforeSettlement: suspend () -> Unit = {}
+    ): SmsAutomaticPersistenceReceipt = database.withTransaction {
+        val operation = requireOwned(claim, now)
+        val source = dao.getSource(operation.sourceId)
+            ?: throw SmsProcessingStoreException("Admitted SMS source not found")
+        require(input.amountMinorUnits > 0)
+        val currency = input.currency.uppercase()
+        val scale = CurrencyScaleRegistry.scale(currency)
+            ?: throw SmsProcessingStoreException("Unsupported transaction currency")
+        require(input.direction in setOf("debit", "credit"))
+        require(input.occurredAtEpochMs >= 0L)
+        require(input.transactionFingerprint.matches(SHA256_REGEX))
+        check(database.accountDao().getById(input.accountId) != null) {
+            "Resolved account disappeared before persistence"
+        }
+        if (database.transactionDao().getBySourceEvent(source.id, operation.stableEventId) != null) {
+            throw SmsAutomaticPersistenceConflict("Source event already owns a transaction")
+        }
+
+        val transactionId = UUID.nameUUIDFromBytes(
+            "${source.id}|${operation.stableEventId}".toByteArray(Charsets.UTF_8)
+        ).toString()
+        val revisionId = UUID.nameUUIDFromBytes(
+            "${operation.id}|automatic-revision-0".toByteArray(Charsets.UTF_8)
+        ).toString()
+        val transaction = TransactionEntity(
+            id = transactionId,
+            amount = BigDecimal.valueOf(input.amountMinorUnits)
+                .movePointLeft(scale).toDouble(),
+            merchant = input.counterparty ?: "Unspecified counterparty",
+            date = input.occurredAtEpochMs,
+            type = input.direction,
+            accountId = input.accountId,
+            rawMessage = source.rawMessage,
+            sender = source.sender,
+            isEdited = false,
+            createdAt = now,
+            updatedAt = now,
+            slmModelName = input.modelIdentifier,
+            sourceConnector = source.sourceConnector,
+            sourceProviderMessageId = source.sourceProviderMessageId,
+            sourceMessageId = source.sourceMessageId,
+            sourceFingerprint = source.sourceFingerprint,
+            sourceAlternateFingerprint = source.sourceAlternateFingerprint,
+            sourceId = source.id,
+            sourceEventId = operation.stableEventId,
+            exactMinorUnits = input.amountMinorUnits,
+            currencyCode = currency,
+            currencyScale = scale,
+            currencyProvenance = "extractor_source_span",
+            timestampProvenance = "${input.timestampProvenance}_read_only",
+            currentRevisionId = revisionId,
+            projectionState = "current",
+            legacyPrecisionStatus = "exact_minor_units"
+        )
+        if (database.transactionDao().insert(transaction) == -1L) {
+            throw SmsAutomaticPersistenceConflict("Transaction projection conflict")
+        }
+        database.transactionRevisionDao().insertRevision(
+            TransactionRevisionEntity(
+                id = revisionId,
+                transactionId = transactionId,
+                sourceId = source.id,
+                stableEventId = operation.stableEventId,
+                revision = 0,
+                previousRevisionId = null,
+                operationId = operation.id,
+                feedbackActionId = null,
+                exactMinorUnits = input.amountMinorUnits,
+                currencyCode = currency,
+                currencyScale = scale,
+                direction = input.direction,
+                merchant = transaction.merchant,
+                accountId = input.accountId,
+                occurredAt = input.occurredAtEpochMs,
+                provenance = "automatic_grounded_extractor",
+                isCurrentProjection = true,
+                createdAt = now
+            )
+        )
+        check(dao.getReconstructedResult(operation.id) == null) {
+            "Processing result was already recorded before automatic persistence"
+        }
+        dao.insertReconstructedResult(
+            SmsReconstructedResultEntity(
+                id = UUID.randomUUID().toString(),
+                operationId = operation.id,
+                contractVersion = "pocketfinancer.processing-result/3",
+                recognitionDecision = "posted",
+                semanticResultJson = input.processingResultJson,
+                transactionFingerprint = input.transactionFingerprint,
+                createdAt = now
+            )
+        )
+        check(dao.getPersistenceDecision(operation.id) == null) {
+            "Persistence gate was already recorded before automatic persistence"
+        }
+        dao.insertPersistenceDecision(
+            SmsPersistenceDecisionEntity(
+                id = UUID.randomUUID().toString(),
+                operationId = operation.id,
+                result = "persist",
+                primaryReason = "persistence_eligible",
+                checksJson = input.checksJson,
+                accountResolutionJson = input.accountResolutionJson,
+                rolloutMode = "automatic",
+                createdAt = now
+            )
+        )
+        beforeSettlement()
+        val receiptJson = "{" +
+            "\"revision_id\":${JSONObject.quote(revisionId)}," +
+            "\"transaction_ids\":[${JSONObject.quote(transactionId)}]}"
+        check(
+            dao.settlePersisted(
+                operation.id,
+                claim.ownerToken,
+                claim.ownerGeneration,
+                receiptJson,
+                now
+            ) == 1
+        ) { "SMS operation lost ownership before transaction settlement" }
+        SmsAutomaticPersistenceReceipt(transactionId, revisionId)
+    }
+
     suspend fun retainForReview(
         claim: SmsOperationClaim,
         reasons: List<String>,
-        now: Long
+        now: Long,
+        v2Evidence: SmsReviewV2Evidence? = null
     ): String = database.withTransaction {
         val operation = requireOwned(claim, now)
         val reviewCase = dao.getReviewCaseForOperation(operation.id)
@@ -416,6 +586,24 @@ class SmsProcessingStore @Inject constructor(
                 createdAt = now,
                 updatedAt = now
             ).also { dao.insertReviewCase(it) }
+        if (operation.contractReleaseId == "native-integration-v5") {
+            val evidence = v2Evidence ?: SmsReviewV2Evidence(
+                furthestStage = stageForState(operation.state),
+                analyzerSuggestionsJson = "[]",
+                fieldEvidenceJson = "[]"
+            )
+            dao.upsertReviewCaseV2Extension(
+                SmsReviewCaseV2ExtensionEntity(
+                    reviewCaseId = reviewCase.id,
+                    operationId = operation.id,
+                    contractVersion = "pocketfinancer.review-case/2",
+                    furthestStage = evidence.furthestStage,
+                    analyzerSuggestionsJson = evidence.analyzerSuggestionsJson,
+                    fieldEvidenceJson = evidence.fieldEvidenceJson,
+                    createdAt = now
+                )
+            )
+        }
         val receipt = "{" +
             "\"reasons\":${jsonArray(reasons)}," +
             "\"review_case_id\":${JSONObject.quote(reviewCase.id)}}"
@@ -504,6 +692,7 @@ class SmsProcessingStore @Inject constructor(
                 updatedAt = now
             )
             check(dao.updateReviewCase(updated) == 1)
+            retainEmptyV2ExtensionIfNeeded(updated.id, operation, now)
             return updated.id
         }
         val review = SmsReviewCaseEntity(
@@ -519,7 +708,36 @@ class SmsProcessingStore @Inject constructor(
             updatedAt = now
         )
         check(dao.insertReviewCase(review) != -1L)
+        retainEmptyV2ExtensionIfNeeded(review.id, operation, now)
         return review.id
+    }
+
+    private suspend fun retainEmptyV2ExtensionIfNeeded(
+        reviewCaseId: String,
+        operation: SmsProcessingOperationEntity,
+        now: Long
+    ) {
+        if (operation.contractReleaseId != "native-integration-v5") return
+        dao.upsertReviewCaseV2Extension(
+            SmsReviewCaseV2ExtensionEntity(
+                reviewCaseId = reviewCaseId,
+                operationId = operation.id,
+                contractVersion = "pocketfinancer.review-case/2",
+                furthestStage = stageForState(operation.state),
+                analyzerSuggestionsJson = "[]",
+                fieldEvidenceJson = "[]",
+                createdAt = now
+            )
+        )
+    }
+
+    private fun stageForState(state: String): String = when (state) {
+        "ready", "claimed" -> "configuration"
+        "analyzed", "triaged" -> "analysis_advisory"
+        "selector_running" -> "extractor_execution"
+        "selector_recorded", "validated" -> "extractor_validation"
+        "reconstructed" -> "normalization"
+        else -> "settlement"
     }
 
     private suspend fun requireOwned(

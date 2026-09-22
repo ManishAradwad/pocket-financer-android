@@ -356,6 +356,38 @@ class SmsParserWorker(
                     trigger = "realtime"
                 )
         ) {
+                is PipelineService.ProcessingResult.Saved -> {
+                    val newlyInserted = !processing.alreadyCommitted
+                    automaticActivity?.saved(newlyInserted)
+                    val discarded = discardOwnedTerminalCandidate(
+                        ingestionRepository = ingestionRepository,
+                        candidateKey = candidate.candidateKey,
+                        claimToken = claimToken
+                    )
+                    applyExactTerminalNotification(
+                        settledOwnedClaim = discarded,
+                        onOwned = {
+                            SmsNotificationHelper.showSuccessNotification(
+                                applicationContext,
+                                candidate.candidateKey,
+                                newlyInserted
+                            )
+                        },
+                        onStale = {
+                            cancelStaleTerminalNotificationIfCandidateAbsent(
+                                ingestionRepository = ingestionRepository,
+                                candidateKey = candidate.candidateKey
+                            ) {
+                                SmsNotificationHelper.cancelCandidateNotification(
+                                    applicationContext,
+                                    candidate.candidateKey
+                                )
+                            }
+                        }
+                    )
+                    Result.success()
+                }
+
                 is PipelineService.ProcessingResult.Skipped -> {
                     if (processing.reason == PipelineService.SkipReason.RETAINED_FOR_REVIEW) {
                         automaticActivity?.error("Saved locally for review; no transaction was added.")

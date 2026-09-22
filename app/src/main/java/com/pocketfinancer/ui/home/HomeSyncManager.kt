@@ -1096,6 +1096,12 @@ class HomeSyncManager @Inject constructor(
                     ensureRunCanContinue(runId)
 
                     when (result) {
+                        is PipelineService.ProcessingResult.Saved ->
+                            updateItemStatus(
+                                index,
+                                if (result.alreadyCommitted) "already_saved" else "synced",
+                                runId
+                            )
                         is PipelineService.ProcessingResult.Skipped ->
                             updateItemStatus(
                                 index,

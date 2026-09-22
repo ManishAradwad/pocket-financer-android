@@ -7,7 +7,8 @@ data class DirectCandidateSelectorRequest(
     val prompt: String,
     val candidatePayloadJson: String,
     val grammar: String?,
-    val profile: CandidateSelectorRuntimeProfile = CandidateSelectorRuntimeProfile()
+    val profile: CandidateSelectorRuntimeProfile = CandidateSelectorRuntimeProfile(),
+    val jsonCallback: SlmTokenCallback? = null
 )
 
 data class DirectCandidateSelectorResult(
@@ -40,7 +41,7 @@ class DefaultDirectCandidateSelector @Inject constructor() : DirectCandidateSele
             fallbackPrompt = request.prompt + "\n" + request.candidatePayloadJson,
             grammar = request.grammar,
             answerTokens = request.profile.answerTokenLimit,
-            jsonCallback = null
+            jsonCallback = request.jsonCallback
         )
         return when (val result = lease.extract(runtimeRequest)) {
             is SlmExtractionResult.Success -> {

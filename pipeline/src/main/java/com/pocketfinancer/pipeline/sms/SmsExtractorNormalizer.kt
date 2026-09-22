@@ -4,6 +4,68 @@ import java.text.Normalizer
 import java.util.Locale
 
 object SmsExtractorNormalizer {
+    fun normalizeAmountField(
+        amount: ExtractedAmount,
+        primaryCurrency: String,
+        enabledProfiles: List<String>
+    ): NormalizedSmsMoney {
+        if (
+            primaryCurrency !in CurrencyProfileRegistry.scales ||
+            enabledProfiles.isEmpty() ||
+            enabledProfiles.any { it !in SUPPORTED_PROFILES }
+        ) {
+            fail("extractor_currency_invalid")
+        }
+        validateCurrencyGrounding(
+            amount.evidence.text,
+            amount.currency,
+            primaryCurrency,
+            enabledProfiles
+        )
+        if (!Regex("^(0|[1-9][0-9]*)(\\.[0-9]+)?$").matches(amount.value)) {
+            fail("extractor_amount_invalid")
+        }
+        val declared = CurrencyProfileRegistry.parse(
+            amount.value, amount.currency, "extractor_declared"
+        ) ?: fail("extractor_amount_invalid")
+        val evidenceNumber = moneyNumber(amount.evidence.text)
+            ?: fail("extractor_amount_invalid")
+        val grounded = CurrencyProfileRegistry.parse(
+            evidenceNumber, amount.currency, "extractor_evidence"
+        ) ?: fail("extractor_amount_invalid")
+        if (declared.minorUnits != grounded.minorUnits) {
+            fail("extractor_amount_value_disagreement")
+        }
+        return NormalizedSmsMoney(grounded.minorUnits, grounded.currency, grounded.scale)
+    }
+
+    fun normalizeDirectionField(direction: ExtractedDirection): String {
+        if (!directionGrounded(direction.value, direction.evidence.text)) {
+            fail("extractor_direction_invalid")
+        }
+        return direction.value
+    }
+
+    fun normalizeAccountField(account: ExtractedAccount): String {
+        val normalized = normalizeAccountReference(account.evidence.text)
+        if (normalized.isEmpty() || normalizeAccountReference(account.reference) != normalized) {
+            fail("extractor_account_reference_invalid")
+        }
+        return normalized
+    }
+
+    fun normalizeCounterpartyField(counterparty: ExtractedCounterparty): String {
+        val evidence = normalizeText(counterparty.evidence.text)
+        if (
+            evidence.isEmpty() ||
+            evidence.codePointCount(0, evidence.length) > 256 ||
+            normalizeText(counterparty.value) != evidence
+        ) {
+            fail("extractor_counterparty_invalid")
+        }
+        return evidence
+    }
+
     fun normalize(
         posted: SmsExtractorResult.Posted,
         primaryCurrency: String,

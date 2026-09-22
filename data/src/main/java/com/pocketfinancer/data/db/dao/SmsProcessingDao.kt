@@ -13,6 +13,7 @@ import com.pocketfinancer.data.db.entity.SmsProcessingOperationEntity
 import com.pocketfinancer.data.db.entity.SmsProcessingTraceEventEntity
 import com.pocketfinancer.data.db.entity.SmsReconstructedResultEntity
 import com.pocketfinancer.data.db.entity.SmsReviewCaseEntity
+import com.pocketfinancer.data.db.entity.SmsReviewCaseV2ExtensionEntity
 import com.pocketfinancer.data.db.entity.SmsSelectorAttemptEntity
 import com.pocketfinancer.data.db.entity.SmsSourceMetadataEventEntity
 import com.pocketfinancer.data.db.entity.SmsTraceImportReceiptEntity
@@ -46,6 +47,9 @@ interface SmsProcessingDao {
 
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertReviewCase(reviewCase: SmsReviewCaseEntity): Long
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertReviewCaseV2Extension(extension: SmsReviewCaseV2ExtensionEntity)
 
     @Update
     suspend fun updateReviewCase(reviewCase: SmsReviewCaseEntity): Int
@@ -107,6 +111,9 @@ interface SmsProcessingDao {
 
     @Query("SELECT * FROM sms_review_cases WHERE id = :reviewCaseId")
     suspend fun getReviewCase(reviewCaseId: String): SmsReviewCaseEntity?
+
+    @Query("SELECT * FROM sms_review_case_v2_extensions WHERE reviewCaseId = :reviewCaseId")
+    suspend fun getReviewCaseV2Extension(reviewCaseId: String): SmsReviewCaseV2ExtensionEntity?
 
     @Query("SELECT * FROM sms_review_cases WHERE currentOperationId = :operationId LIMIT 1")
     suspend fun getReviewCaseForOperation(operationId: String): SmsReviewCaseEntity?
@@ -312,6 +319,31 @@ interface SmsProcessingDao {
         """
     )
     suspend fun settleDiscarded(
+        operationId: String,
+        ownerToken: String,
+        ownerGeneration: Long,
+        receiptJson: String,
+        now: Long
+    ): Int
+
+    @Query(
+        """
+        UPDATE sms_processing_operations
+        SET state = 'persisted',
+            transitionSequence = transitionSequence + 1,
+            ownerToken = NULL,
+            claimExpiresAt = NULL,
+            settledAt = :now,
+            settlementReceiptJson = :receiptJson,
+            updatedAt = :now
+        WHERE id = :operationId
+          AND ownerToken = :ownerToken
+          AND ownerGeneration = :ownerGeneration
+          AND claimExpiresAt >= :now
+          AND settledAt IS NULL
+        """
+    )
+    suspend fun settlePersisted(
         operationId: String,
         ownerToken: String,
         ownerGeneration: Long,

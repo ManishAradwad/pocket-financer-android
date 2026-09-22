@@ -26,6 +26,7 @@ import com.pocketfinancer.data.db.entity.SmsProcessingOperationEntity
 import com.pocketfinancer.data.db.entity.SmsProcessingTraceEventEntity
 import com.pocketfinancer.data.db.entity.SmsReconstructedResultEntity
 import com.pocketfinancer.data.db.entity.SmsReviewCaseEntity
+import com.pocketfinancer.data.db.entity.SmsReviewCaseV2ExtensionEntity
 import com.pocketfinancer.data.db.entity.SmsSelectorAttemptEntity
 import com.pocketfinancer.data.db.entity.SmsSourceMetadataEventEntity
 import com.pocketfinancer.data.db.entity.SmsTraceImportReceiptEntity
@@ -59,13 +60,14 @@ import javax.inject.Singleton
         SmsReconstructedResultEntity::class,
         SmsPersistenceDecisionEntity::class,
         SmsReviewCaseEntity::class,
+        SmsReviewCaseV2ExtensionEntity::class,
         SmsUserFeedbackEventEntity::class,
         TransactionRevisionEntity::class,
         AccountAliasEntity::class,
         LegacyTransactionSnapshotEntity::class,
         SmsTraceImportReceiptEntity::class
     ],
-    version = 7,
+    version = 8,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -470,6 +472,31 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /** Adds review-case/2 evidence without changing historical review-case/1 rows. */
+        val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `sms_review_case_v2_extensions` (
+                        `reviewCaseId` TEXT NOT NULL,
+                        `operationId` TEXT NOT NULL,
+                        `contractVersion` TEXT NOT NULL,
+                        `furthestStage` TEXT NOT NULL,
+                        `analyzerSuggestionsJson` TEXT NOT NULL,
+                        `fieldEvidenceJson` TEXT NOT NULL,
+                        `createdAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`reviewCaseId`)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS " +
+                        "`index_sms_review_case_v2_extensions_operationId` " +
+                        "ON `sms_review_case_v2_extensions` (`operationId`)"
+                )
+            }
+        }
+
         private fun createNativeSmsTables(db: SupportSQLiteDatabase) {
             val statements = listOf(
                 """
@@ -756,7 +783,8 @@ abstract class AppDatabase : RoomDatabase() {
                     MIGRATION_3_4,
                     MIGRATION_4_5,
                     MIGRATION_5_6,
-                    MIGRATION_6_7
+                    MIGRATION_6_7,
+                    MIGRATION_7_8
                 )
 
             return builder.build()

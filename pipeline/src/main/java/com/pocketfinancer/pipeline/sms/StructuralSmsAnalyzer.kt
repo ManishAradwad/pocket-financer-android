@@ -112,6 +112,16 @@ class StructuralSmsAnalyzer {
         sourceTimestampProvenance = operation.configuration.receivedTimestampProvenance
     )
 
+    fun analyze(source: String, operation: SmsV5OperationSnapshot): SmsAnalysis = analyze(
+        source = source,
+        operationId = operation.operationId,
+        configurationHash = operation.configurationHash,
+        primaryCurrency = operation.configuration.primaryCurrency,
+        enabledProfiles = operation.configuration.enabledProfiles,
+        sourceTimestampEpochMs = operation.configuration.receivedTimestampEpochMs,
+        sourceTimestampProvenance = operation.configuration.receivedTimestampProvenance
+    )
+
     private fun analyze(
         source: String,
         operationId: String,

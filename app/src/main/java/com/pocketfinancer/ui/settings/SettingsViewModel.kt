@@ -706,6 +706,12 @@ class SettingsViewModel @Inject constructor(
             )
             val elapsedMs = System.currentTimeMillis() - startedAt
             val summary = when (result) {
+                is PipelineService.ProcessingResult.Saved ->
+                    if (result.alreadyCommitted) {
+                        "Direct extraction completed. The synthetic transaction was already saved."
+                    } else {
+                        "Direct extraction completed and saved the synthetic transaction."
+                    }
                 is PipelineService.ProcessingResult.Skipped ->
                     if (result.reason == PipelineService.SkipReason.RETAINED_FOR_REVIEW) {
                         "Direct Candidate Selector completed. The synthetic result is saved for review."

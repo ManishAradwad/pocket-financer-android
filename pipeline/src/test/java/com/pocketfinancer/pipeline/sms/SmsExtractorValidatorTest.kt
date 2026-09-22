@@ -71,6 +71,29 @@ class SmsExtractorValidatorTest {
         assertEquals("café", normalized.counterparty)
     }
 
+    @Test fun `partial collector retains valid grounded fields when direction is missing`() {
+        val source = "INR 75.00 XX1234 at SHOP"
+        val raw = """{"decision":"posted","amount":{"value":"75.00","currency":"INR","evidence":{"start_scalar":0,"end_scalar":9,"text":"INR 75.00"}},"account":{"reference":"XX1234","evidence":{"start_scalar":10,"end_scalar":16,"text":"XX1234"}},"counterparty":{"value":"SHOP","evidence":{"start_scalar":20,"end_scalar":24,"text":"SHOP"}}}"""
+
+        val fields = SmsExtractorValidator.collectGroundedFields(
+            raw,
+            source,
+            primaryCurrency = "INR",
+            enabledProfiles = listOf("core-en", "india")
+        )
+
+        assertEquals(listOf("amount", "account", "counterparty"), fields.map { it.field })
+        fields.forEach {
+            assertEquals("valid", it.validationState)
+            assertEquals("normalization", it.originatingStage)
+            assertEquals("slm", it.origin)
+        }
+        assertEquals(7500L, JSONObject(fields[0].normalizedValueJson!!).getLong("minor_units"))
+        assertEquals("XX1234", fields[1].sourceSpan.text)
+        assertEquals("\"1234\"", fields[1].normalizedValueJson)
+        assertEquals("\"shop\"", fields[2].normalizedValueJson)
+    }
+
     @Test fun `scalar spans reject malformed utf16 source`() {
         assertNull(UnicodeScalarSpans.slice("A\uD800B", 0, 1))
         assertNull(UnicodeScalarSpans.slice("A\uDC00B", 1, 2))

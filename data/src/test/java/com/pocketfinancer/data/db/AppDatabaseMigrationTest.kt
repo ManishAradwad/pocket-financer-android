@@ -328,6 +328,56 @@ class AppDatabaseMigrationTest {
         migrated.close()
     }
 
+    @Test
+    fun `v7 to v8 adds review v2 evidence without changing review v1`() {
+        migrationHelper.createDatabase(V7_DATABASE_NAME, 7).close()
+
+        val migrated = migrationHelper.runMigrationsAndValidate(
+            V7_DATABASE_NAME,
+            8,
+            true,
+            AppDatabase.MIGRATION_7_8
+        )
+
+        migrated.query("PRAGMA table_info(`sms_review_case_v2_extensions`)").use { cursor ->
+            val names = buildSet {
+                while (cursor.moveToNext()) add(cursor.getString(1))
+            }
+            assertEquals(
+                setOf(
+                    "reviewCaseId",
+                    "operationId",
+                    "contractVersion",
+                    "furthestStage",
+                    "analyzerSuggestionsJson",
+                    "fieldEvidenceJson",
+                    "createdAt"
+                ),
+                names
+            )
+        }
+        assertIndexUnique(
+            migrated,
+            "sms_review_case_v2_extensions",
+            "index_sms_review_case_v2_extensions_operationId",
+            expectedUnique = true
+        )
+        migrated.query("PRAGMA table_info(`sms_review_cases`)").use { cursor ->
+            val names = buildSet {
+                while (cursor.moveToNext()) add(cursor.getString(1))
+            }
+            assertEquals(
+                setOf(
+                    "id", "sourceId", "currentOperationId", "state", "revision",
+                    "reasonCodesJson", "draftJson", "stableEventIdsJson", "createdAt",
+                    "updatedAt"
+                ),
+                names
+            )
+        }
+        migrated.close()
+    }
+
     private fun androidx.sqlite.db.SupportSQLiteDatabase.insertV3Transaction(
         id: String,
         rawMessage: String,
@@ -467,6 +517,7 @@ class AppDatabaseMigrationTest {
         const val V3_DATABASE_NAME = "migration-v3-v6"
         const val V4_DATABASE_NAME = "migration-v4-v6"
         const val V6_DATABASE_NAME = "migration-v6-v7"
+        const val V7_DATABASE_NAME = "migration-v7-v8"
         const val TEST_SENDER = "AX-HDFCBK"
         const val DUPLICATE_BODY = "Rs 500 debited at Merchant"
         const val SENT_AT = 1_200_000L
