@@ -1,6 +1,6 @@
 # Android SMS processing next steps
 
-Status: **platform handoff; not a completion claim**
+Status: **implementation in progress; local unit evidence only**
 Last reconciled: 2026-09-22
 
 The shared repository `pF_slm_selection` owns the canonical architecture,
@@ -11,37 +11,55 @@ implementation lane.
 
 ## Implemented source baseline
 
-The additive v4 source includes strict extractor parsing, Unicode-scalar conversion,
-exact minor-unit normalization, account resolution, sanitized vectors, v4
-operation routing, Room migration, durable review/recovery state, review drafts,
-atomic confirmation, full-source review, per-field highlights, and one active
-native text selection. V1/v2/v3 readers and stored operations remain supported.
+The existing source includes strict extractor parsing, Unicode-scalar conversion,
+exact minor-unit normalization, account resolution, sanitized vectors, durable
+review/recovery state, review drafts, atomic confirmation, full-source review,
+per-field highlights, and one active native text selection. Stored v1-v4
+operations and readers remain supported without reinterpretation.
 
-V4 is `review_only`. A complete valid result is therefore still retained for
-review. Recorded automated and emulator runs are historical evidence only. They do
-not prove that any previously observed emulator behavior is fixed, and they do not
-replace a fresh run or a physical-device gate.
+Commit `fcf6614` binds the shared automatic-routing contract to Android. The
+`native-integration-v5` name is an internal immutable release identifier required
+to preserve stored v1-v4 behavior; it is not another user-facing pipeline, screen,
+or plan. New operations now use the single final policy: complete valid posted
+results with one existing account and a clear duplicate assessment are persisted
+atomically; valid `none` settles without a transaction; exceptions enter Review.
+The frozen v4 path remains `review_only` for its existing operations and
+original-configuration retries.
+
+Implemented in `fcf6614`:
+
+- hash verification for the shared automatic contract bundle;
+- explicit retry lineage with a new operation and unchanged prior operation;
+- additive review-case/2 evidence storage while review-case/1 remains unchanged;
+- independent retention of safely grounded extractor fields and separately
+  labelled analyzer suggestions;
+- one Room transaction for transaction, revision, processing result, persistence
+  decision, and owner-fenced settlement;
+- source-event and fingerprint duplicate fencing, with retained parent reviews
+  excluded from false duplicate classification;
+- decoded-token callback propagation from JNI-facing extraction through the
+  coordinator and `PipelineService` observer contract.
 
 ## Open Android observations
 
-The latest emulator trial did not show the previously available live decoded-token
-stream or the intended source-SMS span review experience. Its routing also did not
-match the exception-only Review policy. Treat all three as open observations:
-reproduce the exact flow on the current branch, identify the runtime/navigation
-path actually used, and preserve evidence before implementing a fix.
+The emulator was not running during commit `fcf6614`, so no emulator or physical
+device behavior is claimed. The visible processing surfaces still need their
+separate decoded-delta/cumulative-output presentation completed. Review data
+projection, partial-field controls, and direct card-to-detail navigation also
+remain implementation work before a fresh emulator run.
 
 ## Next implementation change
 
-After the shared repository freezes an additive successor contract:
-
-1. Route a complete, strictly valid, uniquely resolved, non-duplicate posted result
-   directly and atomically into Transactions.
-2. Route only incomplete, invalid, ambiguous, abstained, interrupted,
-   incompatible, or failed operations to Review.
-3. Keep valid `none` handling separate from Transactions and Review according to
-   the versioned evidence-retention policy.
-4. Preserve legacy release routing; never silently reinterpret a stored v1-v4
-   operation.
+1. Project review-case/2 partial fields and suggestions through the existing
+   `GroundedReviewContent` and `EvidenceSelectionText`; do not add a second Review
+   screen.
+2. Add explicit direction fallback and deliberate existing-account selection,
+   and gate confirmation on all mandatory valid fields.
+3. Open a selected Transactions Review card directly in that case while retaining
+   the inbox for browsing.
+4. Complete decoded-delta and cumulative-output presentation, stale-operation
+   fencing, lifecycle scrubbing, and tests across automatic, historical, and
+   manual processing.
 5. Keep corrections revision-bound, append-only, local label evidence. Explicit
    export and adjudication are required before approved, source-grounded,
    split-safe labels may improve the SLM or another pipeline component.
@@ -83,3 +101,21 @@ Host GGUF evidence is not Android runtime evidence.
 
 Do not enable rollout or describe the full SMS implementation as complete until
 the shared evaluation strategy and physical-device gates pass.
+
+## 2026-09-22 handoff checkpoint
+
+Implemented commit: `fcf6614 feat(sms): enable automatic grounded routing`.
+
+Verified locally:
+
+- `./gradlew.bat :app:compileDebugKotlin --no-daemon`;
+- focused `PipelineServiceTest`, frozen-v4 gate, automatic bundle hash, extractor
+  partial-field, Room 7-to-8 migration, duplicate-fencing, and atomic rollback
+  tests.
+
+Not verified: emulator/device runtime, UI navigation, accessibility, process-death
+presentation recovery, full unit/lint/build gates. Next start in
+`SmsReviewRepository`, `ReviewDetailScreen`, `GroundedReviewContent`, and
+`TransactionsScreen`; then finish live output state in
+`AutomaticSmsProcessingActivity`, `HistoricalSmsProcessingActivity`, and
+`HomeSyncManager`.
