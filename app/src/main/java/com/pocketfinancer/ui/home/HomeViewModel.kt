@@ -109,6 +109,7 @@ internal fun HistoricalSmsProcessingActivity.cardSnapshot(): HistoricalSmsProces
         modelName = null,
         grammarEnabled = null,
         answerTokenBudget = 0,
+        decodedTokenDelta = "",
         jsonOutput = "",
         jsonOutputTruncated = false,
         performance = null,
@@ -125,6 +126,7 @@ internal fun AutomaticSmsProcessingActivity.cardSnapshot():
         modelName = null,
         grammarEnabled = null,
         answerTokenBudget = 0,
+        decodedTokenDelta = "",
         jsonOutput = "",
         jsonOutputTruncated = false,
         performance = null,
@@ -145,14 +147,18 @@ internal fun HomeSyncState.withoutManualSmsTelemetry(): HomeSyncState = copy(
             body = ""
         )
     },
+    decodedTokenDelta = "",
     jsonOutput = "",
+    jsonOutputTruncated = false,
     activeSmsPerformance = null,
     activeModelName = null
 )
 
 /** Keeps source evidence for a visible card/queue but omits live model output. */
 internal fun HomeSyncState.withoutManualLiveTelemetry(): HomeSyncState = copy(
+    decodedTokenDelta = "",
     jsonOutput = "",
+    jsonOutputTruncated = false,
     activeSmsPerformance = null,
     activeModelName = null
 )
@@ -262,7 +268,9 @@ internal fun sanitizedManualSyncState(
                 }
                 val snapshot = state.copy(
                     queue = sanitizedQueue,
+                    decodedTokenDelta = "",
                     jsonOutput = "",
+                    jsonOutputTruncated = false,
                     activeSmsPerformance = null,
                     activeModelName = null
                 )

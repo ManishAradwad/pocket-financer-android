@@ -99,11 +99,15 @@ data class SmsTelemetryUiModel(
     val parsedOutput: String,
     val performanceText: String?,
     val activeModelName: String?,
+    val decodedTokenDelta: String = "",
     val runtimeFacts: SmsTelemetryRuntimeFacts? = null,
     val jsonOutputTruncated: Boolean = false,
     val filterOutcome: SmsTelemetryFilterOutcome? = null,
     val stopState: SmsStopUiState = SmsStopUiState.HIDDEN
 ) {
+    val cumulativeStructuredOutput: String
+        get() = jsonOutput
+
     val isActiveCandidate: Boolean
         get() = content is SmsTelemetryContent.Candidate &&
             phase in setOf(
@@ -214,6 +218,9 @@ object SmsTelemetryPresenter {
             ),
             performanceText = state.activeSmsPerformance.takeIf { isActive },
             activeModelName = state.activeModelName,
+            decodedTokenDelta = state.decodedTokenDelta.takeIf { isActive }
+                .orEmpty(),
+            jsonOutputTruncated = isActive && state.jsonOutputTruncated,
             stopState = when {
                 !isActive || state.activeRunId == null -> SmsStopUiState.HIDDEN
                 state.status == HomeSyncState.Status.CANCELLING ->
@@ -253,6 +260,7 @@ object SmsTelemetryPresenter {
         parsedOutput = historicalParsedOutput(activity, parseJson),
         performanceText = activity.historicalPerformanceText(),
         activeModelName = activity.modelName,
+        decodedTokenDelta = activity.decodedTokenDelta,
         runtimeFacts = activity.toSmsTelemetryRuntimeFacts(),
         jsonOutputTruncated = activity.jsonOutputTruncated,
         stopState = stopState
@@ -316,6 +324,7 @@ object SmsTelemetryPresenter {
             parsedOutput = automaticParsedOutput(activity, parseJson),
             performanceText = activity.automaticPerformanceText(),
             activeModelName = activity.modelName,
+            decodedTokenDelta = activity.decodedTokenDelta,
             runtimeFacts = activity.toSmsTelemetryRuntimeFacts(),
             jsonOutputTruncated = activity.jsonOutputTruncated,
             filterOutcome = when (activity.filterResult) {

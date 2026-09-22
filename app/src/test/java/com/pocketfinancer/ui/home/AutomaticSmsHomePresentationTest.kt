@@ -33,6 +33,7 @@ class AutomaticSmsHomePresentationTest {
         runTest {
             val initial = activity().copy(
                 modelName = "private-model-file.gguf",
+                decodedTokenDelta = "private delta",
                 jsonOutput = "private json",
                 performance = AutomaticSmsSlmPerformance(1, 2, 3),
                 cache = AutomaticSmsSlmCacheTelemetry(true, true, 4)
@@ -49,6 +50,7 @@ class AutomaticSmsHomePresentationTest {
             val first = requireNotNull(emissions.single())
             assertEquals(initial.sender, first.sender)
             assertEquals(initial.body, first.body)
+            assertEquals("", first.decodedTokenDelta)
             assertEquals("", first.jsonOutput)
             assertNull(first.modelName)
             assertNull(first.performance)
@@ -86,6 +88,7 @@ class AutomaticSmsHomePresentationTest {
             val dispatcher = UnconfinedTestDispatcher(testScheduler)
             Dispatchers.setMain(dispatcher)
             val sensitive = activity().copy(
+                decodedTokenDelta = "private delta",
                 jsonOutput = "private output"
             )
             val source = MutableStateFlow<AutomaticSmsProcessingActivity?>(sensitive)

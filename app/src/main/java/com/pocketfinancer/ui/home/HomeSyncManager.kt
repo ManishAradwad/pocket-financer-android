@@ -24,6 +24,7 @@ import com.pocketfinancer.toModelSpec
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -209,7 +210,9 @@ data class HomeSyncState(
     val queue: List<SyncSmsItem> = emptyList(),
     val currentIndex: Int? = null,
     val currentStageIndex: Int? = null,
+    val decodedTokenDelta: String = "",
     val jsonOutput: String = "",
+    val jsonOutputTruncated: Boolean = false,
     val activeSmsPerformance: String? = null,
     val activeModelName: String? = null,
     val recentScanOutcome: RecentScanOutcome = RecentScanOutcome.NOT_RUN,
@@ -242,6 +245,17 @@ internal data class ManualOperationReservation(
     val kind: ManualOperationReservationKind
 )
 
+internal data class ManualSmsTelemetryOwner(
+    val runId: String?,
+    val candidateKey: String,
+    val attemptToken: String
+) {
+    init {
+        require(candidateKey.isNotBlank())
+        require(attemptToken.isNotBlank())
+    }
+}
+
 @Singleton
 class HomeSyncManager @Inject constructor(
     @ApplicationContext private val context: Context,
@@ -267,6 +281,8 @@ class HomeSyncManager @Inject constructor(
     private val recentScanTrackingLock = Any()
     private val _syncState = MutableStateFlow(HomeSyncState())
     val syncState: StateFlow<HomeSyncState> = _syncState.asStateFlow()
+    private val activeManualSmsTelemetryOwner =
+        AtomicReference<ManualSmsTelemetryOwner?>(null)
     private val _serviceStartAcknowledgement =
         MutableStateFlow<ManualServiceStartAcknowledgement?>(null)
     internal val serviceStartAcknowledgement:
@@ -405,7 +421,9 @@ class HomeSyncManager @Inject constructor(
                     cancellationRequested = false,
                     currentIndex = null,
                     currentStageIndex = null,
+                    decodedTokenDelta = "",
                     jsonOutput = "",
+                    jsonOutputTruncated = false,
                     activeSmsPerformance = null,
                     scanError = null,
                     syncError = null
@@ -466,7 +484,9 @@ class HomeSyncManager @Inject constructor(
             val next = current.copy(
                 status = HomeSyncState.Status.CANCELLING,
                 cancellationRequested = true,
+                decodedTokenDelta = "",
                 jsonOutput = "",
+                jsonOutputTruncated = false,
                 activeSmsPerformance = null
             )
             if (_syncState.compareAndSet(current, next)) return true
@@ -516,7 +536,9 @@ class HomeSyncManager @Inject constructor(
                     .takeUnless { terminalStatus == HomeSyncState.Status.IDLE },
                 currentStageIndex = current.currentStageIndex
                     .takeUnless { terminalStatus == HomeSyncState.Status.IDLE },
+                decodedTokenDelta = "",
                 jsonOutput = "",
+                jsonOutputTruncated = false,
                 activeSmsPerformance = null
             )
             if (_syncState.compareAndSet(current, finished)) return true
@@ -545,7 +567,9 @@ class HomeSyncManager @Inject constructor(
                 status = HomeSyncState.Status.DONE,
                 currentIndex = null,
                 currentStageIndex = null,
+                decodedTokenDelta = "",
                 jsonOutput = "",
+                jsonOutputTruncated = false,
                 activeSmsPerformance = null,
                 syncError = null
             )
@@ -593,7 +617,9 @@ class HomeSyncManager @Inject constructor(
                 },
                 currentIndex = null,
                 currentStageIndex = null,
+                decodedTokenDelta = "",
                 jsonOutput = "",
+                jsonOutputTruncated = false,
                 activeSmsPerformance = null,
                 syncError = null
             )
@@ -1005,7 +1031,9 @@ class HomeSyncManager @Inject constructor(
                     status = HomeSyncState.Status.SYNCING,
                     currentIndex = 0,
                     currentStageIndex = 0,
+                    decodedTokenDelta = "",
                     jsonOutput = "",
+                    jsonOutputTruncated = false,
                     activeSmsPerformance = null,
                     activeModelName = modelFile.name
                 )
@@ -1058,7 +1086,9 @@ class HomeSyncManager @Inject constructor(
                         queue = queue,
                         currentIndex = index,
                         currentStageIndex = 0,
+                        decodedTokenDelta = "",
                         jsonOutput = "",
+                        jsonOutputTruncated = false,
                         activeSmsPerformance = null
                     )
                 }
@@ -1081,18 +1111,53 @@ class HomeSyncManager @Inject constructor(
                         state.copy(currentStageIndex = 1)
                     }
                     ensureRunCanContinue(runId)
-                    val result = pipelineService.processSingle(
-                        sms = SmsReader.SmsMessage(
-                            address = item.sender,
-                            body = item.body,
-                            date = item.date,
-                            type = item.messageType,
-                            providerMessageId = item.sourceIdentity.providerMessageId,
-                            sourceTimestamp = item.date
-                        ),
-                        lease = batchLease,
-                        trigger = "manual"
+                    val telemetryOwner = ManualSmsTelemetryOwner(
+                        runId = runId,
+                        candidateKey = item.id,
+                        attemptToken = UUID.randomUUID().toString()
                     )
+                    check(
+                        activeManualSmsTelemetryOwner.compareAndSet(
+                            null,
+                            telemetryOwner
+                        )
+                    ) { "Another manual SMS telemetry attempt is still active" }
+                    val processingObserver = ManualSmsProcessingObserver(
+                        initial = ManualSmsProcessingTelemetry(
+                            stageIndex = 1,
+                            modelName = modelFile.name
+                        ),
+                        publish = { telemetry ->
+                            publishManualSmsTelemetry(
+                                owner = telemetryOwner,
+                                index = index,
+                                telemetry = telemetry
+                            )
+                        }
+                    )
+                    val result = try {
+                        pipelineService.processSingle(
+                            sms = SmsReader.SmsMessage(
+                                address = item.sender,
+                                body = item.body,
+                                date = item.date,
+                                type = item.messageType,
+                                providerMessageId =
+                                    item.sourceIdentity.providerMessageId,
+                                sourceTimestamp = item.date
+                            ),
+                            lease = batchLease,
+                            observer = processingObserver,
+                            trigger = "manual"
+                        )
+                    } finally {
+                        processingObserver.close()
+                        clearManualSmsTelemetry(telemetryOwner, index)
+                        activeManualSmsTelemetryOwner.compareAndSet(
+                            telemetryOwner,
+                            null
+                        )
+                    }
                     ensureRunCanContinue(runId)
 
                     when (result) {
@@ -1174,25 +1239,81 @@ class HomeSyncManager @Inject constructor(
         status: String,
         runId: String?
     ) {
-        val shouldDiscardTransientOutput =
-            status in SOURCE_EVIDENCE_DISCARDED_STATUSES
         val updated = updateRunState(runId) { state ->
             val queue = state.queue.toMutableList()
             if (index !in queue.indices) return@updateRunState state
             queue[index] = queue[index].withPrivacySafeStatus(status)
             state.copy(
                 queue = queue,
-                jsonOutput = if (shouldDiscardTransientOutput) {
-                    ""
-                } else {
-                    state.jsonOutput
-                }
+                decodedTokenDelta = "",
+                jsonOutput = "",
+                jsonOutputTruncated = false,
+                activeSmsPerformance = null,
+                activeModelName = null
             )
         }
         if (updated) {
             recordManualProcessingProgressSafely(_syncState.value.queue)
         }
     }
+
+    private fun publishManualSmsTelemetry(
+        owner: ManualSmsTelemetryOwner,
+        index: Int,
+        telemetry: ManualSmsProcessingTelemetry
+    ): Boolean {
+        if (activeManualSmsTelemetryOwner.get() != owner) return false
+        var ownedSnapshot = false
+        val updated = updateRunState(owner.runId) { state ->
+            ownedSnapshot = state.ownsManualSmsTelemetry(owner, index) &&
+                activeManualSmsTelemetryOwner.get() == owner
+            if (!ownedSnapshot) {
+                state
+            } else {
+                state.copy(
+                    currentStageIndex = telemetry.stageIndex,
+                    decodedTokenDelta = telemetry.decodedTokenDelta,
+                    jsonOutput = telemetry.cumulativeStructuredOutput,
+                    jsonOutputTruncated = telemetry.outputTruncated,
+                    activeSmsPerformance = telemetry.performanceText,
+                    activeModelName = telemetry.modelName
+                )
+            }
+        }
+        return updated && ownedSnapshot &&
+            activeManualSmsTelemetryOwner.get() == owner
+    }
+
+    private fun clearManualSmsTelemetry(
+        owner: ManualSmsTelemetryOwner,
+        index: Int
+    ) {
+        if (activeManualSmsTelemetryOwner.get() != owner) return
+        updateRunState(
+            runId = owner.runId,
+            allowCancellationRequested = true
+        ) { state ->
+            if (!state.ownsManualSmsTelemetry(owner, index)) {
+                state
+            } else {
+                state.copy(
+                    decodedTokenDelta = "",
+                    jsonOutput = "",
+                    jsonOutputTruncated = false,
+                    activeSmsPerformance = null,
+                    activeModelName = null
+                )
+            }
+        }
+    }
+
+    private fun HomeSyncState.ownsManualSmsTelemetry(
+        owner: ManualSmsTelemetryOwner,
+        index: Int
+    ): Boolean = currentIndex == index &&
+        queue.getOrNull(index)?.let { item ->
+            item.id == owner.candidateKey && item.status == "syncing"
+        } == true
 
     private fun recordManualOperationError(
         code: String,
@@ -1452,7 +1573,9 @@ internal fun settledManualSyncCancellation(
         },
         currentIndex = null,
         currentStageIndex = null,
+        decodedTokenDelta = "",
         jsonOutput = "",
+        jsonOutputTruncated = false,
         activeSmsPerformance = null,
         syncError = null
     )

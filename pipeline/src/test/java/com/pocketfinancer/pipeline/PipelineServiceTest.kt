@@ -3,12 +3,18 @@ package com.pocketfinancer.pipeline
 import com.pocketfinancer.data.repository.ProcessingConfigurationRepository
 import com.pocketfinancer.data.repository.SmsProcessingStore
 import com.pocketfinancer.inference.SlmLease
+import com.pocketfinancer.inference.DirectCandidateSelectorResult
+import com.pocketfinancer.inference.SlmCacheDiagnostics
 import com.pocketfinancer.inference.SlmModelSpec
+import com.pocketfinancer.inference.SlmPerformanceData
 import com.pocketfinancer.pipeline.sms.DefaultSmsProcessingCoordinator
 import com.pocketfinancer.pipeline.sms.DefaultSmsV4ProcessingCoordinator
 import com.pocketfinancer.pipeline.sms.DefaultSmsV5ProcessingCoordinator
 import com.pocketfinancer.pipeline.sms.SmsOperationSnapshotFactory
 import com.pocketfinancer.pipeline.sms.SmsProcessingOutcome
+import com.pocketfinancer.pipeline.sms.SmsProcessingObserver
+import com.pocketfinancer.pipeline.sms.SmsProcessingObserverEvent
+import com.pocketfinancer.pipeline.sms.SmsProcessingTransientEvent
 import com.pocketfinancer.pipeline.sms.SmsV4ModelIdentity
 import com.pocketfinancer.pipeline.sms.SmsV4OperationSnapshotFactory
 import com.pocketfinancer.pipeline.sms.SmsV5OperationConfiguration
@@ -22,6 +28,7 @@ import io.mockk.mockk
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.Before
@@ -173,6 +180,73 @@ class PipelineServiceTest {
             v5Coordinator.processUsingLease(any(), snapshot, lease, any())
         }
     }
+
+    @Test
+    fun `decoded callbacks reach processing observer in order with completed output`() = runTest {
+        every { configuration.confirmedPrimaryCurrency() } returns "INR"
+        val model = SlmModelSpec("test-selector", "synthetic-model.gguf")
+        coEvery {
+            v5Coordinator.processUsingLease(any(), snapshot, lease, any())
+        } coAnswers {
+            val observer = arg<SmsProcessingObserver>(3)
+            observer.onEvent(observerEvent(
+                SmsProcessingTransientEvent.InferenceStarted(model, true, 512)
+            ))
+            observer.onEvent(observerEvent(
+                SmsProcessingTransientEvent.DecodedToken("{", "{")
+            ))
+            observer.onEvent(observerEvent(
+                SmsProcessingTransientEvent.DecodedToken(
+                    "\"decision\":\"none\"}",
+                    "{\"decision\":\"none\"}"
+                )
+            ))
+            observer.onEvent(observerEvent(
+                SmsProcessingTransientEvent.InferenceCompleted(
+                    DirectCandidateSelectorResult(
+                        rawOutput = "{\"decision\":\"none\"}",
+                        completion = "complete",
+                        safeErrorCode = null,
+                        model = model,
+                        performance = SlmPerformanceData(1, 2, 100, 3),
+                        cache = SlmCacheDiagnostics()
+                    )
+                )
+            ))
+            SmsProcessingOutcome.TerminallyDiscarded(
+                snapshot.operationId,
+                "valid_none"
+            )
+        }
+        val events = mutableListOf<PipelineService.ProcessingEvent>()
+
+        val result = pipeline.processSingle(
+            message(),
+            lease,
+            observer = PipelineService.ProcessingObserver(events::add)
+        )
+
+        assertIs<PipelineService.ProcessingResult.Skipped>(result)
+        assertIs<PipelineService.ProcessingEvent.InferenceStarted>(events[0])
+        val first = assertIs<PipelineService.ProcessingEvent.JsonTokenDelta>(events[1])
+        val second = assertIs<PipelineService.ProcessingEvent.JsonTokenDelta>(events[2])
+        val completed = assertIs<PipelineService.ProcessingEvent.InferenceCompleted>(events[3])
+        assertEquals("{", first.cumulativeStructuredOutput)
+        assertEquals("{\"decision\":\"none\"}", second.cumulativeStructuredOutput)
+        assertEquals("{\"decision\":\"none\"}", completed.json)
+        assertTrue(events.size == 4)
+    }
+
+    private fun observerEvent(
+        transient: SmsProcessingTransientEvent
+    ) = SmsProcessingObserverEvent(
+        operationId = snapshot.operationId,
+        sequence = -1,
+        stage = "selector_execution",
+        status = "running",
+        reasonCodes = emptyList(),
+        transient = transient
+    )
 
     private fun message() = SmsReader.SmsMessage(
         address = "SYNTH",

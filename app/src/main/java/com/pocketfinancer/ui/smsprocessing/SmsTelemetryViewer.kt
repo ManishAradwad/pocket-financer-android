@@ -581,6 +581,24 @@ private fun PipelineTimeline(
             }
         ) {
             OutputBox(
+                title = "Latest decoded token delta",
+                content = model.decodedTokenDelta.ifEmpty {
+                    if (stage2Active) {
+                        "Waiting for the next decoded token…"
+                    } else {
+                        "No decoded-token callback is active."
+                    }
+                }
+            )
+            OutputBox(
+                title = "Cumulative structured output",
+                content = model.cumulativeStructuredOutput
+                    .ifEmpty { "Waiting for structured output…" }
+                    .withLiveOutputTruncationNotice(
+                        model.jsonOutputTruncated
+                    )
+            )
+            OutputBox(
                 title = "Decision Trace",
                 content = "The durable analyzer, selector validation, reconstruction, " +
                     "account-resolution, and gate trace is available from Saved alert reviews."

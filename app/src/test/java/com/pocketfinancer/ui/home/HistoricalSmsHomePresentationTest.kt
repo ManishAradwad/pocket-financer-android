@@ -88,6 +88,7 @@ class HistoricalSmsHomePresentationTest {
 
         source.value = source.value.copy(
             activeHistoricalSms = activity.copy(
+                decodedTokenDelta = "private delta",
                 jsonOutput = "private output"
             )
         )
@@ -123,6 +124,7 @@ class HistoricalSmsHomePresentationTest {
         val dispatcher = UnconfinedTestDispatcher(testScheduler)
         Dispatchers.setMain(dispatcher)
         val activity = activity().copy(
+            decodedTokenDelta = "private delta",
             jsonOutput = "private output"
         )
         val source = MutableStateFlow<HistoricalSmsProcessingActivity?>(activity)
@@ -177,6 +179,7 @@ class HistoricalSmsHomePresentationTest {
                     status = "syncing"
                 )
             ),
+            decodedTokenDelta = "private delta",
             jsonOutput = "private output"
         )
         val source = MutableStateFlow(sensitiveState)
@@ -211,10 +214,14 @@ class HistoricalSmsHomePresentationTest {
         val first = OnboardingSyncManager.OnboardingSyncState(
             isRunning = true,
             runPurpose = OnboardingSyncManager.RunPurpose.INITIAL_SETUP,
-            activeHistoricalSms = activity().copy(jsonOutput = "first")
+            activeHistoricalSms = activity().copy(
+                decodedTokenDelta = "first delta",
+                jsonOutput = "first"
+            )
         )
         val next = first.copy(
             activeHistoricalSms = first.activeHistoricalSms?.copy(
+                decodedTokenDelta = "private delta",
                 jsonOutput = "private output"
             )
         )

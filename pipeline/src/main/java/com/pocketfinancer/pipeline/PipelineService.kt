@@ -94,7 +94,7 @@ class PipelineService @Inject constructor(
 
         data class JsonTokenDelta(
             val delta: String,
-            val cumulativeStructuredOutput: String = ""
+            val cumulativeStructuredOutput: String
         ) : ProcessingEvent
 
         /**

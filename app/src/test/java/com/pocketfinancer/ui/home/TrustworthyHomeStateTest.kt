@@ -971,7 +971,9 @@ class TrustworthyHomeStateTest {
                     status = "syncing"
                 )
             ),
+            decodedTokenDelta = "private token delta",
             jsonOutput = "private JSON",
+            jsonOutputTruncated = true,
             activeSmsPerformance = "12 tok/s",
             activeModelName = "local-model.gguf"
         )
@@ -979,6 +981,8 @@ class TrustworthyHomeStateTest {
         val scrubbed = source.withoutManualSmsTelemetry()
 
         assertEquals("", scrubbed.jsonOutput)
+        assertEquals("", scrubbed.decodedTokenDelta)
+        assertFalse(scrubbed.jsonOutputTruncated)
         assertEquals(null, scrubbed.activeSmsPerformance)
         assertEquals(null, scrubbed.activeModelName)
         assertEquals("", scrubbed.queue.single().sender)
@@ -987,6 +991,39 @@ class TrustworthyHomeStateTest {
         assertEquals(source.queue.single().status, scrubbed.queue.single().status)
         assertEquals(source.activeRunId, scrubbed.activeRunId)
         assertEquals(source.status, scrubbed.status)
+    }
+
+    @Test
+    fun `manual cancellation settlement clears all transient generated text`() {
+        val settled = requireNotNull(
+            settledManualSyncCancellation(
+                state = HomeSyncState(
+                    status = HomeSyncState.Status.CANCELLING,
+                    activeRunId = "manual-cancel-run",
+                    cancellationRequested = true,
+                    queue = listOf(
+                        SyncSmsItem(
+                            id = "candidate",
+                            sender = "PRIVATE-BANK",
+                            body = "Private message",
+                            date = 1L,
+                            status = "syncing"
+                        )
+                    ),
+                    currentIndex = 0,
+                    currentStageIndex = 1,
+                    decodedTokenDelta = "private-delta",
+                    jsonOutput = "private-cumulative-output",
+                    jsonOutputTruncated = true
+                ),
+                requestedRunId = "manual-cancel-run"
+            )
+        )
+
+        assertEquals("", settled.decodedTokenDelta)
+        assertEquals("", settled.jsonOutput)
+        assertFalse(settled.jsonOutputTruncated)
+        assertEquals("pending", settled.queue.single().status)
     }
 
     @OptIn(ExperimentalCoroutinesApi::class)
@@ -1017,7 +1054,9 @@ class TrustworthyHomeStateTest {
             assertEquals("", projection.value.queue.single().sender)
 
             source.value = source.value.copy(
+                decodedTokenDelta = "token",
                 jsonOutput = "{partial}",
+                jsonOutputTruncated = true,
                 activeSmsPerformance = "12 tok/s",
                 activeModelName = "local-model.gguf"
             )
@@ -1077,7 +1116,9 @@ class TrustworthyHomeStateTest {
             assertEquals(candidate.body, initialProjection.queue.single().body)
 
             source.value = source.value.copy(
+                decodedTokenDelta = "token",
                 jsonOutput = "{partial}",
+                jsonOutputTruncated = true,
                 activeSmsPerformance = "12 tok/s",
                 activeModelName = "local-model.gguf"
             )
@@ -1090,7 +1131,9 @@ class TrustworthyHomeStateTest {
             runCurrent()
             assertNotSame(initialProjection, projection.value)
             assertEquals("UPDATED-BANK", projection.value.queue.single().sender)
+            assertEquals("", projection.value.decodedTokenDelta)
             assertEquals("", projection.value.jsonOutput)
+            assertFalse(projection.value.jsonOutputTruncated)
 
             val sourceUpdatedProjection = projection.value
             source.value = source.value.copy(currentStageIndex = 2)

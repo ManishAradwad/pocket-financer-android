@@ -20,6 +20,9 @@ data class HistoricalSmsProcessingActivity(
     val modelName: String? = null,
     val grammarEnabled: Boolean? = null,
     val answerTokenBudget: Int = 0,
+    /** Latest decoded callback only; this is not a reasoning channel. */
+    val decodedTokenDelta: String = "",
+    /** Bounded cumulative structured output from the runtime relay. */
     val jsonOutput: String = "",
     val jsonOutputTruncated: Boolean = false,
     val performance: HistoricalSlmPerformance? = null,
@@ -36,6 +39,18 @@ data class HistoricalSmsProcessingActivity(
         }
         require(answerTokenBudget >= 0) {
             "Answer token budget must not be negative"
+        }
+        require(
+            decodedTokenDelta.length <=
+                HistoricalSmsProcessingObserver.MAX_TRANSIENT_TOKEN_DELTA_CHARS
+        ) {
+            "Historical decoded-token telemetry exceeded its in-memory bound"
+        }
+        require(
+            jsonOutput.length <=
+                HistoricalSmsProcessingObserver.MAX_TRANSIENT_OUTPUT_CHARS
+        ) {
+            "Historical structured-output telemetry exceeded its in-memory bound"
         }
     }
 
@@ -89,11 +104,15 @@ internal class HistoricalSmsProcessingObserver(
 ) : PipelineService.ProcessingObserver {
     private var activity = initial
     private val json = StringBuilder(initial.jsonOutput)
+    private var decodedTokenDelta = initial.decodedTokenDelta
     private var jsonTruncated = initial.jsonOutputTruncated
+    private var receivedDecodedToken = false
     private var lastPublishedNanos: Long? = null
+    private var closed = false
 
     @Synchronized
     override fun onEvent(event: PipelineService.ProcessingEvent) {
+        if (closed) return
         when (event) {
             is PipelineService.ProcessingEvent.GroundedStage -> {
                 activity = activity.copy(
@@ -120,6 +139,10 @@ internal class HistoricalSmsProcessingObserver(
             }
 
             is PipelineService.ProcessingEvent.InferenceStarted -> {
+                decodedTokenDelta = ""
+                json.clear()
+                jsonTruncated = false
+                receivedDecodedToken = false
                 activity = activity.copy(
                     stage = HistoricalSmsProcessingStage.GENERATING,
                     modelName = File(event.model.modelPath).name,
@@ -132,17 +155,22 @@ internal class HistoricalSmsProcessingObserver(
             is PipelineService.ProcessingEvent.JsonTokenDelta -> {
                 val enteredJson =
                     activity.stage != HistoricalSmsProcessingStage.GENERATING
-                jsonTruncated = json.appendBounded(event.delta) || jsonTruncated
+                val firstDecodedToken = !receivedDecodedToken
+                receivedDecodedToken = true
+                decodedTokenDelta = event.delta
+                    .take(MAX_TRANSIENT_TOKEN_DELTA_CHARS)
+                jsonTruncated =
+                    json.replaceBounded(event.cumulativeStructuredOutput)
                 activity = activity.copy(
                     stage = HistoricalSmsProcessingStage.GENERATING
                 )
-                publishSnapshot(force = enteredJson)
+                publishSnapshot(force = enteredJson || firstDecodedToken)
             }
 
             is PipelineService.ProcessingEvent.InferenceCompleted -> {
+                decodedTokenDelta = ""
                 event.json?.let { completedJson ->
-                    json.clear()
-                    jsonTruncated = json.appendBounded(completedJson)
+                    jsonTruncated = json.replaceBounded(completedJson)
                 }
                 activity = activity.copy(
                     stage = HistoricalSmsProcessingStage.GENERATING,
@@ -176,7 +204,27 @@ internal class HistoricalSmsProcessingObserver(
 
     @Synchronized
     fun flush() {
+        if (closed) return
         publishSnapshot(force = true)
+    }
+
+    /** Scrubs process-only buffers and fences callbacks after candidate exit. */
+    @Synchronized
+    fun close() {
+        if (closed) return
+        closed = true
+        decodedTokenDelta = ""
+        json.clear()
+        jsonTruncated = false
+        activity = activity.copy(
+            sender = "",
+            body = "",
+            decodedTokenDelta = "",
+            jsonOutput = "",
+            jsonOutputTruncated = false,
+            performance = null,
+            cache = null
+        )
     }
 
     private fun publishSnapshot(force: Boolean) {
@@ -190,6 +238,7 @@ internal class HistoricalSmsProcessingObserver(
             return
         }
         activity = activity.copy(
+            decodedTokenDelta = decodedTokenDelta,
             jsonOutput = json.toString(),
             jsonOutputTruncated = jsonTruncated
         )
@@ -209,8 +258,14 @@ internal class HistoricalSmsProcessingObserver(
         return true
     }
 
-    private companion object {
-        const val MAX_TRANSIENT_OUTPUT_CHARS = 64_000
+    private fun StringBuilder.replaceBounded(value: String): Boolean {
+        clear()
+        return appendBounded(value)
+    }
+
+    companion object {
+        internal const val MAX_TRANSIENT_OUTPUT_CHARS = 64_000
+        internal const val MAX_TRANSIENT_TOKEN_DELTA_CHARS = 4_096
         const val TOKEN_PUBLISH_INTERVAL_NANOS = 50_000_000L
     }
 }

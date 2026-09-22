@@ -88,6 +88,9 @@ data class AutomaticSmsProcessingActivity(
     val modelName: String? = null,
     val grammarEnabled: Boolean? = null,
     val answerTokenBudget: Int = 0,
+    /** Most recent decoded callback only; never reconstructed as reasoning. */
+    val decodedTokenDelta: String = "",
+    /** Bounded cumulative structured output received from the runtime relay. */
     val jsonOutput: String = "",
     val jsonOutputTruncated: Boolean = false,
     val performance: AutomaticSmsSlmPerformance? = null,
@@ -100,6 +103,9 @@ data class AutomaticSmsProcessingActivity(
         }
         require(jsonOutput.length <= MAX_AUTOMATIC_OUTPUT_CHARS) {
             "Automatic JSON telemetry exceeded its in-memory bound"
+        }
+        require(decodedTokenDelta.length <= MAX_AUTOMATIC_TOKEN_DELTA_CHARS) {
+            "Automatic decoded-token telemetry exceeded its in-memory bound"
         }
     }
 }
@@ -185,7 +191,9 @@ internal class AutomaticSmsProcessingSession(
 
     private var activity = initial
     private val json = StringBuilder(initial.jsonOutput)
+    private var decodedTokenDelta = initial.decodedTokenDelta
     private var jsonTruncated = initial.jsonOutputTruncated
+    private var receivedDecodedToken = false
     private var lastPublishedNanos: Long? = null
     private var closed = false
 
@@ -302,6 +310,10 @@ internal class AutomaticSmsProcessingSession(
                 filteredOut(deterministicFilterRejected = true)
 
             is PipelineService.ProcessingEvent.InferenceStarted -> {
+                decodedTokenDelta = ""
+                json.clear()
+                jsonTruncated = false
+                receivedDecodedToken = false
                 activity = activity.copy(
                     stage = AutomaticSmsProcessingStage.GENERATING,
                     modelName = File(event.model.modelPath).name
@@ -316,19 +328,27 @@ internal class AutomaticSmsProcessingSession(
             is PipelineService.ProcessingEvent.JsonTokenDelta -> {
                 val enteredJson =
                     activity.stage != AutomaticSmsProcessingStage.GENERATING
-                val truncatedThisDelta = json.appendBounded(event.delta)
-                jsonTruncated = truncatedThisDelta || jsonTruncated
+                val firstDecodedToken = !receivedDecodedToken
+                receivedDecodedToken = true
+                decodedTokenDelta = event.delta
+                    .take(MAX_AUTOMATIC_TOKEN_DELTA_CHARS)
+                val truncatedThisOutput =
+                    json.replaceBounded(event.cumulativeStructuredOutput)
+                jsonTruncated = truncatedThisOutput
                 activity = activity.copy(
                     stage = AutomaticSmsProcessingStage.GENERATING,
                     detail = "Generating transaction details on device."
                 )
-                publishSnapshot(force = enteredJson || truncatedThisDelta)
+                publishSnapshot(
+                    force = enteredJson || firstDecodedToken ||
+                        truncatedThisOutput
+                )
             }
 
             is PipelineService.ProcessingEvent.InferenceCompleted -> {
+                decodedTokenDelta = ""
                 event.json?.let { completedJson ->
-                    json.clear()
-                    jsonTruncated = json.appendBounded(completedJson)
+                    jsonTruncated = json.replaceBounded(completedJson)
                 }
                 activity = activity.copy(
                     stage = AutomaticSmsProcessingStage.GENERATING,
@@ -367,10 +387,12 @@ internal class AutomaticSmsProcessingSession(
     fun close() {
         if (closed) return
         closed = true
+        decodedTokenDelta = ""
         json.clear()
         activity = activity.copy(
             sender = "",
             body = "",
+            decodedTokenDelta = "",
             jsonOutput = "",
             jsonOutputTruncated = false,
             performance = null,
@@ -404,6 +426,7 @@ internal class AutomaticSmsProcessingSession(
             return
         }
         activity = activity.copy(
+            decodedTokenDelta = decodedTokenDelta,
             jsonOutput = json.toString(),
             jsonOutputTruncated = jsonTruncated
         )
@@ -421,6 +444,11 @@ internal class AutomaticSmsProcessingSession(
         }
         append(delta, 0, remaining)
         return true
+    }
+
+    private fun StringBuilder.replaceBounded(value: String): Boolean {
+        clear()
+        return appendBounded(value)
     }
 }
 
@@ -456,6 +484,7 @@ internal suspend fun <T> withAutomaticSmsProcessingActivity(
 }
 
 internal const val MAX_AUTOMATIC_OUTPUT_CHARS = 64_000
+internal const val MAX_AUTOMATIC_TOKEN_DELTA_CHARS = 4_096
 private const val MAX_AUTOMATIC_DETAIL_CHARS = 512
 private const val MAX_AUTOMATIC_MODEL_NAME_CHARS = 256
 private const val TOKEN_PUBLISH_INTERVAL_NANOS = 50_000_000L

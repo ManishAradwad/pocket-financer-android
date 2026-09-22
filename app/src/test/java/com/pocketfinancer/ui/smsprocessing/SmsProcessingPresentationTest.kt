@@ -150,6 +150,7 @@ class SmsProcessingPresentationTest {
             modelName = "local-model.gguf",
             grammarEnabled = false,
             answerTokenBudget = 256,
+            decodedTokenDelta = "}",
             jsonOutput = "{partial}",
             performance = AutomaticSmsSlmPerformance(12, 2_000, 40),
             cache = AutomaticSmsSlmCacheTelemetry(true, false, 300)
@@ -174,6 +175,8 @@ class SmsProcessingPresentationTest {
         assertEquals(true, model.runtimeFacts?.cacheAttempted)
         assertEquals(false, model.runtimeFacts?.cacheHit)
         assertEquals("40 tokens • 20.00 tok/s", model.performanceText)
+        assertEquals("}", model.decodedTokenDelta)
+        assertEquals("{partial}", model.cumulativeStructuredOutput)
         assertEquals("Waiting for complete JSON...", model.parsedOutput)
         val source = (model.content as SmsTelemetryContent.Candidate).source
         assertEquals(
@@ -218,6 +221,7 @@ class SmsProcessingPresentationTest {
     @Test
     fun `stale automatic claim cannot rebind to successor telemetry`() {
         val successor = automaticActivity().copy(
+            decodedTokenDelta = "successor private delta",
             jsonOutput = "successor private json"
         )
         val staleTarget = SmsProcessingTarget.Automatic(
@@ -235,6 +239,7 @@ class SmsProcessingPresentationTest {
         assertEquals(staleTarget, model.target)
         assertTrue(model.content is SmsTelemetryContent.Gap)
         assertEquals("", model.jsonOutput)
+        assertEquals("", model.decodedTokenDelta)
         assertEquals("", model.slmPrompt)
         assertTrue(model.filterLogs.isEmpty())
         assertTrue(model.cacheLogs.isEmpty())
@@ -415,7 +420,9 @@ class SmsProcessingPresentationTest {
                 queue = listOf(sms),
                 currentIndex = 0,
                 currentStageIndex = 2,
-                jsonOutput = "{partial}"
+                decodedTokenDelta = "partial-token",
+                jsonOutput = "{partial}",
+                jsonOutputTruncated = true
             ),
             sms = sms,
             filterLogs = listOf("checked"),
@@ -436,6 +443,9 @@ class SmsProcessingPresentationTest {
             active.target
         )
         assertEquals(SmsTelemetryStatus.ACTIVE, active.status)
+        assertEquals("partial-token", active.decodedTokenDelta)
+        assertEquals("{partial}", active.cumulativeStructuredOutput)
+        assertTrue(active.jsonOutputTruncated)
         assertEquals("Waiting for complete JSON...", active.parsedOutput)
         assertEquals(SmsStopUiState.AVAILABLE, active.stopState)
         assertTrue(active.isActiveCandidate)
@@ -481,6 +491,7 @@ class SmsProcessingPresentationTest {
                 queue = listOf(sms),
                 currentIndex = 0,
                 currentStageIndex = 2,
+                decodedTokenDelta = "successor private delta",
                 jsonOutput = "successor private output"
             ),
             sms = sms,
@@ -502,6 +513,7 @@ class SmsProcessingPresentationTest {
         assertFalse(model.isActiveCandidate)
         assertEquals(SmsStopUiState.HIDDEN, model.stopState)
         assertFalse(model.jsonOutput.contains("successor private output"))
+        assertEquals("", model.decodedTokenDelta)
         assertTrue(model.filterLogs.isEmpty())
         assertTrue(model.cacheLogs.isEmpty())
         assertEquals("", model.slmPrompt)
@@ -552,7 +564,9 @@ class SmsProcessingPresentationTest {
                     attempted = true,
                     hit = true,
                     prefixTokens = 300
-                )
+                ),
+                decodedTokenDelta = "latest-token",
+                jsonOutput = "{partial}"
             ),
             runId = "history-run-6",
             filterLogs = listOf("eligible"),
@@ -576,6 +590,8 @@ class SmsProcessingPresentationTest {
             "Cached prefix tokens: 300"
         ), model.cacheLogs)
         assertEquals("40 tokens • 20.00 tok/s", model.performanceText)
+        assertEquals("latest-token", model.decodedTokenDelta)
+        assertEquals("{partial}", model.cumulativeStructuredOutput)
     }
 
     @Test
@@ -588,6 +604,7 @@ class SmsProcessingPresentationTest {
 
         assertTrue(model.content is SmsTelemetryContent.Gap)
         assertEquals("", model.jsonOutput)
+        assertEquals("", model.decodedTokenDelta)
         assertEquals("", model.slmPrompt)
         assertTrue(model.filterLogs.isEmpty())
         assertTrue(model.cacheLogs.isEmpty())

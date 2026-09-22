@@ -1672,10 +1672,14 @@ class OnboardingService : Service() {
                 try {
                     observer.flush()
                 } finally {
-                    syncManager.clearHistoricalSmsProcessing(
-                        runId = runId,
-                        candidateKey = candidateKey
-                    )
+                    try {
+                        observer.close()
+                    } finally {
+                        syncManager.clearHistoricalSmsProcessing(
+                            runId = runId,
+                            candidateKey = candidateKey
+                        )
+                    }
                 }
             }
             val durationMs = System.currentTimeMillis() - txStartTime
