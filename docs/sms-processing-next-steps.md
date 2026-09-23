@@ -209,8 +209,42 @@ reset. The existing model was re-provisioned; fresh onboarding then checked
 setup-card, and diagnostic copy now describes the automatic policy; focused
 `RetainedReviewImportPresentationTest` and `SettingsViewModelTest` passed, and
 the complete debug unit/lint/build gate passed again (356 actionable tasks).
-Next run synthetic automatic SMS on this clean emulator, followed by account,
-duplicate, retry, and recovery scenarios. Relevant files are
+Pixel_9 synthetic runtime checkpoint (same AVD, debug app only): two invented
+incoming messages were tried with the locally provisioned Qwen3-0.6B Q8_0
+model. The app's normal debug-emulator upgrade flow then activated a locally
+provisioned Qwen3-1.7B Q4_K_M model for two further invented incoming messages.
+One 1.7B attempt was interrupted when an instrumentation audit moved the app
+out of the foreground; this is **not** a controlled process-death recovery pass.
+Commit `0f61438` adds the explicit opt-in, aggregate-only
+`SmsSyntheticRuntimeAuditTest`. It reported
+7 operations (5 realtime, 2 manual), 6 completed selector attempts (4 strict
+evidence mismatches, 2 malformed JSON), 7 Review cases including the
+interrupted operation, 0 transactions, 0 queued candidates, and 1 seeded
+synthetic account. The Review extensions retained 2 valid SLM amount fields and
+1 valid SLM direction field; analyzer suggestions remained separately labeled.
+Neither model produced a complete valid output in this small emulator sample,
+so automatic transaction persistence and duplicate fencing are still verified
+only by local automated tests, **not** by the actual model/emulator path.
+
+On Pixel_9, the active automatic inspector displayed a decoded-token delta and
+a separately growing cumulative structured output (108, 174, 332, then 481
+characters observed while Stage 3 remained active). Only lengths and status
+were recorded; no SMS or generated text was logged. In the existing grounded
+Review UI, selecting a specific Transactions card opened that case, explicit
+Debit fallback changed its field, and selecting the seeded existing account
+changed its account field. Confirmation correctly stayed disabled while amount
+was missing. The retained partial SLM fields have not yet been visually checked
+in Review, nor have retry or controlled process-death recovery.
+
+The opt-in audit was compiled with `./gradlew.bat :app:assembleDebugAndroidTest
+--no-daemon` and run manually with `smsSyntheticAudit=true` on Pixel_9 (`OK
+(1 test)`). It is skipped in the ordinary instrumentation suite and reports
+only aggregate states, reason codes, and field categories. The complete Gradle
+unit/lint/build and connected suites recorded above predate this audit-only
+test change; rerun them before handoff. Next: inspect one of the retained
+partial-field Review cases, then run final gates and reconcile the shared
+roadmap. Relevant files are
 `AppDatabaseMigrationTest`, `AutomaticSmsProcessingActivity`,
 `SmsReviewRepository`, `ReviewDetailScreen`, `TransactionsScreen`, and
-`SmsTelemetryViewer`, plus `SettingsScreen` and `SetupImportCardModel`.
+`SmsTelemetryViewer`, plus `SmsSyntheticRuntimeAuditTest`, `SettingsScreen`,
+and `SetupImportCardModel`.
