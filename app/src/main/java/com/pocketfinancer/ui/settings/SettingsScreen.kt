@@ -227,7 +227,7 @@ private fun SmsAndUpdatesCard(
         SettingSwitchRow(
             title = "Automatic SMS processing",
             description = if (state.processIncomingSms) {
-                "New eligible SMS alerts are analyzed on device and saved for review."
+                "Complete valid alerts become transactions; exceptions go to Review."
             } else {
                 "New SMS alerts wait for a manual scan."
             },
@@ -236,8 +236,8 @@ private fun SmsAndUpdatesCard(
             onCheckedChange = onAutomaticProcessingChange
         )
         Text(
-            text = "Automatic transaction creation remains disabled. Turning this off stops " +
-                "new background analysis; admitted evidence and manual scans remain available.",
+            text = "Turning this off stops new background analysis; admitted evidence " +
+                "and manual scans remain available.",
             color = M3_OnSurfaceVariant,
             style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.padding(top = 8.dp)

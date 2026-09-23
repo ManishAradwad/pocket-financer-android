@@ -1,6 +1,6 @@
 # Android SMS processing next steps
 
-Status: **Android debug unit, lint, and build gates passed; emulator and device verification pending**
+Status: **Android local gates and focused emulator tests passed; end-to-end routing and device verification pending**
 Last reconciled: 2026-09-23
 
 The shared repository `pF_slm_selection` owns the canonical architecture,
@@ -64,10 +64,11 @@ stale-owner, and lifecycle paths scrub private transient text.
 ## Open Android observations
 
 The emulator was not running during commits `fcf6614`, `f6079ff`, or `01f3861`,
-so no emulator or physical-device behavior is claimed. Review and live-output
-behavior are verified by focused JVM tests and Kotlin/instrumentation-test
-compilation only. Runtime token timing, navigation, accessibility, process-death
-recovery, and end-to-end persistence still require a fresh emulator.
+so those commits originally had only local JVM/compile verification. Subsequent
+Pixel_9 instrumentation and direct Review interaction passed as recorded below.
+Runtime token timing, partial-field interaction, a complete automatic save,
+retry/process-death behavior, accessibility, and physical-device behavior still
+need end-to-end verification.
 
 ## Next implementation change
 
@@ -83,9 +84,9 @@ across automatic, historical, and manual processing.
 
 Planned verification next:
 
-1. Connect the running emulator and run the specified routing, Review, live-output,
-   retry, recovery, and no-duplicate scenarios. Do not convert local JVM or
-   compile evidence into emulator evidence.
+1. Run synthetic-only routing, Review, live-output, retry, recovery, and
+   no-duplicate scenarios on the now-clean Pixel_9. Do not convert local JVM,
+   compile, or isolated component evidence into end-to-end evidence.
 2. Keep corrections revision-bound, append-only, local label evidence. Explicit
    export and adjudication are required before approved, source-grounded,
    split-safe labels may improve the SLM or another pipeline component.
@@ -192,10 +193,24 @@ registration and schema were unchanged. The focused
 "com.pocketfinancer.data.db.AppDatabaseMigrationTest" --no-daemon` passed.
 The complete `./gradlew.bat testDebugUnitTest lintDebug assembleDebug --no-daemon`
 then passed (356 actionable tasks). This is local JVM/lint/build verification,
-not emulator or physical-device verification. The running `Pixel_9` emulator is
-currently reported as `offline` by ADB, so instrumentation and end-to-end
-runtime evidence remain pending. Next start at emulator connectivity, then run
-the targeted instrumented and synthetic-SMS scenarios. Relevant files are
+not emulator or physical-device verification. A non-wiping cold boot restored
+ADB on Pixel_9. `./gradlew.bat :app:connectedDebugAndroidTest
+:data:connectedDebugAndroidTest --no-daemon` passed there: 15 Compose UI tests
+and 4 encrypted-recovery tests. Directly tapping a Needs Review card opened its
+specific grounded detail, and explicit Debit fallback updated the field. A
+locally provisioned Qwen3-0.6B Q8_0 model completed the built-in synthetic SMS
+diagnostic in 20,305 ms; with no existing account, it entered Review. These
+observations do not prove the complete automatic-save or live-token path.
+
+The original AVD contained 25 inbox messages. With owner authorization, its
+exact inbox IDs were removed (25/25), and only this task's debug-app state was
+reset. The existing model was re-provisioned; fresh onboarding then checked
+0 messages and reached READY. No other AVD is needed. Corrected Settings,
+setup-card, and diagnostic copy now describes the automatic policy; focused
+`RetainedReviewImportPresentationTest` and `SettingsViewModelTest` passed, and
+the complete debug unit/lint/build gate passed again (356 actionable tasks).
+Next run synthetic automatic SMS on this clean emulator, followed by account,
+duplicate, retry, and recovery scenarios. Relevant files are
 `AppDatabaseMigrationTest`, `AutomaticSmsProcessingActivity`,
 `SmsReviewRepository`, `ReviewDetailScreen`, `TransactionsScreen`, and
-`SmsTelemetryViewer`.
+`SmsTelemetryViewer`, plus `SettingsScreen` and `SetupImportCardModel`.

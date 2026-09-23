@@ -533,7 +533,7 @@ private fun scanEvidence(state: SetupImportState): String? {
 private fun retainedReviewCard(state: SetupImportState) = SetupImportCardModel(
     eyebrow = "HISTORY CHECKED",
     title = "Alerts saved for your review",
-    body = "${state.retainedReviewCount} alerts were retained for review. No transactions were added automatically. Open reviews to confirm, correct, or reject them.",
+    body = "${state.retainedReviewCount} alerts need review. Open them to confirm, correct, retry, or reject; transactions already saved remain in Transactions.",
     evidence = scanEvidence(state),
     primaryAction = SetupCardAction.OPEN_REVIEWS,
     primaryLabel = "Open saved alert reviews"

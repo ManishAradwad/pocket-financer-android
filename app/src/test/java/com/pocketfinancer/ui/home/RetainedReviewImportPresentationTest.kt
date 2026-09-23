@@ -35,6 +35,7 @@ class RetainedReviewImportPresentationTest {
             assertEquals("Alerts saved for your review", card.title)
             assertEquals(SetupCardAction.OPEN_REVIEWS, card.primaryAction)
             assertTrue(card.body.contains("3 alerts"))
+            assertFalse(card.body.contains("No transactions were added automatically"))
         }
         assertEquals(SetupCardActionTarget.OPEN_REVIEWS, SetupCardAction.OPEN_REVIEWS.target())
     }

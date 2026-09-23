@@ -727,7 +727,11 @@ class SettingsViewModel @Inject constructor(
                 testRunning = false,
                 testProgress = null,
                 testResult = "$summary\nElapsed: ${elapsedMs}ms",
-                testParsed = "Open Saved alert reviews for the durable Decision Trace.",
+                testParsed = if (result is PipelineService.ProcessingResult.Saved) {
+                    "Open Transactions for the saved synthetic transaction."
+                } else {
+                    "Open Saved alert reviews for the durable Decision Trace."
+                },
                 testError = if (result is PipelineService.ProcessingResult.Failure) summary else null
             )
         } catch (cancelled: CancellationException) {
