@@ -40,6 +40,7 @@ data class SmsV5OperationConfiguration(
     val deviceCohort: String,
     val promptHash: String,
     val grammarHash: String,
+    val grammarEnabled: Boolean? = null,
     val validationProfileHash: String,
     val rolloutMode: String = "automatic"
 )
@@ -57,10 +58,16 @@ data class SmsV5OperationSnapshot(
 class SmsV5OperationSnapshotFactory @Inject constructor(
     @ApplicationContext private val context: Context,
     private val store: SmsProcessingStore
+
 ) {
-    private val release by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+    private val releaseV5 by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         NativeSmsV5Assets.verify(context.assets)
     }
+    private val releaseV6 by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        NativeSmsV6Assets.verify(context.assets)
+    }
+
+
 
     suspend fun create(
         source: AdmittedMessageRef,
@@ -75,7 +82,8 @@ class SmsV5OperationSnapshotFactory @Inject constructor(
         deviceCohort: String,
         stableEventId: String? = null,
         parentOperationId: String? = null,
-        now: Long = System.currentTimeMillis()
+        now: Long = System.currentTimeMillis(),
+        grammarEnabled: Boolean? = null
     ): SmsV5OperationSnapshot {
         require(trigger in TRIGGERS)
         require(primaryCurrency in CurrencyProfileRegistry.scales)
@@ -89,13 +97,17 @@ class SmsV5OperationSnapshotFactory @Inject constructor(
         val resolvedStableEventId = stableEventId ?: UUID.randomUUID().toString()
         require(UUID.fromString(resolvedStableEventId).toString() == resolvedStableEventId.lowercase())
 
-        val binding = release
+        val binding = if (grammarEnabled == null) releaseV5 else releaseV6
         fun hash(contract: String): String = binding.artifactsByContract[contract]?.sha256
             ?: error("Missing frozen automatic-routing asset: $contract")
         val profileHashes = enabledProfiles.associateWith { profile ->
             hash("pocketfinancer.analyzer-profile/1:$profile")
         }
         val configuration = SmsV5OperationConfiguration(
+            contract = if (grammarEnabled == null) {
+                "pocketfinancer.processing-config/5"
+            } else "pocketfinancer.processing-config/6",
+            releaseId = binding.releaseId,
             operationId = operationId,
             parentOperationId = parentOperationId,
             sourceId = source.sourceId,
@@ -121,6 +133,7 @@ class SmsV5OperationSnapshotFactory @Inject constructor(
             deviceCohort = deviceCohort,
             promptHash = hash("pocketfinancer.extractor-prompt/1"),
             grammarHash = hash("pocketfinancer.extractor-grammar/1"),
+            grammarEnabled = grammarEnabled,
             validationProfileHash = hash("pocketfinancer.extractor-validation-profile/1")
         )
         val payload = payload(configuration)
@@ -205,6 +218,7 @@ class SmsV5OperationSnapshotFactory @Inject constructor(
             .put("device_cohort", value.deviceCohort)
             .put("prompt_sha256", value.promptHash)
             .put("grammar_sha256", value.grammarHash)
+            .apply { value.grammarEnabled?.let { put("grammar_enabled", it) } }
             .put("validation_profile_sha256", value.validationProfileHash)
             .put("prompt_version", "pocketfinancer.extractor-prompt/1")
             .put("validation_profile", "pocketfinancer.extractor-validation-profile/1")

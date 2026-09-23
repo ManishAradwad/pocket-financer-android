@@ -34,8 +34,8 @@ enum class ReviewField(val label: String) {
 fun EvidenceSelectionText(
     source: String,
     selections: Map<ReviewField, SmsReviewSourceSpan?>,
-    activeField: ReviewField,
-    onSelectionChanged: (SmsReviewSourceSpan) -> Unit,
+    pendingSelection: SmsReviewSourceSpan?,
+    onSelectionChanged: (SmsReviewSourceSpan?) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val annotated = remember(source, selections) {
@@ -54,14 +54,18 @@ fun EvidenceSelectionText(
             }
         }.toAnnotatedString()
     }
-    val active = selections[activeField]?.let {
+    val pending = pendingSelection?.let {
         SmsReviewGrounding.utf16Range(source, it)
     }
-    val selection = active?.let { TextRange(it.first, it.last + 1) } ?: TextRange.Zero
+    val selection = pending?.let { TextRange(it.first, it.last + 1) } ?: TextRange.Zero
     BasicTextField(
         value = TextFieldValue(annotated, selection),
         onValueChange = { next ->
-            if (next.text != source || next.selection.collapsed) return@BasicTextField
+            if (next.text != source) return@BasicTextField
+            if (next.selection.collapsed) {
+                onSelectionChanged(null)
+                return@BasicTextField
+            }
             val scalarRange = SmsReviewGrounding.scalarRange(
                 source,
                 next.selection.min,
@@ -77,7 +81,7 @@ fun EvidenceSelectionText(
             .fillMaxWidth()
             .semantics {
                 contentDescription =
-                    "SMS evidence. ${activeField.label} is active. Drag the selection handles to reselect it."
+                    "SMS evidence. Select source text, then tap the field it belongs to."
             }
             .border(1.dp, Color(0xFFCAC4D0), RoundedCornerShape(12.dp))
             .background(Color(0xFFFFFBFE), RoundedCornerShape(12.dp))
@@ -86,7 +90,7 @@ fun EvidenceSelectionText(
     )
 }
 
-private fun ReviewField.highlightColor(): Color = when (this) {
+internal fun ReviewField.highlightColor(): Color = when (this) {
     ReviewField.AMOUNT -> Color(0xFFFFD8A8)
     ReviewField.DIRECTION -> Color(0xFFCDE7FF)
     ReviewField.ACCOUNT -> Color(0xFFD7F5D0)

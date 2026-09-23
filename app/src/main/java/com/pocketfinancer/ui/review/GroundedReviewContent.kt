@@ -1,5 +1,8 @@
 package com.pocketfinancer.ui.review
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -9,15 +12,13 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AssistChip
+import androidx.compose.material3.AssistChipDefaults
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Button
-import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.ExposedDropdownMenuBox
-import androidx.compose.material3.ExposedDropdownMenuDefaults
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -26,10 +27,12 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import com.pocketfinancer.data.repository.CurrencyScaleRegistry
 import com.pocketfinancer.data.repository.SmsFieldCorrection
 import com.pocketfinancer.data.repository.SmsFieldGroundingClassification
 import com.pocketfinancer.data.repository.SmsReviewAction
@@ -38,6 +41,7 @@ import com.pocketfinancer.data.repository.SmsReviewGrounding
 import com.pocketfinancer.data.repository.SmsReviewProposal
 import com.pocketfinancer.data.repository.SmsReviewRetainedEvidence
 import com.pocketfinancer.data.repository.SmsReviewSourceSpan
+import java.math.BigDecimal
 import java.text.DateFormat
 import java.util.Date
 import org.json.JSONObject
@@ -49,14 +53,15 @@ internal fun GroundedReviewContent(
     padding: PaddingValues,
     viewModel: ReviewViewModel
 ) {
-    if (details.operation.contractReleaseId == "native-integration-v5") {
+    if (details.operation.contractReleaseId in setOf("native-integration-v5", "native-integration-v6")) {
         AutomaticPolicyReviewContent(details, state, padding, viewModel)
         return
     }
     val original = requireNotNull(details.groundedProposal)
     val initial = details.draftProposal ?: original
     var working by remember(details.reviewCase.revision) { mutableStateOf(initial) }
-    var active by remember { mutableStateOf(ReviewField.AMOUNT) }
+    var pendingSelection by remember(details.reviewCase.revision) { mutableStateOf<SmsReviewSourceSpan?>(null) }
+    var assignmentError by remember(details.reviewCase.revision) { mutableStateOf<String?>(null) }
     val selections = remember(details.reviewCase.revision) {
         mutableStateMapOf<ReviewField, SmsReviewSourceSpan?>().apply {
             put(ReviewField.AMOUNT, initial.amountSpan)
@@ -80,11 +85,14 @@ internal fun GroundedReviewContent(
     val canConfirm = requiredReady && !duplicateBlocked && !accountBlocked && !state.loading
 
     Column(
-        Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(16.dp),
+        Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(16.dp)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null
+            ) { pendingSelection = null; assignmentError = null },
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         Text("${details.source.sender} · ${DateFormat.getDateTimeInstance().format(Date(working.receiptTimestampEpochMs))}")
-        Text("Receipt time is read-only. Review the highlighted source wording before saving.")
         Text(reasonSummary(details))
         Row(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -93,8 +101,28 @@ internal fun GroundedReviewContent(
             ReviewField.entries.forEach { field ->
                 val selected = selections[field]
                 AssistChip(
-                    onClick = { active = field },
+                    onClick = {
+                        val span = pendingSelection
+                        if (span == null) {
+                            assignmentError = "Select wording in the message first."
+                        } else {
+                            val updated = updateSelection(field, span, working)
+                            if (updated == null) {
+                                assignmentError = "That wording cannot be used for this field."
+                            } else {
+                                working = updated
+                                selections[field] = span
+                                pendingSelection = null
+                                assignmentError = null
+                            }
+                        }
+                    },
                     label = { Text(field.label) },
+                    colors = AssistChipDefaults.assistChipColors(
+                        containerColor = if (selections[field] != null) {
+                            field.highlightColor()
+                        } else MaterialTheme.colorScheme.surface
+                    ),
                     modifier = Modifier.semantics {
                         contentDescription = if (selected == null) {
                             "${field.label}, missing"
@@ -108,32 +136,46 @@ internal fun GroundedReviewContent(
         EvidenceSelectionText(
             source = source,
             selections = selections,
-            activeField = active,
-            onSelectionChanged = { span ->
-                updateSelection(active, span, working)?.let { updated ->
-                    working = updated
-                    selections[active] = span
-                }
-            }
+            pendingSelection = pendingSelection,
+            onSelectionChanged = { pendingSelection = it; assignmentError = null }
         )
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            TextButton(onClick = {
-                selections[active] = null
-                if (active == ReviewField.COUNTERPARTY) {
-                    working = working.copy(counterparty = null, counterpartySpan = null)
-                }
-            }) { Text("Clear ${active.label}") }
-            TextButton(onClick = {
-                val extractor = original.span(active)
-                selections[active] = extractor
-                working = working.resetField(active, original)
-            }) { Text("Reselect extractor value") }
+        Text("Select text in the message, then tap the field it belongs to.")
+        assignmentError?.let { Text(it) }
+        if (pendingSelection != null) {
+            TextButton(onClick = { pendingSelection = null; assignmentError = null }) {
+                Text("Cancel selection")
+            }
         }
-        Text("Amount: ${working.amountMinorUnits} ${working.currency} minor units")
-        Text("Direction: ${working.direction}")
-        Text("Account evidence: ${working.accountReference}")
-        Text("Counterparty: ${working.counterparty ?: "Not supplied"}")
-        Text(accountPreview(working, details))
+        ReviewFieldRow(
+            ReviewField.AMOUNT,
+            if (selections[ReviewField.AMOUNT] != null) {
+                formatReviewAmount(working.amountMinorUnits, working.currency).removePrefix("Amount: ")
+            } else "Unassigned",
+            selections[ReviewField.AMOUNT] != null,
+            onClear = { selections[ReviewField.AMOUNT] = null }
+        )
+        ReviewFieldRow(
+            ReviewField.DIRECTION,
+            if (selections[ReviewField.DIRECTION] != null) {
+                working.direction.replaceFirstChar(Char::uppercase)
+            } else "Unassigned",
+            selections[ReviewField.DIRECTION] != null,
+            onClear = { selections[ReviewField.DIRECTION] = null }
+        )
+        ReviewFieldRow(
+            ReviewField.ACCOUNT,
+            if (selections[ReviewField.ACCOUNT] != null) working.accountReference else "Unassigned",
+            selections[ReviewField.ACCOUNT] != null,
+            onClear = { selections[ReviewField.ACCOUNT] = null }
+        )
+        ReviewFieldRow(
+            ReviewField.COUNTERPARTY,
+            if (selections[ReviewField.COUNTERPARTY] != null) {
+                working.counterparty ?: "Not supplied"
+            } else "Not supplied",
+            selections[ReviewField.COUNTERPARTY] != null,
+            onClear = { selections[ReviewField.COUNTERPARTY] = null }
+        )
         if (duplicateBlocked) Text("This source event was already saved. Confirmation is blocked.")
         if (accountBlocked) Text("More than one owned account matches this evidence. Confirmation is blocked.")
         Button(
@@ -163,7 +205,6 @@ internal fun GroundedReviewContent(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun AutomaticPolicyReviewContent(
     details: SmsReviewDetails,
@@ -176,11 +217,9 @@ private fun AutomaticPolicyReviewContent(
         automaticReviewSeed(details, retained)
     }
     var working by remember(details.reviewCase.revision) { mutableStateOf(seed.working) }
-    var selectedAccountId by remember(details.reviewCase.revision) {
-        mutableStateOf(seed.selectedAccountId)
-    }
-    var active by remember { mutableStateOf(ReviewField.AMOUNT) }
-    var accountMenu by remember { mutableStateOf(false) }
+    var pendingSelection by remember(details.reviewCase.revision) { mutableStateOf<SmsReviewSourceSpan?>(null) }
+    var assignmentError by remember(details.reviewCase.revision) { mutableStateOf<String?>(null) }
+    var showTechnicalDetails by remember(details.reviewCase.revision) { mutableStateOf(false) }
     val selections = remember(details.reviewCase.revision) {
         mutableStateMapOf<ReviewField, SmsReviewSourceSpan?>().apply {
             putAll(seed.selections)
@@ -189,30 +228,51 @@ private fun AutomaticPolicyReviewContent(
     val source = details.source.rawMessage
     val duplicateBlocked = details.groundedProposal?.duplicateStatus == "already_persisted" ||
         details.reviewCase.reasonCodesJson.contains("duplicate_already_persisted")
-    val selectedAccountExists = details.accounts.any { it.id == selectedAccountId }
-    val canConfirm = working.amountMinorUnits?.let { it > 0 } == true &&
-        selections[ReviewField.AMOUNT] != null &&
-        working.direction in setOf("debit", "credit") &&
-        selectedAccountExists &&
-        !duplicateBlocked &&
-        !state.loading
-    val corrections = automaticReviewCorrections(
-        working,
-        selections,
-        selectedAccountId
-    )
+    val missing = buildList {
+        if (working.amountMinorUnits?.let { it > 0 } != true ||
+            selections[ReviewField.AMOUNT] == null
+        ) add("amount")
+        if (working.direction !in setOf("debit", "credit")) add("direction")
+        if (working.accountReference == null || selections[ReviewField.ACCOUNT] == null) {
+            add("account")
+        }
+    }
+    val canConfirm = missing.isEmpty() && !duplicateBlocked && !state.loading
+    val corrections = automaticReviewCorrections(working, selections)
+    fun assignQuickChoice(field: ReviewField, span: SmsReviewSourceSpan) {
+        updateAutomaticSelection(field, span, working)?.let { updated ->
+            working = updated
+            selections[field] = span
+            pendingSelection = null
+            assignmentError = null
+        }
+    }
 
     Column(
-        Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(16.dp),
+        Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(16.dp)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null
+            ) { pendingSelection = null; assignmentError = null },
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         Text(
             "${details.source.sender} · " +
                 DateFormat.getDateTimeInstance().format(Date(retained.receiptTimestampEpochMs))
         )
-        Text("Receipt time is read-only. The complete SMS remains unchanged below.")
-        Text(reasonSummary(details))
-        Text("Processing reached: ${retained.furthestStage.replace('_', ' ')}")
+        TextButton(onClick = { showTechnicalDetails = !showTechnicalDetails }) {
+            Text(if (showTechnicalDetails) "Hide processing details" else "Why review?")
+        }
+        if (showTechnicalDetails) {
+            Text(reasonSummary(details))
+            Text("Processing reached: ${retained.furthestStage.replace('_', ' ')}")
+            if (retained.analyzerSuggestions.isNotEmpty()) {
+                Text("Analyzer hints (not model output)")
+                retained.analyzerSuggestions.distinctBy { it.kind to it.summary }.forEach {
+                    Text("${it.kind.replaceFirstChar(Char::uppercase)}: ${it.summary}")
+                }
+            }
+        }
         Row(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
@@ -221,12 +281,32 @@ private fun AutomaticPolicyReviewContent(
                 val assigned = when (field) {
                     ReviewField.AMOUNT -> working.amountMinorUnits != null && selections[field] != null
                     ReviewField.DIRECTION -> working.direction != null
-                    ReviewField.ACCOUNT -> selectedAccountExists
+                    ReviewField.ACCOUNT -> working.accountReference != null && selections[field] != null
                     ReviewField.COUNTERPARTY -> working.counterparty != null
                 }
                 AssistChip(
-                    onClick = { active = field },
+                    onClick = {
+                        val span = pendingSelection
+                        if (span == null) {
+                            assignmentError = "Select wording in the message first."
+                        } else {
+                            val updated = updateAutomaticSelection(field, span, working)
+                            if (updated == null) {
+                                assignmentError = "That wording cannot be used for this field."
+                            } else {
+                                working = updated
+                                selections[field] = span
+                                pendingSelection = null
+                                assignmentError = null
+                            }
+                        }
+                    },
                     label = { Text(field.label) },
+                    colors = AssistChipDefaults.assistChipColors(
+                        containerColor = if (selections[field] != null) {
+                            field.highlightColor()
+                        } else MaterialTheme.colorScheme.surface
+                    ),
                     modifier = Modifier.semantics {
                         contentDescription = if (assigned) {
                             "${field.label}, assigned"
@@ -240,41 +320,49 @@ private fun AutomaticPolicyReviewContent(
         EvidenceSelectionText(
             source = source,
             selections = selections,
-            activeField = active,
-            onSelectionChanged = { span ->
-                updateAutomaticSelection(active, span, working)?.let { updated ->
-                    working = updated
-                    selections[active] = span
-                    if (active == ReviewField.ACCOUNT) selectedAccountId = ""
-                }
+            pendingSelection = pendingSelection,
+            onSelectionChanged = { pendingSelection = it; assignmentError = null }
+        )
+        Text("Select text in the message, then tap the field it belongs to.")
+        assignmentError?.let { Text(it) }
+        if (pendingSelection != null) {
+            TextButton(onClick = { pendingSelection = null; assignmentError = null }) {
+                Text("Cancel selection")
+            }
+        }
+        ReviewFieldRow(
+            ReviewField.AMOUNT,
+            if (selections[ReviewField.AMOUNT] != null && working.amountMinorUnits != null) {
+                formatReviewAmount(working.amountMinorUnits, working.currency).removePrefix("Amount: ")
+            } else "Unassigned",
+            selections[ReviewField.AMOUNT] != null,
+            onClear = {
+                working = working.clear(ReviewField.AMOUNT)
+                selections[ReviewField.AMOUNT] = null
             }
         )
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            TextButton(onClick = {
-                selections[active] = null
-                working = working.clear(active)
-                if (active == ReviewField.ACCOUNT) selectedAccountId = ""
-            }) { Text("Clear ${active.label}") }
-            TextButton(
-                enabled = retained.slmFields[active.wireName] != null,
-                onClick = {
-                    retained.slmFields[active.wireName]?.let { evidence ->
-                        selections[active] = evidence.sourceSpan
-                        working = working.fromRetained(active, evidence.normalizedValueJson)
-                        if (active == ReviewField.ACCOUNT) selectedAccountId = ""
-                    }
-                }
-            ) { Text("Reselect model value") }
+        if (selections[ReviewField.AMOUNT] == null) {
+            QuickSourceChoice(ReviewField.AMOUNT, retained, source, working) { span ->
+                assignQuickChoice(ReviewField.AMOUNT, span)
+            }
         }
-
-        Text(
-            working.amountMinorUnits?.let {
-                "Amount: $it ${working.currency} minor units"
-            } ?: "Amount: Unassigned"
+        ReviewFieldRow(
+            ReviewField.DIRECTION,
+            working.direction?.replaceFirstChar(Char::uppercase) ?: "Unassigned",
+            working.direction != null,
+            onClear = {
+                working = working.clear(ReviewField.DIRECTION)
+                selections[ReviewField.DIRECTION] = null
+            },
+            highlighted = selections[ReviewField.DIRECTION] != null
         )
-        Text("Direction: ${working.direction?.replaceFirstChar(Char::uppercase) ?: "Unassigned"}")
         if (selections[ReviewField.DIRECTION] == null) {
-            Text("No selectable direction wording is assigned. Choose explicitly:")
+            QuickSourceChoice(ReviewField.DIRECTION, retained, source, working) { span ->
+                assignQuickChoice(ReviewField.DIRECTION, span)
+            }
+        }
+        if (selections[ReviewField.DIRECTION] == null) {
+            Text("If the message has no direction wording, choose:")
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(onClick = { working = working.copy(direction = "debit") }) {
                     Text("Debit")
@@ -284,45 +372,41 @@ private fun AutomaticPolicyReviewContent(
                 }
             }
         }
-        Text("Account wording: ${working.accountReference ?: "Unassigned"}")
-        ExposedDropdownMenuBox(
-            expanded = accountMenu,
-            onExpandedChange = { accountMenu = it }
-        ) {
-            OutlinedTextField(
-                value = details.accounts.firstOrNull { it.id == selectedAccountId }?.name.orEmpty(),
-                onValueChange = {},
-                readOnly = true,
-                label = { Text("Existing account (required)") },
-                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(accountMenu) },
-                modifier = Modifier.menuAnchor().fillMaxWidth()
-            )
-            ExposedDropdownMenu(
-                expanded = accountMenu,
-                onDismissRequest = { accountMenu = false }
-            ) {
-                details.accounts.forEach { account ->
-                    DropdownMenuItem(
-                        text = { Text("${account.name} · ${account.bank}") },
-                        onClick = {
-                            selectedAccountId = account.id
-                            accountMenu = false
-                        }
-                    )
-                }
+        ReviewFieldRow(
+            ReviewField.ACCOUNT,
+            if (selections[ReviewField.ACCOUNT] != null) {
+                working.accountReference ?: "Unassigned"
+            } else "Unassigned",
+            selections[ReviewField.ACCOUNT] != null,
+            onClear = {
+                working = working.clear(ReviewField.ACCOUNT)
+                selections[ReviewField.ACCOUNT] = null
+            }
+        )
+        if (selections[ReviewField.ACCOUNT] == null) {
+            QuickSourceChoice(ReviewField.ACCOUNT, retained, source, working) { span ->
+                assignQuickChoice(ReviewField.ACCOUNT, span)
             }
         }
-        if (details.accounts.isEmpty()) {
-            Text("No existing account is available. Create one before confirming this review.")
+        ReviewFieldRow(
+            ReviewField.COUNTERPARTY,
+            working.counterparty ?: "Not supplied",
+            working.counterparty != null,
+            onClear = {
+                working = working.clear(ReviewField.COUNTERPARTY)
+                selections[ReviewField.COUNTERPARTY] = null
+            },
+            highlighted = selections[ReviewField.COUNTERPARTY] != null
+        )
+        if (selections[ReviewField.COUNTERPARTY] == null) {
+            QuickSourceChoice(ReviewField.COUNTERPARTY, retained, source, working) { span ->
+                assignQuickChoice(ReviewField.COUNTERPARTY, span)
+            }
         }
-        Text("Counterparty: ${working.counterparty ?: "Not supplied"}")
+        if (missing.isNotEmpty()) {
+            Text("To confirm, assign ${missing.joinToString(" and ")}.")
+        }
 
-        if (retained.analyzerSuggestions.isNotEmpty()) {
-            Text("Analyzer suggestions — not model output")
-            retained.analyzerSuggestions.forEach { suggestion ->
-                Text("${suggestion.kind.replaceFirstChar(Char::uppercase)} suggestion: ${suggestion.summary}")
-            }
-        }
         if (duplicateBlocked) {
             Text("This source event was already saved. Confirmation is blocked.")
         }
@@ -350,6 +434,74 @@ private fun AutomaticPolicyReviewContent(
     }
 }
 
+@Composable
+private fun QuickSourceChoice(
+    field: ReviewField,
+    retained: SmsReviewRetainedEvidence,
+    source: String,
+    working: AutomaticReviewWorking,
+    onAssign: (SmsReviewSourceSpan) -> Unit
+) {
+    val candidates = buildList {
+        retained.slmFields[field.wireName]?.sourceSpan?.let(::add)
+        if (field != ReviewField.COUNTERPARTY) {
+            retained.analyzerSuggestions.filter { it.kind == field.wireName }
+                .mapNotNullTo(this) { it.sourceSpan }
+        }
+    }.filter { span ->
+        span.text.length <= 40 &&
+            SmsReviewGrounding.utf16Range(source, span) != null &&
+            updateAutomaticSelection(field, span, working) != null
+    }.distinctBy { span ->
+        when (field) {
+            ReviewField.AMOUNT ->
+                runCatching { SmsReviewGrounding.minorUnits(span.text, working.currency) }.getOrNull()
+            ReviewField.DIRECTION -> SmsReviewGrounding.directionFrom(span.text)
+            ReviewField.ACCOUNT -> SmsReviewGrounding.normalizeAccount(span.text)
+            ReviewField.COUNTERPARTY -> SmsReviewGrounding.normalizeText(span.text)
+        }
+    }.take(2)
+    if (candidates.isEmpty()) return
+
+    Row(
+        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text("Use text:")
+        candidates.forEach { span ->
+            AssistChip(onClick = { onAssign(span) }, label = { Text("“${span.text}”") })
+        }
+    }
+}
+
+@Composable
+private fun ReviewFieldRow(
+    field: ReviewField,
+    value: String,
+    assigned: Boolean,
+    onClear: () -> Unit,
+    highlighted: Boolean = assigned
+) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            "${field.label}: $value",
+            Modifier.weight(1f)
+                .background(
+                    if (highlighted) field.highlightColor() else MaterialTheme.colorScheme.surface,
+                    RoundedCornerShape(8.dp)
+                )
+                .padding(8.dp)
+        )
+        if (assigned) TextButton(onClick = onClear) { Text("Clear") }
+    }
+}
+internal fun formatReviewAmount(minorUnits: Long?, currency: String): String {
+    val amount = minorUnits ?: return "Amount: Unassigned"
+    val scale = CurrencyScaleRegistry.scale(currency) ?: return "Amount: Unassigned"
+    val decimal = BigDecimal.valueOf(amount).movePointLeft(scale).setScale(scale)
+    return "Amount: ${currency.uppercase()} ${decimal.toPlainString()}"
+}
 private fun updateSelection(
     field: ReviewField,
     span: SmsReviewSourceSpan,
@@ -387,7 +539,6 @@ private data class AutomaticReviewWorking(
 
 private data class AutomaticReviewSeed(
     val working: AutomaticReviewWorking,
-    val selectedAccountId: String,
     val selections: Map<ReviewField, SmsReviewSourceSpan?>
 )
 
@@ -411,13 +562,12 @@ private fun automaticReviewSeed(
     )
     ReviewField.entries.forEach { field ->
         retained.slmFields[field.wireName]?.let { evidence ->
-            selections[field] = evidence.sourceSpan
             if (evidence.validationState == "valid") {
+                selections[field] = evidence.sourceSpan
                 working = working.fromRetained(field, evidence.normalizedValueJson)
             }
         }
     }
-    var selectedAccountId = ""
     details.draftCorrections.forEach { correction ->
         when (correction.field) {
             "amount" -> {
@@ -454,11 +604,9 @@ private fun automaticReviewSeed(
                 selections[ReviewField.COUNTERPARTY] = correction.span(details.source.rawMessage)
                 working = working.copy(counterparty = correction.newValueJson.stringLiteral())
             }
-            "account_id" -> selectedAccountId =
-                correction.newValueJson.stringLiteral().orEmpty()
         }
     }
-    return AutomaticReviewSeed(working, selectedAccountId, selections)
+    return AutomaticReviewSeed(working, selections)
 }
 
 private fun updateAutomaticSelection(
@@ -519,8 +667,7 @@ private fun AutomaticReviewWorking.fromRetained(
 
 private fun automaticReviewCorrections(
     working: AutomaticReviewWorking,
-    selections: Map<ReviewField, SmsReviewSourceSpan?>,
-    selectedAccountId: String
+    selections: Map<ReviewField, SmsReviewSourceSpan?>
 ): List<SmsFieldCorrection> = buildList {
     fun add(
         field: String,
@@ -575,7 +722,7 @@ private fun automaticReviewCorrections(
     add(
         "account_id",
         null,
-        selectedAccountId.takeIf(String::isNotBlank)?.let(JSONObject::quote) ?: "null",
+        "null",
         SmsFieldGroundingClassification.SUPPLIED_MANUAL_UNGROUNDED_VALUE
     )
     val counterpartySpan = selections[ReviewField.COUNTERPARTY]

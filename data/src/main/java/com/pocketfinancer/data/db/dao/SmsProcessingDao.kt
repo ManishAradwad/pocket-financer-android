@@ -127,7 +127,7 @@ interface SmsProcessingDao {
           AND review.state = 'open'
           AND review.revision = 0
           AND review.draftJson IS NULL
-          AND operation.contractReleaseId = 'native-integration-v5'
+          AND operation.contractReleaseId IN ('native-integration-v5', 'native-integration-v6')
         ORDER BY operation.createdAt DESC, review.updatedAt DESC, review.id DESC
         LIMIT 1
         """

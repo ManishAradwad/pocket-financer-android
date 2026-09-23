@@ -38,7 +38,8 @@ class PipelineService @Inject constructor(
     private val v4SnapshotFactory: SmsV4OperationSnapshotFactory,
     private val v4Coordinator: DefaultSmsV4ProcessingCoordinator,
     private val v5SnapshotFactory: SmsV5OperationSnapshotFactory,
-    private val v5Coordinator: DefaultSmsV5ProcessingCoordinator
+    private val v5Coordinator: DefaultSmsV5ProcessingCoordinator,
+    private val slmProcessingPreferences: SlmProcessingPreferences
 ) {
     private val _pipelineState = MutableStateFlow<PipelineStep?>(null)
     val pipelineState: StateFlow<PipelineStep?> = _pipelineState.asStateFlow()
@@ -246,7 +247,11 @@ class PipelineService @Inject constructor(
             previousContract == "pocketfinancer.processing-config/4"
         val retryOriginalV5 = configurationMode == "original" &&
             previousContract == "pocketfinancer.processing-config/5"
-        if (configurationMode == "original" && !retryOriginalV4 && !retryOriginalV5) {
+        val retryOriginalV6 = configurationMode == "original" &&
+            previousContract == "pocketfinancer.processing-config/6"
+        if (configurationMode == "original" &&
+            !retryOriginalV4 && !retryOriginalV5 && !retryOriginalV6
+        ) {
             return ProcessingResult.Failure(
                 "The original frozen configuration is retained but has no executable native adapter; retry with current configuration.",
                 retryable = false
@@ -289,6 +294,12 @@ class PipelineService @Inject constructor(
             )
             return mapOutcome(v4Coordinator.process(reference, snapshot))
         }
+        val grammarEnabled = when {
+            retryOriginalV5 -> null
+            retryOriginalV6 -> previousConfiguration
+                .getJSONObject("extractor").getBoolean("grammar_enabled")
+            else -> slmProcessingPreferences.gbnfGrammarEnabled.value
+        }
         val snapshot = v5SnapshotFactory.create(
             source = reference,
             trigger = "retry",
@@ -301,7 +312,8 @@ class PipelineService @Inject constructor(
             runtimeVersion = "llama.cpp-jni",
             deviceCohort = deviceCohort,
             stableEventId = retry.operation.stableEventId,
-            parentOperationId = retry.operation.id
+            parentOperationId = retry.operation.id,
+            grammarEnabled = grammarEnabled
         )
         return mapOutcome(v5Coordinator.process(reference, snapshot))
     }
@@ -356,7 +368,8 @@ class PipelineService @Inject constructor(
             runtimeVersion = "llama.cpp-jni",
             deviceCohort = android.os.Build.MODEL?.takeIf { it.isNotBlank() }
                 ?: "android-device",
-            now = now
+            now = now,
+            grammarEnabled = slmProcessingPreferences.gbnfGrammarEnabled.value
         )
         val automaticObserver = SmsProcessingObserver { event ->
             when (val transient = event.transient) {

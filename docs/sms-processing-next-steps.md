@@ -1,7 +1,7 @@
 # Android SMS processing next steps
 
 Status: **Android gates and synthetic Pixel_9 retry/recovery checks passed; model-driven automatic save and physical-device verification pending**
-Last reconciled: 2026-09-23
+Last reconciled: 2026-09-24
 
 The shared repository `pF_slm_selection` owns the canonical architecture,
 versioned contracts, sanitized vectors, host GGUF evaluation, native-trace import,
@@ -61,6 +61,56 @@ described as reasoning. Manual updates are fenced by run, candidate, and exact
 attempt; automatic updates retain exact claim fencing. Terminal, cancellation,
 stale-owner, and lifecycle paths scrub private transient text.
 
+## 2026-09-24 emulator feedback and active fix plan
+
+The owner tested the current PR on the emulator and found that the Review flow is
+still difficult to use. This section records the requested behavior; earlier
+checkpoints below remain dated evidence, not acceptance of this UX.
+
+1. Show the model's output growing live in one readable area. Remove the
+   separate "Latest decoded token delta" card. Keep decoded-token callbacks and
+   cumulative output local, bounded, and cleared when the operation ends.
+2. Make the "Use GBNF grammar" setting control actual SMS processing. It defaults
+   off. Capture its value once per operation, persist that choice with a versioned
+   configuration, and report the same value in diagnostics. Preserve the grammar
+   behavior of already stored operations and original-configuration retries;
+   current-configuration retries use the current setting. Do not alter frozen v5
+   assets in place.
+3. Remove the receipt-time explanatory sentence from Review. The receipt timestamp
+   itself remains immutable.
+4. Make annotation selection-first: select wording in the complete SMS, then tap
+   Amount, Direction, Account, or Counterparty to assign it. Clear the transient
+   native selection after assignment or when tapping elsewhere. Show an immediate
+   result and a clear way to replace or remove an assignment. Offer short,
+   source-backed, one-tap choices for missing fields (especially Account) so
+   precise drag selection is optional. Do not require typed field values.
+   Preserve exact Unicode-scalar grounding.
+5. Present confirmed fields clearly. Prefer distinct, accessible source highlights
+   that do not interfere with native selection. If native selection makes that
+   unreliable, use colored field chips with an adjacent source excerpt or a
+   tap-to-focus evidence preview. Verify the chosen design with actual touch
+   interaction and screen-reader labels; color alone must not carry meaning.
+6. Keep direction as one resolved field. Selecting "debited" and assigning
+   Direction should yield Debit, clear the selection, and avoid a second "Paid"
+   suggestion in the main flow. Retain analyzer suggestions only in an optional,
+   clearly labeled technical details area.
+7. Remove the existing-account prerequisite from Review. When the owner confirms
+   a grounded account reference, reuse a unique matching account or create a new
+   account and alias atomically with the transaction. Do not create duplicates
+   on retry/replay; keep ambiguity and write failures reviewable.
+8. Display money in major units (for example, INR 125.00), while retaining exact
+   12,500 minor units in storage for a two-decimal currency. Amount is still
+   required for a valid transaction, but can come from accepted extractor evidence
+   or source-text annotation. Confirmation must explain any remaining blocker
+   instead of staying disabled without a reason.
+
+Acceptance: use the synthetic SMS from the emulator report to select each field
+and confirm with no pre-existing account; verify the saved transaction is INR
+125.00 and has one newly created account. Repeat with a matching account, a
+duplicate action, an interrupted/retried operation, grammar off/on, and selection
+dismissal. Run focused JVM and Compose checks, the full Android unit/lint/build
+gate, then connected emulator interaction. Record emulator evidence separately
+from physical-device evidence.
 ## Open Android observations
 
 The emulator was not running during commits `fcf6614`, `f6079ff`, or `01f3861`,

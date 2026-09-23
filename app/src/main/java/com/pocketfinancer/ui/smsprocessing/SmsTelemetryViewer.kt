@@ -581,19 +581,9 @@ private fun PipelineTimeline(
             }
         ) {
             OutputBox(
-                title = "Latest decoded token delta",
-                content = model.decodedTokenDelta.ifEmpty {
-                    if (stage2Active) {
-                        "Waiting for the next decoded token…"
-                    } else {
-                        "No decoded-token callback is active."
-                    }
-                }
-            )
-            OutputBox(
-                title = "Cumulative structured output",
+                title = "Live model output",
                 content = model.cumulativeStructuredOutput
-                    .ifEmpty { "Waiting for structured output…" }
+                    .ifEmpty { "Waiting for model output…" }
                     .withLiveOutputTruncationNotice(
                         model.jsonOutputTruncated
                     )

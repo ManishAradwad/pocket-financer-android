@@ -71,10 +71,12 @@ object SmsReviewGrounding {
         val retained = extension ?: return null
         check(retained.contractVersion == "pocketfinancer.review-case/2")
         val configuration = JSONObject(operationConfigurationJson)
-        check(configuration.getString("contract") == "pocketfinancer.processing-config/5")
+        val releaseId = configuration.getJSONObject("contract_release").getString("release_id")
         check(
-            configuration.getJSONObject("contract_release").getString("release_id") ==
-                "native-integration-v5"
+            (releaseId == "native-integration-v5" &&
+                configuration.getString("contract") == "pocketfinancer.processing-config/5") ||
+                (releaseId == "native-integration-v6" &&
+                    configuration.getString("contract") == "pocketfinancer.processing-config/6")
         )
         check(configuration.getJSONObject("persistence_policy").getString("rollout_mode") == "automatic")
         val receipt = configuration.getJSONObject("received_timestamp")

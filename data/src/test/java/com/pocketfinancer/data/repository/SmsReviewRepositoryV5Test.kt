@@ -80,26 +80,61 @@ class SmsReviewRepositoryV5Test {
         assertEquals(ACCOUNT_ID, transaction.accountId)
         assertEquals("debit", transaction.type)
         assertEquals(1_000L, transaction.exactMinorUnits)
+        assertEquals(10.0, transaction.amount)
         assertEquals(RECEIPT_TIME, transaction.date)
         assertEquals(1, database.transactionRevisionDao().getHistory(transaction.id).size)
         assertEquals("corrected", database.smsProcessingDao().getReviewCase(REVIEW_ID)?.state)
     }
 
     @Test
-    fun `missing existing account rolls back partial review confirmation`() = runBlocking {
-        insertFixture()
+    fun `sms account creates an owned account and replays without duplicates`() = runBlocking {
+        insertFixture(includeExistingAccount = false)
+        val command = command(includeAccount = false)
 
-        assertFails { repository.resolve(command(includeAccount = false), NOW) }
+        val first = repository.resolve(command, NOW)
+        val replay = repository.resolve(command, NOW + 1)
 
-        assertEquals(0, database.transactionDao().count())
-        assertNull(database.smsProcessingDao().getFeedbackByAction(ACTION_ID))
-        assertEquals(0, database.smsProcessingDao().getReviewCase(REVIEW_ID)?.revision)
+        assertFalse(first.replayed)
+        assertTrue(replay.replayed)
+        assertEquals(1, database.accountDao().getAllOnce().size)
+        val account = database.accountDao().getAllOnce().single()
+        assertEquals("Account ••1234", account.name)
+        assertEquals("AX-TEST", account.bank)
+        assertEquals(account.id, database.transactionDao().getBySourceEvent(SOURCE_ID, EVENT_ID)?.accountId)
     }
 
-    private suspend fun insertFixture() {
-        database.accountDao().insert(
-            AccountEntity(ACCOUNT_ID, "A/c XX1234", "Test Bank", "manual", NOW, NOW)
-        )
+    @Test
+    fun `unique existing SMS account is reused without an explicit picker choice`() = runBlocking {
+        insertFixture()
+
+        repository.resolve(command(includeAccount = false), NOW)
+
+        assertEquals(1, database.accountDao().getAllOnce().size)
+        assertEquals(ACCOUNT_ID, database.transactionDao().getBySourceEvent(SOURCE_ID, EVENT_ID)?.accountId)
+    }
+
+    @Test
+    fun `failed correction rolls back and can be retried`() = runBlocking {
+        insertFixture()
+
+        assertFails { repository.resolve(command(includeAccount = false, includeAccountSpan = false), NOW) }
+
+        assertEquals(0, database.transactionDao().count())
+        assertEquals(1, database.accountDao().getAllOnce().size)
+        assertNull(database.smsProcessingDao().getFeedbackByAction(ACTION_ID))
+        assertEquals(0, database.smsProcessingDao().getReviewCase(REVIEW_ID)?.revision)
+
+        val retried = repository.resolve(command(includeAccount = false), NOW + 1)
+        assertFalse(retried.replayed)
+        assertEquals(1, database.transactionDao().count())
+    }
+
+    private suspend fun insertFixture(includeExistingAccount: Boolean = true) {
+        if (includeExistingAccount) {
+            database.accountDao().insert(
+                AccountEntity(ACCOUNT_ID, "A/c XX1234", "Test Bank", "manual", NOW, NOW)
+            )
+        }
         database.smsProcessingDao().insertSource(
             AdmittedSmsSourceEntity(
                 SOURCE_ID,
@@ -178,7 +213,7 @@ class SmsReviewRepositoryV5Test {
         )
     }
 
-    private fun command(includeAccount: Boolean): SmsReviewCommand {
+    private fun command(includeAccount: Boolean, includeAccountSpan: Boolean = true): SmsReviewCommand {
         val corrections = mutableListOf(
             correction("amount", span(0, 9, "INR 10.00"),
                 JSONObject().put("minor_units", 1_000).put("currency", "INR").toString()),
@@ -188,10 +223,12 @@ class SmsReviewRepositoryV5Test {
                 JSONObject.quote("debit"),
                 SmsFieldGroundingClassification.SUPPLIED_MANUAL_UNGROUNDED_VALUE
             ),
-            correction("account", span(20, 26, "XX1234"),
-                JSONObject().put("reference", "1234").toString()),
             correction("counterparty", span(30, 34, "SHOP"), JSONObject.quote("shop"))
         )
+        if (includeAccountSpan) {
+            corrections += correction("account", span(20, 26, "XX1234"),
+                JSONObject().put("reference", "1234").toString())
+        }
         if (includeAccount) {
             corrections += correction(
                 "account_id",

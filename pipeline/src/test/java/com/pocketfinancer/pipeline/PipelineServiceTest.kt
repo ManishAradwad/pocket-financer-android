@@ -29,6 +29,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.Before
@@ -43,6 +44,7 @@ class PipelineServiceTest {
     private lateinit var v4Coordinator: DefaultSmsV4ProcessingCoordinator
     private lateinit var v5SnapshotFactory: SmsV5OperationSnapshotFactory
     private lateinit var v5Coordinator: DefaultSmsV5ProcessingCoordinator
+    private lateinit var grammarPreferences: SlmProcessingPreferences
     private lateinit var lease: SlmLease
     private lateinit var pipeline: PipelineService
     private val snapshot = snapshot()
@@ -57,6 +59,8 @@ class PipelineServiceTest {
         v4Coordinator = mockk()
         v5SnapshotFactory = mockk()
         v5Coordinator = mockk()
+        grammarPreferences = mockk()
+        every { grammarPreferences.gbnfGrammarEnabled } returns MutableStateFlow(false)
         lease = mockk()
         every { lease.model } returns SlmModelSpec(
             modelId = "test-selector",
@@ -70,12 +74,13 @@ class PipelineServiceTest {
         coEvery {
             v5SnapshotFactory.create(
                 any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(),
-                any(), any()
+                any(), any(), any()
             )
         } returns snapshot
         pipeline = PipelineService(
             store, snapshotFactory, configuration, coordinator,
-            v4SnapshotFactory, v4Coordinator, v5SnapshotFactory, v5Coordinator
+            v4SnapshotFactory, v4Coordinator, v5SnapshotFactory, v5Coordinator,
+            grammarPreferences
         )
     }
 
@@ -95,7 +100,7 @@ class PipelineServiceTest {
         coVerify(exactly = 0) {
             v5SnapshotFactory.create(
                 any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(),
-                any(), any()
+                any(), any(), any()
             )
         }
         coVerify(exactly = 0) { v5Coordinator.processUsingLease(any(), any(), any(), any()) }
@@ -121,6 +126,31 @@ class PipelineServiceTest {
         }
     }
 
+    @Test
+    fun `new processing snapshots use the selected grammar setting`() = runTest {
+        every { configuration.confirmedPrimaryCurrency() } returns "INR"
+        val enabled = MutableStateFlow(false)
+        every { grammarPreferences.gbnfGrammarEnabled } returns enabled
+        coEvery { v5Coordinator.processUsingLease(any(), snapshot, lease, any()) } returns
+            SmsProcessingOutcome.RetainedForReview(snapshot.operationId, "review-id", emptyList())
+
+        pipeline.processSingle(message(), lease, trigger = "manual")
+        coVerify(exactly = 1) {
+            v5SnapshotFactory.create(
+                any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(),
+                any(), any(), false
+            )
+        }
+
+        enabled.value = true
+        pipeline.processSingle(message(), lease, trigger = "manual")
+        coVerify(exactly = 1) {
+            v5SnapshotFactory.create(
+                any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(),
+                any(), any(), true
+            )
+        }
+    }
     @Test
     fun `worker entrypoint lets coordinator retain an unavailable model`() = runTest {
         every { configuration.confirmedPrimaryCurrency() } returns "INR"

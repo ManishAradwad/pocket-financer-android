@@ -583,7 +583,7 @@ class SmsProcessingStore @Inject constructor(
             ).also { check(dao.updateReviewCase(it) == 1) }
             else -> existing
         }
-        if (operation.contractReleaseId == "native-integration-v5" &&
+        if (operation.contractReleaseId in setOf("native-integration-v5", "native-integration-v6") &&
             reviewCase.currentOperationId == operation.id) {
             val evidence = v2Evidence ?: SmsReviewV2Evidence(
                 furthestStage = stageForState(operation.state),
@@ -715,7 +715,7 @@ class SmsProcessingStore @Inject constructor(
 
     private suspend fun reusableV5Review(
         operation: SmsProcessingOperationEntity
-    ): SmsReviewCaseEntity? = if (operation.contractReleaseId == "native-integration-v5") {
+    ): SmsReviewCaseEntity? = if (operation.contractReleaseId in setOf("native-integration-v5", "native-integration-v6")) {
         dao.getUneditedOpenV5ReviewCaseForSource(operation.sourceId)
     } else {
         null
@@ -744,7 +744,7 @@ class SmsProcessingStore @Inject constructor(
         operation: SmsProcessingOperationEntity,
         now: Long
     ) {
-        if (operation.contractReleaseId != "native-integration-v5") return
+        if (operation.contractReleaseId !in setOf("native-integration-v5", "native-integration-v6")) return
         dao.upsertReviewCaseV2Extension(
             SmsReviewCaseV2ExtensionEntity(
                 reviewCaseId = reviewCaseId,

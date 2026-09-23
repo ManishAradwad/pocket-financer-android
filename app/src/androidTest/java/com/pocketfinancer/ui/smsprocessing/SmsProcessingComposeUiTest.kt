@@ -306,7 +306,7 @@ class SmsProcessingComposeUiTest {
     }
 
     @Test
-    fun telemetryViewer_showsDecodedDeltaAndCumulativeOutputSeparately() {
+    fun telemetryViewer_streamsModelOutputWithoutSeparateDeltaPanel() {
         val model = candidateTelemetryModel(
             target = SmsProcessingTarget.ManualRecent(
                 runId = "live-output-run",
@@ -331,9 +331,8 @@ class SmsProcessingComposeUiTest {
         }
         composeRule.waitForIdle()
 
-        composeRule.onNodeWithText("Latest decoded token delta").assertExists()
-        composeRule.onNodeWithText("\"posted\"}").assertExists()
-        composeRule.onNodeWithText("Cumulative structured output").assertExists()
+        composeRule.onNodeWithText("Latest decoded token delta").assertDoesNotExist()
+        composeRule.onNodeWithText("Live model output").assertExists()
         composeRule.onNodeWithText("{\"decision\":\"posted\"}").assertExists()
     }
 

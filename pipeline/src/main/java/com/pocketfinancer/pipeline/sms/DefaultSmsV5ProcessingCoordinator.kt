@@ -127,9 +127,17 @@ class DefaultSmsV5ProcessingCoordinator @Inject constructor(
         SmsProcessingStore.sha256(source.sourceId) == operation.configuration.sourceRefHash &&
         operation.operationId == operation.configuration.operationId &&
         operation.parentOperationId == operation.configuration.parentOperationId &&
-        operation.configuration.contract == "pocketfinancer.processing-config/5" &&
-        operation.configuration.releaseId == NativeSmsV5Assets.RELEASE_ID &&
-        operation.configuration.releaseManifestHash == NativeSmsV5Assets.MANIFEST_SHA256 &&
+        (when (operation.configuration.releaseId) {
+            NativeSmsV5Assets.RELEASE_ID ->
+                operation.configuration.contract == "pocketfinancer.processing-config/5" &&
+                    operation.configuration.releaseManifestHash == NativeSmsV5Assets.MANIFEST_SHA256 &&
+                    operation.configuration.grammarEnabled == null
+            NativeSmsV6Assets.RELEASE_ID ->
+                operation.configuration.contract == "pocketfinancer.processing-config/6" &&
+                    operation.configuration.releaseManifestHash == NativeSmsV6Assets.MANIFEST_SHA256 &&
+                    operation.configuration.grammarEnabled != null
+            else -> false
+        }) &&
         operation.configuration.modelIdentityKind == "file_sha256" &&
         operation.configuration.rolloutMode == "automatic" &&
         (operation.configuration.trigger != "retry" || operation.parentOperationId != null) &&
@@ -205,14 +213,18 @@ class DefaultSmsV5ProcessingCoordinator @Inject constructor(
         }
 
         val tokenRelay = LiveTokenRelay(operation.operationId, observer)
+        val grammarEnabled = operation.configuration.grammarEnabled ?: true
         val request = DirectSmsExtractorRequest(
             evidence.body,
             SmsV4ProcessingJson.senderFamily(evidence.sender),
             operation.configuration.primaryCurrency,
             operation.configuration.enabledProfiles,
             SmsV5ProcessingJson.advisoryEvidence(analysis),
-            readV5Asset("configs/sms_processing/prompts/sms-extractor-v1.txt"),
-            readV5Asset("configs/sms_processing/grammars/sms-extractor-v1.gbnf"),
+            readReleaseAsset("configs/sms_processing/prompts/sms-extractor-v1.txt", operation.configuration.releaseId),
+            if (grammarEnabled) readReleaseAsset(
+                "configs/sms_processing/grammars/sms-extractor-v1.gbnf",
+                operation.configuration.releaseId
+            ) else "",
             SlmTokenCallback(tokenRelay::onToken)
         )
         val profile = CandidateSelectorRuntimeProfile()
@@ -223,7 +235,7 @@ class DefaultSmsV5ProcessingCoordinator @Inject constructor(
             observer,
             SmsProcessingTransientEvent.InferenceStarted(
                 model,
-                grammarEnabled = true,
+                grammarEnabled = grammarEnabled,
                 answerTokenBudget = profile.answerTokenLimit
             )
         )
@@ -726,9 +738,15 @@ class DefaultSmsV5ProcessingCoordinator @Inject constructor(
         return digest.digest().joinToString("") { "%02x".format(it) }
     }
 
-    private fun readV5Asset(path: String): String = context.assets
-        .open("${NativeSmsV5Assets.ASSET_ROOT}/$path")
-        .bufferedReader().use { it.readText() }
+    private fun readReleaseAsset(path: String, releaseId: String): String {
+        val root = when (releaseId) {
+            NativeSmsV5Assets.RELEASE_ID -> NativeSmsV5Assets.ASSET_ROOT
+            NativeSmsV6Assets.RELEASE_ID -> NativeSmsV6Assets.ASSET_ROOT
+            else -> error("Unsupported SMS release")
+        }
+        return context.assets.open(root + "/" + path)
+            .bufferedReader().use { it.readText() }
+    }
 
     private fun kotlinx.coroutines.CoroutineScope.launchHeartbeat(
         claim: SmsOperationClaim

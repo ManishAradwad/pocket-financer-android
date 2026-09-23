@@ -234,7 +234,7 @@ class SmsReviewRepository @Inject constructor(
         if (operation.contractReleaseId == "native-integration-v4") {
             return projectV4Review(operation, source, command, now)
         }
-        if (operation.contractReleaseId == "native-integration-v5") {
+        if (operation.contractReleaseId in setOf("native-integration-v5", "native-integration-v6")) {
             return projectV5Review(operation, source, command, now)
         }
         val result = dao.getReconstructedResult(operationId)?.semanticResultJson
@@ -556,10 +556,12 @@ class SmsReviewRepository @Inject constructor(
         check(SmsProcessingStore.sha256(canonicalJson(payload)) == operation.configurationHash) {
             "Stored configuration payload changed"
         }
-        check(configuration.optString("contract") == "pocketfinancer.processing-config/5")
+        val releaseId = configuration.getJSONObject("contract_release").optString("release_id")
         check(
-            configuration.getJSONObject("contract_release").optString("release_id") ==
-                "native-integration-v5"
+            (releaseId == "native-integration-v5" &&
+                configuration.optString("contract") == "pocketfinancer.processing-config/5") ||
+                (releaseId == "native-integration-v6" &&
+                    configuration.optString("contract") == "pocketfinancer.processing-config/6")
         )
         check(configuration.getJSONObject("persistence_policy").optString("rollout_mode") == "automatic")
         check(configuration.optString("source_ref_hash") == SmsProcessingStore.sha256(source.id)) {
@@ -613,27 +615,20 @@ class SmsReviewRepository @Inject constructor(
             require(SmsReviewGrounding.directionFrom(directionSpan.text) == direction)
         }
 
-        corrections["account"]?.let { accountCorrection ->
-            val span = requireReviewSpan(accountCorrection, source.rawMessage)
-            val reference = JSONObject(accountCorrection.newValueJson).getString("reference")
-            require(SmsReviewGrounding.normalizeAccount(span.text).isNotBlank())
-            require(
-                SmsReviewGrounding.normalizeAccount(span.text) ==
-                    SmsReviewGrounding.normalizeAccount(reference)
-            )
+        val accountCorrection = requireNotNull(corrections["account"]) {
+            "An account reference selected from the SMS is required"
         }
-        val accountCorrection = requireNotNull(corrections["account_id"]) {
-            "An existing owned account must be selected"
-        }
-        require(accountCorrection.evidenceJson == null)
-        require(
-            accountCorrection.classification ==
-                SmsFieldGroundingClassification.SUPPLIED_MANUAL_UNGROUNDED_VALUE
-        ) { "Account selection must be an explicit owner choice" }
-        val accountId = decodeScalar(accountCorrection.newValueJson) as? String
-            ?: throw IllegalArgumentException("An existing owned account must be selected")
-        val account = accountDao.getById(accountId)
-            ?: throw IllegalArgumentException("Selected account does not exist")
+        val accountSpan = requireReviewSpan(accountCorrection, source.rawMessage)
+        val accountReference = JSONObject(accountCorrection.newValueJson).getString("reference")
+        val normalizedAccountReference = SmsReviewGrounding.normalizeAccount(accountSpan.text)
+        require(normalizedAccountReference.isNotBlank())
+        require(normalizedAccountReference == SmsReviewGrounding.normalizeAccount(accountReference))
+        val account = resolveOrCreateV5Account(
+            selectedAccountCorrection = corrections["account_id"],
+            accountReference = normalizedAccountReference,
+            source = source,
+            now = now
+        )
 
         val counterparty = corrections["counterparty"]?.let { correction ->
             if (correction.newValueJson == "null") {
@@ -719,6 +714,92 @@ class SmsReviewRepository @Inject constructor(
         return revisionId
     }
 
+    /** Resolves the SMS-selected account or creates and confirms one in this transaction. */
+    private suspend fun resolveOrCreateV5Account(
+        selectedAccountCorrection: SmsFieldCorrection?,
+        accountReference: String,
+        source: AdmittedSmsSourceEntity,
+        now: Long
+    ): AccountEntity {
+        val selectedAccountId = selectedAccountCorrection?.let { correction ->
+            require(correction.evidenceJson == null)
+            require(
+                correction.classification ==
+                    SmsFieldGroundingClassification.SUPPLIED_MANUAL_UNGROUNDED_VALUE
+            ) { "Account selection must be an explicit owner choice" }
+            if (correction.newValueJson == "null") {
+                null
+            } else {
+                decodeScalar(correction.newValueJson) as? String
+                    ?: throw IllegalArgumentException("Selected account must be text")
+            }
+        }
+        selectedAccountId?.let { accountId ->
+            return accountDao.getById(accountId)
+                ?: throw IllegalArgumentException("Selected account does not exist")
+        }
+
+        val normalizedAlias = if ('@' in accountReference) {
+            "vpa:$accountReference"
+        } else {
+            "suffix:$accountReference"
+        }
+        val aliasHash = SmsProcessingStore.sha256(normalizedAlias)
+        val aliasMatches = revisionDao.findConfirmedAliases(
+            aliasHash,
+            GroundedAccountResolver.MATCHING_SCOPE
+        ).mapNotNull { accountDao.getById(it.accountId) }.distinctBy { it.id }
+        check(aliasMatches.size <= 1) { "Account reference is ambiguous" }
+        aliasMatches.singleOrNull()?.let { return it }
+
+        // Accounts created before aliases existed can still be safely reused when
+        // the selected SMS reference matches exactly and only one account does.
+        val nameMatches = accountDao.getAllOnce().filter {
+            SmsReviewGrounding.normalizeAccount(it.name) == accountReference
+        }
+        check(nameMatches.size <= 1) { "Account reference is ambiguous" }
+        nameMatches.singleOrNull()?.let { existing ->
+            revisionDao.insertAccountAlias(
+                AccountAliasEntity(
+                    id = UUID.randomUUID().toString(),
+                    accountId = existing.id,
+                    normalizedAliasHash = aliasHash,
+                    aliasKind = if ('@' in accountReference) "vpa" else "suffix",
+                    matchingScope = GroundedAccountResolver.MATCHING_SCOPE,
+                    confirmedByUser = true,
+                    createdAt = now
+                )
+            )
+            return existing
+        }
+
+        val display = if ('@' in accountReference) {
+            "UPI account $accountReference"
+        } else {
+            "Account ••${accountReference.takeLast(4)}"
+        }
+        val created = AccountEntity(
+            id = UUID.randomUUID().toString(),
+            name = display,
+            bank = source.sender.ifBlank { "Unknown Account" },
+            type = "sms-review",
+            createdAt = now,
+            updatedAt = now
+        )
+        accountDao.insert(created)
+        revisionDao.insertAccountAlias(
+            AccountAliasEntity(
+                id = UUID.randomUUID().toString(),
+                accountId = created.id,
+                normalizedAliasHash = aliasHash,
+                aliasKind = if ('@' in accountReference) "vpa" else "suffix",
+                matchingScope = GroundedAccountResolver.MATCHING_SCOPE,
+                confirmedByUser = true,
+                createdAt = now
+            )
+        )
+        return created
+    }
     private fun requireReviewSpan(
         correction: SmsFieldCorrection,
         source: String
