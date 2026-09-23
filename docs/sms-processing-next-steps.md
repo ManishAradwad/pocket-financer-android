@@ -1,6 +1,6 @@
 # Android SMS processing next steps
 
-Status: **implementation in progress; local unit evidence only**
+Status: **implementation checkpoints locally verified; full gates and runtime verification pending**
 Last reconciled: 2026-09-22
 
 The shared repository `pF_slm_selection` owns the canonical architecture,
@@ -53,13 +53,21 @@ Commit `f6079ff` completes the existing Review surface for the automatic policy:
 - selecting a Needs Review card opens that case directly while the Review inbox
   remains available from its existing entry point.
 
+Commit `01f3861` restores live generation visibility on the existing processing
+surface. Automatic, historical, and manual operations now expose a bounded latest
+decoded-token delta separately from bounded cumulative structured output. The
+cumulative value is mandatory on every callback and is not reconstructed or
+described as reasoning. Manual updates are fenced by run, candidate, and exact
+attempt; automatic updates retain exact claim fencing. Terminal, cancellation,
+stale-owner, and lifecycle paths scrub private transient text.
+
 ## Open Android observations
 
-The emulator was not running during commits `fcf6614` or `f6079ff`, so no emulator
-or physical-device behavior is claimed. The Review implementation is verified by
-focused JVM tests and Kotlin compilation only. The visible processing surfaces
-still need their separate decoded-delta/cumulative-output presentation completed
-before a fresh emulator run.
+The emulator was not running during commits `fcf6614`, `f6079ff`, or `01f3861`,
+so no emulator or physical-device behavior is claimed. Review and live-output
+behavior are verified by focused JVM tests and Kotlin/instrumentation-test
+compilation only. Runtime token timing, navigation, accessibility, process-death
+recovery, and end-to-end persistence still require a fresh emulator.
 
 ## Next implementation change
 
@@ -68,12 +76,18 @@ the existing `GroundedReviewContent` and `EvidenceSelectionText`, explicit
 direction fallback, deliberate existing-account selection, mandatory-field
 confirmation gating, and direct Review-card navigation.
 
-Planned next:
+Implemented and verified locally in `01f3861`: separate live decoded-token and
+cumulative structured-output presentation, coalescing, exact stale-operation
+fencing, terminal/cancellation/lifecycle cleanup, and completed-output handling
+across automatic, historical, and manual processing.
 
-1. Complete decoded-delta and cumulative-output presentation, stale-operation
-   fencing, lifecycle scrubbing, and tests across automatic, historical, and
-   manual processing.
-2. Keep corrections revision-bound, append-only, local label evidence. Explicit
+Planned verification next:
+
+1. Run the complete Gradle unit, lint, and build gates.
+2. Start a fresh emulator and run the specified routing, Review, live-output,
+   retry, recovery, and no-duplicate scenarios. Do not convert local JVM or
+   compile evidence into emulator evidence.
+3. Keep corrections revision-bound, append-only, local label evidence. Explicit
    export and adjudication are required before approved, source-grounded,
    split-safe labels may improve the SLM or another pipeline component.
 
@@ -144,7 +158,28 @@ Verified locally for `f6079ff`:
   "com.pocketfinancer.ui.review.ReviewViewModelActionTest" --no-daemon`.
 
 These are JVM/compile results only. Emulator navigation, accessibility, and
-interaction behavior remain unverified. The next recommended starting point is
-live-output state and cleanup in `AutomaticSmsProcessingActivity`,
-`HistoricalSmsProcessingActivity`, `HomeSyncManager`, `HomeViewModel`, and
-`SmsTelemetryViewer`.
+interaction behavior remain unverified. At the `f6079ff` checkpoint, the next
+recommended starting point was live-output state and cleanup in
+`AutomaticSmsProcessingActivity`, `HistoricalSmsProcessingActivity`,
+`HomeSyncManager`, `HomeViewModel`, and `SmsTelemetryViewer`.
+
+Live-output implementation commit:
+`01f3861 feat(sms): show live structured generation`.
+
+Verified locally for `01f3861`:
+
+- focused `DefaultDirectCandidateSelectorTest`,
+  `AutomaticSmsProcessingActivityTest`, `PipelineServiceTest`,
+  `HistoricalSmsProcessingActivityTest`, `ManualSmsProcessingObserverTest`,
+  `SmsProcessingPresentationTest`, `TrustworthyHomeStateTest`,
+  `AutomaticSmsHomePresentationTest`, and
+  `HistoricalSmsHomePresentationTest` via the three module
+  `testDebugUnitTest` tasks;
+- `./gradlew.bat :app:compileDebugAndroidTestKotlin --no-daemon`.
+
+The compiled instrumentation coverage includes separate decoded-delta and
+cumulative-output rendering, but it was not executed on an emulator. Remaining
+verification is the complete Gradle gate followed by the fresh-emulator matrix.
+Relevant sources are `AutomaticSmsProcessingActivity`,
+`HistoricalSmsProcessingActivity`, `ManualSmsProcessingObserver`,
+`HomeSyncManager`, `SmsTelemetryModels`, and `SmsTelemetryViewer`.
