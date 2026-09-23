@@ -118,7 +118,10 @@ class AppDatabaseMigrationTest {
             V3_DATABASE_NAME
         )
             .allowMainThreadQueries()
-            .addMigrations(AppDatabase.MIGRATION_6_7)
+            .addMigrations(
+                AppDatabase.MIGRATION_6_7,
+                AppDatabase.MIGRATION_7_8
+            )
             .build()
         try {
             runBlocking {

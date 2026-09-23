@@ -1,7 +1,7 @@
 # Android SMS processing next steps
 
-Status: **implementation checkpoints locally verified; full gates and runtime verification pending**
-Last reconciled: 2026-09-22
+Status: **Android debug unit, lint, and build gates passed; emulator and device verification pending**
+Last reconciled: 2026-09-23
 
 The shared repository `pF_slm_selection` owns the canonical architecture,
 versioned contracts, sanitized vectors, host GGUF evaluation, native-trace import,
@@ -83,11 +83,10 @@ across automatic, historical, and manual processing.
 
 Planned verification next:
 
-1. Run the complete Gradle unit, lint, and build gates.
-2. Start a fresh emulator and run the specified routing, Review, live-output,
+1. Connect the running emulator and run the specified routing, Review, live-output,
    retry, recovery, and no-duplicate scenarios. Do not convert local JVM or
    compile evidence into emulator evidence.
-3. Keep corrections revision-bound, append-only, local label evidence. Explicit
+2. Keep corrections revision-bound, append-only, local label evidence. Explicit
    export and adjudication are required before approved, source-grounded,
    split-safe labels may improve the SLM or another pipeline component.
 
@@ -178,8 +177,25 @@ Verified locally for `01f3861`:
 - `./gradlew.bat :app:compileDebugAndroidTestKotlin --no-daemon`.
 
 The compiled instrumentation coverage includes separate decoded-delta and
-cumulative-output rendering, but it was not executed on an emulator. Remaining
-verification is the complete Gradle gate followed by the fresh-emulator matrix.
+cumulative-output rendering, but it was not executed on an emulator. The complete
+Gradle gate subsequently passed; the fresh-emulator matrix remains.
 Relevant sources are `AutomaticSmsProcessingActivity`,
 `HistoricalSmsProcessingActivity`, `ManualSmsProcessingObserver`,
 `HomeSyncManager`, `SmsTelemetryModels`, and `SmsTelemetryViewer`.
+
+## 2026-09-23 verification checkpoint
+
+The legacy migration test fixture was updated to register the already-shipped
+Room 7-to-8 migration when reopening its v3-upgraded store; production migration
+registration and schema were unchanged. The focused
+`./gradlew.bat :data:testDebugUnitTest --tests
+"com.pocketfinancer.data.db.AppDatabaseMigrationTest" --no-daemon` passed.
+The complete `./gradlew.bat testDebugUnitTest lintDebug assembleDebug --no-daemon`
+then passed (356 actionable tasks). This is local JVM/lint/build verification,
+not emulator or physical-device verification. The running `Pixel_9` emulator is
+currently reported as `offline` by ADB, so instrumentation and end-to-end
+runtime evidence remain pending. Next start at emulator connectivity, then run
+the targeted instrumented and synthetic-SMS scenarios. Relevant files are
+`AppDatabaseMigrationTest`, `AutomaticSmsProcessingActivity`,
+`SmsReviewRepository`, `ReviewDetailScreen`, `TransactionsScreen`, and
+`SmsTelemetryViewer`.
