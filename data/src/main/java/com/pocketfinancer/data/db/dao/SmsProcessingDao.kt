@@ -118,6 +118,22 @@ interface SmsProcessingDao {
     @Query("SELECT * FROM sms_review_cases WHERE currentOperationId = :operationId LIMIT 1")
     suspend fun getReviewCaseForOperation(operationId: String): SmsReviewCaseEntity?
 
+    @Query(
+        """
+        SELECT review.* FROM sms_review_cases AS review
+        JOIN sms_processing_operations AS operation
+          ON operation.id = review.currentOperationId
+        WHERE review.sourceId = :sourceId
+          AND review.state = 'open'
+          AND review.revision = 0
+          AND review.draftJson IS NULL
+          AND operation.contractReleaseId = 'native-integration-v5'
+        ORDER BY operation.createdAt DESC, review.updatedAt DESC, review.id DESC
+        LIMIT 1
+        """
+    )
+    suspend fun getUneditedOpenV5ReviewCaseForSource(sourceId: String): SmsReviewCaseEntity?
+
     @Query("SELECT * FROM sms_user_feedback_events WHERE actionId = :actionId")
     suspend fun getFeedbackByAction(actionId: String): SmsUserFeedbackEventEntity?
 

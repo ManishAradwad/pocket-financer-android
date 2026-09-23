@@ -14,6 +14,7 @@ import com.pocketfinancer.data.db.entity.SmsReviewCaseV2ExtensionEntity
 import com.pocketfinancer.data.db.entity.SmsSelectorAttemptEntity
 import com.pocketfinancer.data.db.entity.TransactionEntity
 import com.pocketfinancer.data.db.entity.TransactionRevisionEntity
+import org.json.JSONArray
 import org.json.JSONObject
 import java.math.BigDecimal
 import java.security.MessageDigest
@@ -556,25 +557,11 @@ class SmsProcessingStore @Inject constructor(
         v2Evidence: SmsReviewV2Evidence? = null
     ): String = database.withTransaction {
         val operation = requireOwned(claim, now)
-        val reviewCase = dao.getReviewCaseForOperation(operation.id)
-            ?: operation.parentOperationId
-                ?.let { dao.getReviewCaseForOperation(it) }
-                ?.let { existing ->
-                    val stableEventIds = runCatching {
-                        val values = JSONObject("{\"values\":${existing.stableEventIdsJson}}")
-                            .getJSONArray("values")
-                        (0 until values.length()).map { values.getString(it) }.toMutableSet()
-                    }.getOrElse { mutableSetOf() }
-                    stableEventIds += operation.stableEventId
-                    existing.copy(
-                        currentOperationId = operation.id,
-                        state = "open",
-                        reasonCodesJson = jsonArray(reasons),
-                        stableEventIdsJson = jsonArray(stableEventIds.sorted()),
-                        updatedAt = now
-                    ).also { check(dao.updateReviewCase(it) == 1) }
-                }
-            ?: SmsReviewCaseEntity(
+        val existing = dao.getReviewCaseForOperation(operation.id)
+            ?: operation.parentOperationId?.let { dao.getReviewCaseForOperation(it) }
+            ?: reusableV5Review(operation)
+        val reviewCase = when {
+            existing == null -> SmsReviewCaseEntity(
                 id = UUID.randomUUID().toString(),
                 sourceId = operation.sourceId,
                 currentOperationId = operation.id,
@@ -585,8 +572,19 @@ class SmsProcessingStore @Inject constructor(
                 stableEventIdsJson = jsonArray(listOf(operation.stableEventId)),
                 createdAt = now,
                 updatedAt = now
-            ).also { dao.insertReviewCase(it) }
-        if (operation.contractReleaseId == "native-integration-v5") {
+            ).also { check(dao.insertReviewCase(it) != -1L) }
+            existing.currentOperationId == operation.id -> existing
+            shouldPromoteReview(existing, operation) -> existing.copy(
+                currentOperationId = operation.id,
+                state = "open",
+                reasonCodesJson = jsonArray(reasons),
+                stableEventIdsJson = mergedReviewEventIds(existing, operation.stableEventId),
+                updatedAt = now
+            ).also { check(dao.updateReviewCase(it) == 1) }
+            else -> existing
+        }
+        if (operation.contractReleaseId == "native-integration-v5" &&
+            reviewCase.currentOperationId == operation.id) {
             val evidence = v2Evidence ?: SmsReviewV2Evidence(
                 furthestStage = stageForState(operation.state),
                 analyzerSuggestionsJson = "[]",
@@ -684,11 +682,14 @@ class SmsProcessingStore @Inject constructor(
     ): String {
         val existing = dao.getReviewCaseForOperation(operation.id)
             ?: operation.parentOperationId?.let { dao.getReviewCaseForOperation(it) }
+            ?: reusableV5Review(operation)
         if (existing != null) {
+            if (!shouldPromoteReview(existing, operation)) return existing.id
             val updated = existing.copy(
                 currentOperationId = operation.id,
                 state = "open",
                 reasonCodesJson = jsonArray(listOf(reason)),
+                stableEventIdsJson = mergedReviewEventIds(existing, operation.stableEventId),
                 updatedAt = now
             )
             check(dao.updateReviewCase(updated) == 1)
@@ -710,6 +711,32 @@ class SmsProcessingStore @Inject constructor(
         check(dao.insertReviewCase(review) != -1L)
         retainEmptyV2ExtensionIfNeeded(review.id, operation, now)
         return review.id
+    }
+
+    private suspend fun reusableV5Review(
+        operation: SmsProcessingOperationEntity
+    ): SmsReviewCaseEntity? = if (operation.contractReleaseId == "native-integration-v5") {
+        dao.getUneditedOpenV5ReviewCaseForSource(operation.sourceId)
+    } else {
+        null
+    }
+
+    private suspend fun shouldPromoteReview(
+        existing: SmsReviewCaseEntity,
+        operation: SmsProcessingOperationEntity
+    ): Boolean {
+        if (existing.currentOperationId == operation.id) return true
+        val current = dao.getOperation(existing.currentOperationId) ?: return false
+        return operation.createdAt >= current.createdAt
+    }
+
+    private fun mergedReviewEventIds(
+        existing: SmsReviewCaseEntity,
+        stableEventId: String
+    ): String {
+        val stored = JSONArray(existing.stableEventIdsJson)
+        val ids = (0 until stored.length()).map { stored.getString(it) }
+        return jsonArray((ids + stableEventId).distinct().sorted())
     }
 
     private suspend fun retainEmptyV2ExtensionIfNeeded(

@@ -1,6 +1,6 @@
 # Android SMS processing next steps
 
-Status: **Android local gates and focused emulator tests passed; end-to-end routing and device verification pending**
+Status: **Android gates and synthetic Pixel_9 retry/recovery checks passed; model-driven automatic save and physical-device verification pending**
 Last reconciled: 2026-09-23
 
 The shared repository `pF_slm_selection` owns the canonical architecture,
@@ -66,9 +66,10 @@ stale-owner, and lifecycle paths scrub private transient text.
 The emulator was not running during commits `fcf6614`, `f6079ff`, or `01f3861`,
 so those commits originally had only local JVM/compile verification. Subsequent
 Pixel_9 instrumentation and direct Review interaction passed as recorded below.
-Runtime token timing, partial-field interaction, a complete automatic save,
-retry/process-death behavior, accessibility, and physical-device behavior still
-need end-to-end verification.
+A complete model-driven automatic save, runtime duplicate fencing after such a
+save, full accessibility, and physical-device behavior still need end-to-end
+verification. Synthetic Review retry and controlled process recovery are checked
+below.
 
 ## Next implementation change
 
@@ -84,9 +85,11 @@ across automatic, historical, and manual processing.
 
 Planned verification next:
 
-1. Run synthetic-only routing, Review, live-output, retry, recovery, and
-   no-duplicate scenarios on the now-clean Pixel_9. Do not convert local JVM,
-   compile, or isolated component evidence into end-to-end evidence.
+1. Continue synthetic-only model/runtime checks for a complete valid posted
+   result and duplicate assessment on Pixel_9; the sampled local models have
+   only reached Review. Complete the full accessibility matrix and physical
+   Android-device checks. Keep deterministic connected store proof distinct from
+   actual model-driven saving.
 2. Keep corrections revision-bound, append-only, local label evidence. Explicit
    export and adjudication are required before approved, source-grounded,
    split-safe labels may improve the SLM or another pipeline component.
@@ -233,8 +236,10 @@ were recorded; no SMS or generated text was logged. In the existing grounded
 Review UI, selecting a specific Transactions card opened that case, explicit
 Debit fallback changed its field, and selecting the seeded existing account
 changed its account field. Confirmation correctly stayed disabled while amount
-was missing. The retained partial SLM fields have not yet been visually checked
-in Review, nor have retry or controlled process-death recovery.
+was missing. The retained partial SLM fields were then checked in the existing Review UI on
+Pixel_9: one saved exception showed separate amount and direction highlights on
+the unchanged synthetic SMS, with the account still unassigned. Retry and
+controlled process-death recovery remain open.
 
 The opt-in audit was compiled with `./gradlew.bat :app:assembleDebugAndroidTest
 --no-daemon` and run manually with `smsSyntheticAudit=true` on Pixel_9 (`OK
@@ -248,3 +253,82 @@ roadmap. Relevant files are
 `SmsReviewRepository`, `ReviewDetailScreen`, `TransactionsScreen`, and
 `SmsTelemetryViewer`, plus `SmsSyntheticRuntimeAuditTest`, `SettingsScreen`,
 and `SetupImportCardModel`.
+
+## 2026-09-23 follow-up verification checkpoint
+
+On the same original Pixel_9, a retained exception displayed separate valid SLM
+amount and direction highlights on the complete unchanged synthetic SMS. The
+account stayed visibly unassigned. This closes the visual partial-highlight
+observation for that case, not the full accessibility and editing matrix.
+
+One additional synthetic incoming alert matching the frozen prompt example was
+processed by the locally provisioned Qwen3-1.7B Q4_K_M. It reached Review with
+malformed JSON, not Transactions. The opt-in aggregate audit now reports 8
+operations (6 realtime, 2 manual), 7 invalid completions (4 strict evidence
+mismatches, 3 malformed JSON), 8 Review cases including the earlier interrupted
+operation, 0 transactions, and 1 account. Its aggregate-only output diagnostics
+found three short, open JSON fragments among the malformed outputs. Among four
+readable posted objects, only two amount and one direction spans were exact;
+account evidence was absent from the source in three and offset in one. These
+are local model/runtime observations, not a reason to relax strict grounding.
+The audit never emits SMS, generated text, IDs, or per-row predictions.
+
+The opt-in audit now adds aggregate JSON-shape and scalar-span categories.
+Its updated Android test APK compiled, and the opt-in audit passed on Pixel_9
+(1 test). A separate deterministic connected SQLCipher test verified rollback
+before settlement, successful atomic automatic persistence, encrypted reopen,
+and retry duplicate fencing. The complete data connected suite passed there
+(5 tests). This is device execution of a synthetic host/store fixture; the
+real model has still not produced a valid automatic save. The retry and
+controlled recovery results are recorded below.
+
+### Retry and controlled recovery on Pixel_9
+
+A Retry extraction action in the existing Review UI created one parent-linked
+retry operation for the same source/event and reused its Review case. Its model
+output was malformed. The aggregate audit rose from 8 to 9 operations and stayed
+at 8 Review cases, with 0 transactions. This verifies retry lineage and case
+reuse on the emulator, not a successful model-driven save.
+
+A controlled kill of the debug app process during a subsequent synthetic
+Qwen3-1.7B inference caused WorkManager to resume in a new process. The
+pre-fix audit rose from 9 to 11 operations and from 8 to 10 Review cases for
+one source: recovery had created one interrupted case and the replay had
+created a second malformed-output case. The cause was that automatic replay
+creates a fresh operation without a parent link, while Review reuse only
+looked up the current or parent operation. The store now reuses an unedited
+open v5 Review case for the same source and leaves a newer operation's reason
+and partial evidence intact when an older claim is recovered. It does not
+change stored v1-v4 release behavior or merge user-edited cases.
+
+Both replay orders and protection of a user-edited draft passed isolated
+encrypted SQLCipher tests on Pixel_9, including close/reopen, one case for each
+unedited source, current-operation selection, and v2 extension preservation. After installing the fix without wiping the debug
+app, a new synthetic alert was interrupted during active inference. The app
+restarted under a new process and completed its replay. The opt-in audit rose
+from 11 to 13 operations but only from 10 to 11 Review cases; interrupted
+operations rose from 2 to 3 and invalid completions from 9 to 10. The new
+Review reason was malformed JSON; the older interrupted claim did not replace
+it. The one duplicate case pair produced by the earlier build remains in
+this synthetic emulator data; the fix protects new unedited v5 cases.
+
+Across these sampled local-model attempts, the audit found six short, open
+unreadable JSON outputs and four readable posted objects with strict evidence
+mismatches. The frozen runtime requests grammar-constrained greedy decoding
+with a 512-token answer limit; the native API does not persist which stop
+condition ended a completion. A count-only log check found no retained
+context-limit warnings. These observations do not establish whether early
+end-of-generation or the token cap caused each open fragment. Grounding and
+automatic-save gates were unchanged. Neither sampled Qwen model produced a
+complete valid posted result; 0 model-driven transactions were saved.
+
+After the code and test changes, the full
+`./gradlew.bat testDebugUnitTest lintDebug assembleDebug --no-daemon` gate
+passed (356 actionable tasks). Pixel_9 passed 15 app UI tests, 8 encrypted
+data tests, and 2 pipeline connected tests; the opt-in audit skipped in the
+ordinary app suite and separately passed with `smsSyntheticAudit=true`
+(1 test). The deterministic connected SQLCipher fixture verifies an atomic
+automatic save, rollback, encrypted reopen, and retry duplicate fencing at
+the store layer. Actual model-driven automatic saving and runtime duplicate
+fencing remain unverified on the emulator. Full Review accessibility and a
+physical Android device remain unverified.
