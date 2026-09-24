@@ -562,7 +562,7 @@ private fun PipelineTimeline(
             title = "Stage 3: Grounded candidate selection",
             statusLabel = when {
                 stage2Done -> "Selection complete"
-                stage2Active -> "Direct non-thinking selection"
+                stage2Active -> "Selecting grounded result"
                 settledFacts.upstreamUnavailable -> "Details unavailable"
                 error -> "Status unavailable"
                 filtered -> "No transaction"

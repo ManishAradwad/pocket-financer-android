@@ -1,7 +1,21 @@
 # Android SMS processing next steps
 
 Status: **Android gates and synthetic Pixel_9 retry/recovery checks passed; model-driven automatic save and physical-device verification pending**
-Last reconciled: 2026-09-24
+Last reconciled: 2026-09-25
+
+## Direct-only SMS output invariant
+
+The Android runtime renders the selected GGUF model's chat template with thinking
+disabled. Every SMS model uses the same direct JSON path, regardless of the
+model's advertised thinking capability. A non-JSON first token aborts generation
+before a live callback. The selector also checks streamed and final output for
+thought markers across token boundaries; violating output is neither shown nor
+stored as raw attempt text. The operation stays reviewable with
+`runtime_mode_violation`. A model that cannot render the direct template or
+produce direct JSON is ineligible for this path; no thinking fallback is used.
+
+The synthetic Qwen3 emulator diagnostic and focused JVM tests cover this boundary.
+A separate physical-device and broader model matrix remains open.
 
 The shared repository `pF_slm_selection` owns the canonical architecture,
 versioned contracts, sanitized vectors, host GGUF evaluation, native-trace import,
@@ -147,9 +161,9 @@ Planned verification next:
 ## Transparency and review verification
 
 The processing UI must show the unchanged SMS, advisory analyzer evidence, model
-request, live decoded token deltas/cumulative structured output, raw result,
-validation, route, persistence result, and later owner correction as distinct
-facts. Never display invented chain of thought and never put private text in logs.
+request, one growing direct JSON output pane, validation, route, persistence
+result, and later owner correction as distinct facts. It must not display
+thought output or put private text in logs.
 
 Re-run accessibility coverage for the full source SMS, separate amount/direction/
 account/counterparty highlights, screen-reader labels, focus order, and the

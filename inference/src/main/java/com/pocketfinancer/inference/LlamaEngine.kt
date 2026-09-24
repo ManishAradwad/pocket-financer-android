@@ -75,7 +75,7 @@ internal class LlamaEngine(
                 handle = handle,
                 operationId = operationId,
                 messages = request.messages
-            ) ?: request.fallbackPrompt
+            ) ?: throw IllegalStateException("non_thinking_template_unavailable")
 
             if (wasStopped(handle, operationId)) {
                 return SlmExtractionResult.Stopped(spec)
@@ -152,7 +152,8 @@ internal class LlamaEngine(
             temperature = 0.0f,
             stop = null,
             keepCache = prepared.keepCache,
-            callback = request.jsonCallback
+            callback = request.jsonCallback,
+            requireJsonObjectStart = true
         )
         return extractionResult(
             handle = handle,
@@ -255,7 +256,8 @@ internal class LlamaEngine(
                 temperature = 0.0f,
                 stop = null,
                 keepCache = false,
-                callback = null
+                callback = null,
+                requireJsonObjectStart = false
             )
             if (!wasStopped(handle, operationId)) {
                 storage.deleteStaleSessions(spec, prefixHash)
@@ -385,7 +387,8 @@ internal class LlamaEngine(
         temperature: Float,
         stop: String?,
         keepCache: Boolean,
-        callback: SlmTokenCallback?
+        callback: SlmTokenCallback?,
+        requireJsonObjectStart: Boolean
     ): String
 
     private external fun nativeApplyChatTemplate(

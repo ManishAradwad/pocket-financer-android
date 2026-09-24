@@ -686,7 +686,7 @@ class SettingsViewModel @Inject constructor(
 
         try {
             _state.value = _state.value.copy(
-                testProgress = "Running one direct, non-thinking Candidate Selector pass..."
+                testProgress = "Running one Candidate Selector pass..."
             )
             val testLease = slmRuntime.acquire(SlmRuntimeOwner.SETTINGS_TEST, spec)
             lease = testLease
