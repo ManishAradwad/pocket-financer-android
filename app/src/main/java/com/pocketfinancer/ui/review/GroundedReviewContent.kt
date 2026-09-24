@@ -119,6 +119,9 @@ internal fun GroundedReviewContent(
                     },
                     label = { Text(field.label) },
                     colors = AssistChipDefaults.assistChipColors(
+                        labelColor = if (selections[field] != null) {
+                            ReviewHighlightTextColor
+                        } else MaterialTheme.colorScheme.onSurface,
                         containerColor = if (selections[field] != null) {
                             field.highlightColor()
                         } else MaterialTheme.colorScheme.surface
@@ -303,6 +306,9 @@ private fun AutomaticPolicyReviewContent(
                     },
                     label = { Text(field.label) },
                     colors = AssistChipDefaults.assistChipColors(
+                        labelColor = if (selections[field] != null) {
+                            ReviewHighlightTextColor
+                        } else MaterialTheme.colorScheme.onSurface,
                         containerColor = if (selections[field] != null) {
                             field.highlightColor()
                         } else MaterialTheme.colorScheme.surface
@@ -491,7 +497,8 @@ private fun ReviewFieldRow(
                     if (highlighted) field.highlightColor() else MaterialTheme.colorScheme.surface,
                     RoundedCornerShape(8.dp)
                 )
-                .padding(8.dp)
+                .padding(8.dp),
+            color = if (highlighted) ReviewHighlightTextColor else MaterialTheme.colorScheme.onSurface
         )
         if (assigned) TextButton(onClick = onClear) { Text("Clear") }
     }

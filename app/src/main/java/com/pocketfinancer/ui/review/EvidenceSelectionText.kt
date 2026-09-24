@@ -30,6 +30,8 @@ enum class ReviewField(val label: String) {
     COUNTERPARTY("Counterparty")
 }
 
+internal val ReviewHighlightTextColor = Color(0xFF1B1B1F)
+
 @Composable
 fun EvidenceSelectionText(
     source: String,
@@ -76,7 +78,7 @@ fun EvidenceSelectionText(
             }.getOrNull()?.let(onSelectionChanged)
         },
         readOnly = true,
-        textStyle = TextStyle(color = Color(0xFF1B1B1F)),
+        textStyle = TextStyle(color = ReviewHighlightTextColor),
         modifier = modifier
             .fillMaxWidth()
             .semantics {
